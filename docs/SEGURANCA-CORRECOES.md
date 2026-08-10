@@ -2,6 +2,10 @@
 
 > Complementa `docs/handoff-codex/`, que permanece como fotografia do repositório em 09/08/2026.
 > Este documento registra apenas o que mudou depois daquela fotografia. Nenhum segredo é reproduzido aqui.
+>
+> **Commits desta sequência:** `4caf155` (saneamento do histórico, seção 1) · `ef3e589` (credenciais
+> expostas e placeholder, seções 2 a 7) · `c6e2b78` (bypass de autenticação, seção 8).
+> **Estado das pendências:** A e C resolvidos; B, D, E, F, G, H, I e J em aberto.
 
 ## Contexto
 
@@ -125,7 +129,9 @@ Adicionado a `tests/core.test.js`: `tela de login não traz credenciais pré-pre
 exemplo funcional`. Ele garante que os campos de login não voltem a ter atributo `value`, que `required`
 seja preservado, e que o placeholder de `COEVO_BACKUP_KEY` permaneça vazio e não funcional.
 
-**Suíte: 24 → 25 testes, todos passando.** Documentos do handoff que citam "24 testes" refletem o
+A seção 8 acrescentou um segundo teste de regressão, sobre autenticação.
+
+**Suíte: 24 → 26 testes, todos passando.** Documentos do handoff que citam "24 testes" refletem o
 snapshot de 09/08/2026 e não foram reescritos.
 
 ## 7. Integridade de `data/store.json`
@@ -141,67 +147,138 @@ bytes   9758979
 
 Nenhum dado jurídico, orçamentário, de auditoria, de projeto ou de usuário foi alterado.
 
+## 8. Bypass de autenticação `usr-*` — CORRIGIDO
+
+Commit `c6e2b78`. Substitui integralmente o que este documento antes registrava como pendência A.
+
+### Causa raiz
+
+Duas falhas que se sustentavam mutuamente:
+
+**Primária — lacuna na emissão de token.** `sessions.set()` com token de sessão existia em um único
+lugar: `/api/auth/mfa`. O `/api/auth/login` só criava *challenge*. Logo, para quem não passava por MFA
+não existia caminho legítimo de sessão. `requireMfa(user)` retorna `user.mfa && role ∈ {diretoria,
+administrador, lider}`, e `usr-miguel` (colaborador, `mfa: false`) era o único usuário nessa condição —
+assim como qualquer cadastro aprovado, que nasce com `mfa: false`.
+
+**Secundária — dois atalhos criados para contornar a lacuna.** `getUser()` aceitava qualquer bearer
+iniciado por `usr-` quando `NODE_ENV !== 'production'`; `authHeaders()` enviava `Bearer usr-diretoria`
+na ausência de token; e `submitLogin()` marcava `authenticated = true` mesmo sem token.
+
+Consequência composta: Miguel autenticava, não recebia token e o frontend passava a operar como
+**diretoria**. E, independentemente de login, qualquer requisição com `Bearer usr-diretoria` era aceita
+sem credencial alguma.
+
+Um terceiro vetor foi descoberto durante os testes: como `sessions` guarda challenge e token no mesmo
+mapa, e `getUser()` só verificava `expiresAt`, **o challenge de MFA funcionava como token de sessão**.
+Confirmado empiricamente antes da correção (`HTTP 200` para `Bearer <challenge>`).
+
+### Correção aplicada
+
+A ordem importou: fechar a lacuna primeiro, remover o atalho depois.
+
+1. **`/api/auth/login` emite token quando `requireMfa()` é falso**, reaproveitando a mesma mecânica e o
+   mesmo TTL (`COEVO_SESSION_MS`) de `/api/auth/mfa`. Quem exige MFA mantém o fluxo idêntico, e nenhum
+   challenge é criado no caminho sem MFA.
+2. **`getUser()` deixou de aceitar `Bearer usr-*`.** Passou a existir um único caminho de autenticação:
+   sessão válida e não expirada.
+3. **`getUser()` rejeita challenge como token**, via `!session.challenge`.
+4. **`authHeaders()` não envia mais `Authorization`** quando não há token.
+5. **`submitLogin()` guarda o token** antes de marcar a sessão como autenticada, e falha explicitamente
+   se o login não devolver token.
+6. **`IS_PRODUCTION` removido** — ficou sem uso, e mantê-lo sugeriria autenticação condicionada a
+   ambiente, o que seria enganoso.
+
+`submitMfa()` e `logout()` já tratavam `window.__coevoToken` corretamente e não foram alterados.
+
+Diff total: `server.js` +3/−4 · `public/app.js` +2/−2 · `tests/core.test.js` +10.
+
+### Estado antes/depois
+
+| | Antes | Depois |
+|---|---|---|
+| Caminhos de emissão de token | 1 (`/api/auth/mfa`) | 2 (`/api/auth/mfa` e login sem MFA) |
+| Caminhos de autenticação aceitos | 2 (sessão **ou** `Bearer usr-*`) | 1 (somente sessão válida) |
+| `Bearer usr-*` | Concedia acesso sem credencial | **401** |
+| Challenge como token | Concedia acesso | **401** |
+| Frontend sem token | Enviava `Bearer usr-diretoria` | Não envia `Authorization` |
+| Usuário `mfa: false` | Autenticava sem token e operava como diretoria | Recebe token e opera com o próprio papel |
+| Fluxo `mfa: true` | login → challenge → MFA → token | **Idêntico** |
+
+### Miguel — escalonamento eliminado sem tocar o cadastro
+
+| Atributo | Antes | Depois |
+|---|---|---|
+| Token no login | Nenhum | Emitido |
+| `/api/me` → papel efetivo | **diretoria** (escalonamento) | **colaborador** |
+| `role` no cadastro | `colaborador` | `colaborador` — **intacto** |
+| `mfa` no cadastro | `false` | `false` — **intacto** |
+| Módulos | `["*"]` (indevido) | `["central","projetos","agenda","juridico","ti"]` |
+| Ações | incluía `approve`, `archive`, `restore`, `export` | `["read","create","update"]` |
+| `/api/audit` | 200 (indevido) | **403** |
+| `/api/projects` | 200 | **200 — preservado** |
+| `approveAgreement` / `changeApprovalRule` / `archive` | escalados | `false` |
+| `edit` (execução legítima) | `true` | `true` — **preservado** |
+
+### Validação
+
+Bateria de 43 verificações, executada em instância isolada na porta 3008 **antes** (24/31, com as 7
+falhas correspondendo exatamente às vulnerabilidades) e **depois** (43/43), e novamente na porta 3007
+após o reinício da instância real (**43/43**).
+
+Cobertura: fluxo completo com MFA · login sem MFA emitindo token · papel real do Miguel · senha errada e
+usuário inexistente rejeitados · `Bearer usr-miguel`, `usr-juridico`, `usr-diretoria`, `usr-ti`,
+`usr-qualquercoisa` e `usr-` todos **401** · challenge como bearer **401** · token válido em seis rotas
+protegidas · ausência de header, token aleatório e bearer vazio **401** · RBAC preservado, com
+colaborador recebendo **403** em `/api/audit` e no dashboard de TI e **200** em `/api/projects` ·
+endpoints públicos inalterados.
+
+Expiração real validada em instância dedicada com `COEVO_SESSION_MS=2500`: token do Miguel e token de
+diretoria passam a **401** após expirar, sem nenhum fallback de resgate.
+
+Confirmação direta na instância real após o reinício: `Bearer usr-diretoria` → **HTTP 401**.
+
+### Preservação verificada
+
+`data/store.json` **íntegro**, byte a byte, antes e depois do reinício:
+`sha256 e2779af0…d879a57` · `md5 08942bf3…627042` · `9758979 bytes`.
+
+Nenhum usuário, papel, MFA, permissão, dashboard, filtro, projeto ou layout foi alterado. Os quatro
+usuários mantêm `id`, `role`, `mfa` e `department` originais; `ROLES` intacto.
+
+### Consequência aceita
+
+`usr-juridico` deixou de ser alcançável. Ele compartilha o e-mail de `usr-diretoria`, e
+`store.users.find()` sempre retorna o primeiro; portanto só era acessível via o bypass. A gestão aceitou
+essa consequência, sem alterar cadastro, e-mail, papel ou MFA. Registrado como pendência J.
+
 ---
 
 # Pendências que exigem decisão humana
 
-## A. Bypass de autenticação `usr-*` — NÃO CORRIGIDO
+## A. Bypass de autenticação `usr-*` — ✅ RESOLVIDO
 
-**Mecanismo.** `server.js:77` aceita qualquer bearer iniciado por `usr-` como identidade de usuário
-quando `NODE_ENV !== 'production'`. `public/app.js:40` envia `Bearer usr-diretoria` como fallback quando
-não há token. Com `NODE_ENV=development`, a API inteira fica acessível sem credencial.
+Corrigido no commit `c6e2b78`. **Ver seção 8** para causa raiz, alterações, validação e estado
+antes/depois. Mantido aqui apenas como referência, porque a letra é citada em decisões anteriores.
 
-**Evidência coletada em instância isolada:**
+Resumo: `Bearer usr-*` retorna **401**; usuários com `mfa: false` recebem token legítimo no login;
+challenge de MFA não é aceito como token; o escalonamento acidental do Miguel desapareceu sem alteração
+de cadastro.
 
-```
-Bearer usr-diretoria  → HTTP 200  Cristiane Carneiro Rabelo (diretoria)
-Bearer usr-miguel     → HTTP 200  Miguel (colaborador)
-Bearer usr-ti         → HTTP 200  Líder de Tecnologia (lider)
-```
-
-**Por que não foi corrigido.** Existe **um único caminho** que emite token de sessão: `/api/auth/mfa`
-(`server.js:195`). Para usuários com `mfa: false` — caso de `usr-miguel` e de qualquer cadastro
-aprovado, que nasce com `mfa: false` — o login responde `mfaRequired: false` **sem token**, e
-`submitLogin()` marca `authenticated = true` mesmo assim. O bypass é, portanto, **estrutural** para
-esses usuários.
-
-Confirmado empiricamente:
-
-```
-login miguel@coevo.local → HTTP 200  mfaRequired=false  token no corpo: NAO
-```
-
-Remover o bypass sem adicionar um caminho de emissão de token **bloquearia o acesso do Miguel**.
-Adicionar esse caminho é uma decisão sobre o contrato de autenticação. Além disso, a correção altera o
-acesso **efetivo** do Miguel: hoje ele opera como diretoria por escalonamento acidental; corrigido,
-passa a operar como colaborador — que é o comportamento correto, mas muda o que ele vê na prática.
-
-Ambos os pontos acionam a condição de parada definida pela gestão, então a correção ficou pendente.
-
-**Correção proposta (4 alterações coordenadas, mínimas):**
-
-1. `server.js` — `/api/auth/login` emite token diretamente quando `requireMfa(user)` é falso, fechando
-   a lacuna que torna o bypass necessário.
-2. `public/app.js` — `submitLogin()` armazena esse token em `window.__coevoToken` e só marca
-   `authenticated = true` se houver token.
-3. `public/app.js:40` — remover o fallback `Bearer usr-diretoria`; sem token, não enviar `Authorization`.
-4. `server.js:77` — remover a aceitação de `Bearer usr-*`.
-
-**Rollback:** `git checkout -- server.js public/app.js` restaura ao commit de segurança. Ambos os
-arquivos estão versionados.
-
-**Efeito colateral positivo:** corrige também o escalonamento de privilégio do item C.
-
-## B. RBAC de `GET /api/entities/:type` — NÃO CORRIGIDO
+## B. RBAC de `GET /api/entities/:type` — NÃO CORRIGIDO — **PENDENTE**
 
 `server.js:300` não aplica `allowed()`. `POST`, `PATCH`, `DELETE` e `/restore` aplicam; apenas o `GET`
 não. Qualquer usuário autenticado lê qualquer coleção de `records`, contornando a permissão de módulo
 verificada em `/api/legal/*`.
 
-**Evidência:** `Bearer usr-miguel` em `/api/entities/processos` → **HTTP 200 com 273 registros**.
+**Evidência original:** `Bearer usr-miguel` em `/api/entities/processos` → **HTTP 200 com 273
+registros**. Aquele vetor específico deixou de funcionar com a correção da seção 8, mas **a lacuna
+permanece**: um usuário autenticado legitimamente, com token válido, continua lendo qualquer coleção de
+`records` sem verificação de módulo. A correção da seção 8 fechou o acesso sem credencial, não este
+ponto.
 
-**Por que não foi corrigido.** Julguei que se trata de lacuna **adjacente** ao bypass `usr-*`, não parte
-dele — e a autorização para tocar este ponto estava condicionada a ser parte direta. Há também uma
+**Por que não foi corrigido.** Trata-se de lacuna **adjacente** ao bypass `usr-*`, não parte dele — e a
+autorização para tocar este ponto estava condicionada a ser parte direta. Há também uma
 sutileza de projeto: `allowed(user, type)` compara o nome da coleção com a lista de módulos do perfil, e
 `processos` não é um módulo. A correção literal faria `GET /api/entities/*` retornar 403 para `lider` e
 `colaborador` em praticamente todos os tipos. Isso é *deny-by-default* e consistente com os outros
@@ -214,25 +291,27 @@ depende da rota. Não há consumidor externo conhecido.
 allowlist explícita de tipos com o módulo correspondente, eliminando a coincidência frágil entre nome de
 coleção e nome de módulo.
 
-## C. Escalonamento de privilégio de usuário sem MFA — NÃO CORRIGIDO
+## C. Escalonamento de privilégio de usuário sem MFA — ✅ RESOLVIDO
 
-`submitLogin()` marca `authenticated = true` sem token quando `mfaRequired` é falso; o fallback então
-envia o bearer da diretoria. Consequência: **Miguel autentica e opera com permissões de diretoria.**
-Resolvido pelos itens 1–3 da correção proposta em A.
+Corrigido no commit `c6e2b78`, junto com o item A. `submitLogin()` passou a exigir token antes de marcar
+a sessão como autenticada, e o fallback privilegiado foi removido. **Miguel autentica como colaborador**,
+com `role` e `mfa` intactos no cadastro. Ver seção 8.
 
-## D. `requireMfa()` depende da flag do próprio usuário
+## D. `requireMfa()` depende da flag do próprio usuário — **PENDENTE**
 
-`server.js:91` exige MFA apenas se `user.mfa` já for verdadeiro. Um usuário privilegiado com
-`mfa: false` não é obrigado a cadastrar segundo fator. A correção adequada é exigir MFA por papel.
-Envolve política de identidade — fora do escopo autorizado.
+`server.js` exige MFA apenas se `user.mfa` já for verdadeiro. Um usuário privilegiado com `mfa: false`
+não é obrigado a cadastrar segundo fator. Depois da seção 8 isso ganhou um efeito adicional: tal usuário
+receberia **token direto no login**, sem segundo fator. Nenhum usuário atual está nessa situação — os três
+perfis privilegiados têm `mfa: true` —, mas o caminho está aberto. A correção adequada é exigir MFA por
+papel, não pela flag do próprio usuário. Envolve política de identidade — fora do escopo autorizado.
 
-## E. Senha global, sem senha individual
+## E. Senha global, sem senha individual — **PENDENTE**
 
 `COEVO_DEMO_PASSWORD` é compartilhada por todos os usuários e comparada por SHA-256 puro, sem salt e
 sem KDF. Cadastros aprovados recebem `temporaryPassword: true`, mas não existe fluxo de definição de
 senha. Correção estrutural: senha por usuário com Argon2id ou bcrypt.
 
-## F. Cópias do acervo fora do repositório
+## F. Cópias do acervo fora do repositório — **PENDENTE**
 
 Descobertas durante a varredura, em `Documentos`:
 
@@ -246,17 +325,15 @@ antiga continuam existindo nessas cópias, junto com `MONDAY_TOKEN` e `COEVO_MFA
 vigentes. O acervo jurídico completo existe em mais três arquivos de 9,7 MB. Nada foi tocado nessas
 pastas.
 
-## G. Pasta sincronizada pelo OneDrive
+## G. Pasta sincronizada pelo OneDrive — **PENDENTE**
 
 O projeto está sob `OneDrive`. Exclusões locais não removem cópias já replicadas: o OneDrive mantém
 lixeira na nuvem (~30 dias) e histórico de versões. Aplica-se ao `.env.bak` já excluído, ao `.env`, ao
 `data/store.json` e ao `BACKUP-PATRONO-DADOS.json`. Solução de fundo: mover o projeto para fora da
 pasta sincronizada.
 
-## H. Demais itens pré-existentes, sem alteração
+## H. Demais itens pré-existentes, sem alteração — **PENDENTES**
 
-- Duas vulnerabilidades altas em `image-size`, transitiva de `pptxgenjs`; a correção implica downgrade
-  major e exige revalidar a exportação.
 - `MONDAY_TOKEN` duplicado no `.env` (linhas 9 e 18) com valores idênticos — inofensivo, pois a primeira
   ocorrência prevalece no parser.
 - `DATABASE_URL` no `.env` é igual ao exemplo, com marcador no lugar da senha: `/api/health` reporta
@@ -265,10 +342,33 @@ pasta sincronizada.
   funcionais, sujeitos ao mesmo problema já corrigido em `COEVO_BACKUP_KEY`.
 - Ausência de rate limiting, limite de corpo, CSRF, CSP e demais cabeçalhos de segurança.
 - Auditoria no mesmo arquivo mutável dos dados, sem append-only nem assinatura.
+- `/api/legal/*` não verifica módulo: qualquer usuário autenticado lê as coleções jurídicas. Mesma
+  natureza do item B, em outra rota.
+
+## I. Vulnerabilidades de dependência — **PENDENTE**
+
+Duas vulnerabilidades de severidade alta em `image-size`, dependência transitiva de `pptxgenjs`
+(loops infinitos em parsers ICNS, JXL e HEIF). A correção disponível instala `pptxgenjs@1.1.5` —
+**downgrade major** — e exige revalidar a geração de PPTX e PDF antes de aceitar.
+
+## J. E-mail duplicado `usr-diretoria` / `usr-juridico` — **PENDENTE**
+
+Os dois usuários compartilham `juridico@coevoconstrutora.com.br`. Como o login resolve por
+`store.users.find()`, o primeiro registro sempre vence: **`usr-diretoria`**. Consequências:
+
+- `usr-juridico` nunca foi alcançável pelo fluxo normal de login;
+- até o commit `c6e2b78` ele era acessível apenas via `Bearer usr-juridico`;
+- depois da correção, **não tem nenhum caminho de acesso**.
+
+A gestão aceitou essa consequência. O saneamento exige atribuir um e-mail próprio ao perfil — alteração
+de cadastro de usuário, expressamente fora do escopo autorizado até aqui. Nada foi alterado: cadastro,
+e-mail, papel e MFA permanecem intactos.
 
 ## Ações operacionais pendentes para a gestão
 
 1. Guardar os novos valores de `COEVO_DEMO_PASSWORD` e `COEVO_BACKUP_KEY`, lidos do `.env`, em
-   gerenciador de senhas. A senha é global — Miguel também precisará dela.
+   gerenciador de senhas. A senha é global — **Miguel precisará dela** para autenticar, e passará a ver
+   a plataforma com as permissões corretas de colaborador, sem Auditoria, Logs, Backup nem o dashboard
+   de TI. Esse é o comportamento correto; o acesso anterior era escalonamento acidental.
 2. Esvaziar a lixeira do OneDrive e revisar o histórico de versões.
-3. Decidir sobre as pendências A a G.
+3. Decidir sobre as pendências **B, D, E, F, G, H, I e J**. Os itens A e C estão resolvidos.
