@@ -1,0 +1,69 @@
+const { getDashboardDefinition } = require('./dashboard-model');
+
+const moduleLabels = { processos: 'Processos judiciais', notificacoes: 'Notificações', contratos: 'Contratos', honorarios: 'Honorários', distratos: 'Distratos', compraVenda: 'Compra e venda', transferenciaIntermediaria: 'Transferência intermediada' };
+const recordList = (store, key) => (store.records?.[key] || []).filter(row => !row.deletedAt);
+const memory = (source, competence, recordCount, rule, lastUpdated) => ({ source, competence, lastUpdated: lastUpdated || null, recordCount, rule, ruleVersion: 'COEVO-DASH-1.0' });
+const ready = (id, data, meta) => ({ id, state: 'ready', data, memory: meta });
+const pending = (id, source, competence, rule = 'Indicador será calculado após a integração da fonte.') => ({ id, state: 'integration_pending', data: null, memory: memory(source, competence, 0, rule, null) });
+const empty = (id, source, competence, rule) => ({ id, state: 'empty', data: null, memory: memory(source, competence, 0, rule, null) });
+
+function financeRows(store) {
+  const saved = Array.isArray(store.financials) ? store.financials : [];
+  return (store.departments || []).map(department => {
+    const b = department.budget || {}, existing = saved.find(row => row.departmentId === department.id) || {};
+    const budget = Number(existing.budget ?? b.budgeted), actual = Number(existing.actual ?? b.realized), planned = Number(existing.planned ?? b.planned), committed = Number(existing.committed ?? b.committed);
+    return { departmentId: department.id, departmentName: department.name, budget: Number.isFinite(budget) ? budget : null, planned: Number.isFinite(planned) ? planned : null, committed: Number.isFinite(committed) ? committed : null, actual: Number.isFinite(actual) ? actual : null, executionPercentage: Number.isFinite(budget) && budget > 0 && Number.isFinite(actual) ? actual / budget : null, source: existing.source || department.source || 'Origem não informada' };
+  });
+}
+
+function latestSync(store) { return (store.mondayRuns || []).filter(run => run.finishedAt).sort((a, b) => String(b.finishedAt).localeCompare(String(a.finishedAt)))[0]?.finishedAt || null; }
+function processStatus(row) { const value = String(row.columnsByTitle?.["'MEU TRABALHO'"] || row.columnsByTitle?.['STATUS (para comitê)'] || row.columnsByTitle?.STATUS || ''); return /finaliz|encerr|baix|extint|arquiv/i.test(value) ? 'Finalizado' : /acordo/i.test(value) ? 'Acordo' : /acompanha/i.test(value) ? 'Em acompanhamento' : /andamento|suspenso/i.test(value) ? 'Em andamento' : 'A classificar'; }
+function processDate(row) { return row.columnsByTitle?.['CITAÇÃO/PROTOCOLO'] || row.columnsByTitle?.DATA || String(row.createdAt || '').slice(0, 10) || null; }
+function activeProcesses(store) { return recordList(store, 'processos').filter(row => processStatus(row) !== 'Finalizado'); }
+
+function dashboardPayload(store, id, query = {}) {
+  const definition = getDashboardDefinition(id); if (!definition) return null;
+  const competence = query.competence || new Date().toISOString().slice(0, 7), updated = latestSync(store), finance = financeRows(store);
+  const byDepartment = departmentId => finance.find(row => row.departmentId === departmentId);
+  const widgets = {};
+  const putBudget = (widgetId, row) => { widgets[widgetId] = row ? ready(widgetId, row, memory(row.source, competence, 1, 'Orçamento, planejado, comprometido e realizado consolidados por departamento.', updated)) : empty(widgetId, 'Cadastro financeiro', competence, 'Não há orçamento cadastrado para este departamento.'); };
+
+  if (id === 'executive') {
+    const processes = activeProcesses(store), upcoming = store.agenda || [];
+    widgets['department-summary'] = ready('department-summary', finance.map(row => ({ ...row, activeProcesses: row.departmentId === 'dep-juridico' ? processes.length : null, commitments: upcoming.filter(event => event.department === row.departmentName || (row.departmentName === 'TI' && event.department === 'Tecnologia')).length })), memory('Financeiro departamental + Monday + Agenda', competence, finance.length, 'Um resumo por departamento permitido ao perfil.', updated));
+    widgets['budget-comparison'] = ready('budget-comparison', finance, memory('Financeiro departamental', competence, finance.length, 'Comparação entre planejado, orçamento e realizado por departamento.', updated));
+    widgets['upcoming-deadlines'] = upcoming.length ? ready('upcoming-deadlines', upcoming.slice(0, 8), memory('Agenda', competence, upcoming.length, 'Compromissos futuros ordenados por data.', updated)) : empty('upcoming-deadlines', 'Agenda', competence, 'Nenhum compromisso cadastrado.');
+    widgets['attention-list'] = ready('attention-list', [{ label: 'Processos ativos', value: processes.length, target: 'legal' }, { label: 'Registros sem classificação', value: processes.filter(row => processStatus(row) === 'A classificar').length, target: 'legal' }], memory('Monday', competence, processes.length, 'Contagem da carteira ativa e de cadastros a classificar.', updated));
+    widgets['decision-list'] = (store.committees || []).length ? ready('decision-list', store.committees.slice(-6).reverse(), memory('Comitês', competence, store.committees.length, 'Últimas decisões registradas em comitê.', updated)) : empty('decision-list', 'Comitês', competence, 'Nenhuma decisão registrada.');
+  } else if (id === 'legal') {
+    const all = recordList(store, 'processos'), active = activeProcesses(store), now = new Date(), soon = new Date(now.getTime() + 30 * 86400000), deadlines = active.filter(row => { const date = new Date(processDate(row)); return !Number.isNaN(date.valueOf()) && date <= soon; });
+    widgets['active-processes'] = ready('active-processes', { value: active.length, label: 'Processos ativos', target: 'processos' }, memory('Monday · Processos judiciais', competence, all.length, 'Todos os processos sem status finalizado.', updated));
+    putBudget('legal-budget', byDepartment('dep-juridico'));
+    widgets['legal-risk'] = ready('legal-risk', [{ label: 'Prazos críticos', value: deadlines.length }, { label: 'A classificar', value: active.filter(row => processStatus(row) === 'A classificar').length }], memory('Monday', competence, all.length, 'Riscos operacionais baseados em prazo e classificação.', updated));
+    widgets['legal-attention'] = ready('legal-attention', Object.entries(moduleLabels).map(([key, label]) => ({ label, value: recordList(store, key).length, target: key })), memory('Monday', competence, Object.keys(moduleLabels).reduce((sum, key) => sum + recordList(store, key).length, 0), 'Volumes por pasta jurídica sincronizada.', updated));
+    widgets['legal-quality'] = ready('legal-quality', { classified: active.filter(row => processStatus(row) !== 'A classificar').length, total: active.length }, memory('Monday', competence, active.length, 'Percentual de processos ativos com status reconhecido.', updated));
+    widgets['legal-deadlines'] = deadlines.length ? ready('legal-deadlines', deadlines.slice(0, 8).map(row => ({ title: row.title, date: processDate(row), department: 'Jurídico' })), memory('Monday', competence, deadlines.length, 'Prazos da carteira ativa até 30 dias.', updated)) : empty('legal-deadlines', 'Monday', competence, 'Nenhum prazo crítico identificado.');
+  } else if (id === 'ti') {
+    widgets['ti-projects'] = pending('ti-projects', 'Sistema de projetos de TI', competence);
+    widgets['ti-tickets'] = pending('ti-tickets', 'Sistema de chamados', competence);
+    putBudget('ti-budget', byDepartment('dep-ti'));
+    widgets['ti-progress'] = pending('ti-progress', 'Roadmap de Tecnologia', competence);
+    const events = (store.agenda || []).filter(event => event.department === 'TI' || event.department === 'Tecnologia');
+    widgets['ti-deadlines'] = events.length ? ready('ti-deadlines', events, memory('Agenda', competence, events.length, 'Compromissos do departamento de Tecnologia.', updated)) : empty('ti-deadlines', 'Agenda', competence, 'Nenhum compromisso de Tecnologia cadastrado.');
+    widgets['ti-quality'] = pending('ti-quality', 'CMDB / Service Desk', competence);
+  } else if (id === 'engineering') {
+    widgets['engineering-progress'] = pending('engineering-progress', 'Sienge / planejamento de obras', competence);
+    widgets['engineering-budget'] = pending('engineering-budget', 'Sienge', competence);
+    widgets['engineering-risk'] = pending('engineering-risk', 'Gestão de obras', competence);
+    widgets['engineering-quality'] = pending('engineering-quality', 'Sienge', competence);
+  } else if (id === 'budget') {
+    widgets['budget-all'] = ready('budget-all', finance, memory('Financeiro departamental', competence, finance.length, 'Comparação financeira por departamento.', updated));
+    widgets['budget-ranking'] = ready('budget-ranking', [...finance].sort((a, b) => (b.executionPercentage || 0) - (a.executionPercentage || 0)), memory('Financeiro departamental', competence, finance.length, 'Ranking por percentual de execução.', updated));
+    widgets['budget-quality'] = ready('budget-quality', { complete: finance.filter(row => Number.isFinite(row.budget) && Number.isFinite(row.actual)).length, total: finance.length }, memory('Financeiro departamental', competence, finance.length, 'Departamentos com orçamento e realizado informados.', updated));
+  } else {
+    for (const item of definition.widgets) widgets[item.id] = pending(item.id, id === 'strategy' ? 'Planejamento estratégico' : id === 'projects' ? 'Portfólio de projetos' : 'Matriz corporativa de riscos', competence);
+  }
+  return { dashboard: definition, filters: { competence, period: query.period || 'portfolio' }, widgets, generatedAt: new Date().toISOString() };
+}
+
+module.exports = { dashboardPayload, financeRows, memory };

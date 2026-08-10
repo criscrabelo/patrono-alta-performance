@@ -1,0 +1,14 @@
+data/store.json
+data/exports/
+node_modules/
+.env
+.env.*
+!.env.example
+coverage/
+
+# Backup do estado operacional (dados juridicos reais) - manter local, fora do Git
+BACKUP-PATRONO-DADOS.json
+
+# Capturas da interface com dados de producao (PII de clientes e numeros CNJ)
+# Mantidas localmente como referencia visual oficial do estado aprovado.
+docs/handoff-codex/screenshots/
