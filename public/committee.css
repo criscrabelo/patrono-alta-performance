@@ -1,0 +1,106 @@
+/* Comitê Jurídico — cockpit mensal executivo.
+   Complementa dashboard.css sem redefinir nenhuma regra existente.
+   Paleta e tipografia herdadas da identidade COEVO já aprovada. */
+
+.committee{display:flex;flex-direction:column;gap:18px}
+
+/* ---------- cabeçalho ---------- */
+.committee-hero{background:linear-gradient(135deg,#0b1f26,#12333c);border-radius:16px;padding:22px 26px;color:#fff;display:flex;flex-wrap:wrap;gap:18px;align-items:flex-start;justify-content:space-between}
+.committee-hero .eyebrow{color:#7fd8e4;letter-spacing:.12em;font-size:11px;font-weight:700;text-transform:uppercase}
+.committee-hero h1{margin:6px 0 4px;font-size:28px;line-height:1.15;font-weight:800}
+.committee-hero p{margin:0;color:#bcdfe6;font-size:13px;max-width:52ch}
+.committee-hero-side{display:flex;flex-direction:column;gap:10px;align-items:flex-end}
+.committee-back{background:rgba(255,255,255,.12);color:#fff;border:1px solid rgba(255,255,255,.24);border-radius:9px;padding:8px 14px;font-size:12.5px;font-weight:600;cursor:pointer}
+.committee-back:hover{background:rgba(255,255,255,.2)}
+
+.committee-status{display:inline-flex;align-items:center;gap:8px;border-radius:999px;padding:7px 14px;font-size:12px;font-weight:700;letter-spacing:.02em;border:1px solid transparent}
+.committee-status .dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto}
+.committee-status.preparacao{background:rgba(255,255,255,.1);color:#ffd9a0;border-color:rgba(255,193,105,.45)}
+.committee-status.preparacao .dot{background:#ffbe69}
+.committee-status.revisao{background:rgba(255,255,255,.1);color:#a9e0ff;border-color:rgba(120,190,235,.45)}
+.committee-status.revisao .dot{background:#6cb8e8}
+.committee-status.fechado{background:rgba(255,255,255,.1);color:#9ff0d2;border-color:rgba(90,215,175,.45)}
+.committee-status.fechado .dot{background:#4ed3a6}
+.committee-competence{font-size:12px;color:#bcdfe6}
+.committee-competence b{color:#fff;font-size:15px;display:block;margin-top:2px}
+
+/* ---------- barra de ações ---------- */
+.committee-actions{display:flex;flex-wrap:wrap;gap:8px;background:#fff;border:1px solid #e3ebee;border-radius:12px;padding:10px 12px}
+.committee-action{display:inline-flex;align-items:center;gap:7px;border-radius:9px;border:1px solid #d5e2e6;background:#fff;color:#123;padding:8px 13px;font-size:12.5px;font-weight:600;cursor:pointer;white-space:nowrap}
+.committee-action:hover{border-color:#20b5c7;color:#0d6b78}
+.committee-action .ico{color:#20b5c7;font-size:13px;line-height:1}
+.committee-action.primary{background:#137f91;border-color:#137f91;color:#fff}
+.committee-action.primary:hover{background:#0f6b7a;color:#fff}
+.committee-action.primary .ico{color:#bdf0f7}
+.committee-action[disabled]{cursor:not-allowed;opacity:.55;background:#f6f9fa}
+.committee-action[disabled]:hover{border-color:#d5e2e6;color:#123}
+.committee-action.is-busy{opacity:.7;cursor:progress}
+.committee-action-note{flex:1 1 100%;margin:2px 0 0;font-size:11.5px;color:#60737b}
+
+/* ---------- filtros compactos ---------- */
+.committee-filters{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;background:#fff;border:1px solid #e3ebee;border-radius:12px;padding:12px}
+.committee-filters .dashboard-filter{margin:0}
+.committee-filters .spacer{flex:1 1 auto}
+.committee-filter-actions{display:flex;gap:8px}
+.committee-chip-row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;flex:1 1 100%}
+.committee-chip{display:inline-flex;align-items:center;gap:6px;background:#e9f7f9;color:#0d6b78;border:1px solid #bfe7ed;border-radius:999px;padding:4px 10px;font-size:11.5px;font-weight:600}
+.committee-chip button{background:none;border:0;color:#0d6b78;cursor:pointer;font-size:13px;line-height:1;padding:0}
+
+/* drawer de filtros avançados */
+.committee-drawer-overlay{position:fixed;inset:0;background:rgba(8,18,24,.45);border:0;z-index:60}
+.committee-drawer{position:fixed;top:0;right:0;bottom:0;width:min(400px,92vw);background:#fff;z-index:61;padding:20px;overflow-y:auto;box-shadow:-14px 0 34px rgba(8,18,24,.22);display:flex;flex-direction:column;gap:14px}
+.committee-drawer header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.committee-drawer header h2{margin:2px 0 0;font-size:17px}
+.committee-drawer header span{font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#20b5c7}
+.committee-drawer footer{margin-top:auto;display:flex;gap:8px;justify-content:flex-end}
+
+/* ---------- painéis ---------- */
+.committee-panels{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.committee-panels .dashboard-card{margin:0}
+.committee-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:8px}
+.committee-metric{background:#f7fafb;border:1px solid #e6eef0;border-radius:10px;padding:10px 11px;text-align:left;cursor:default;display:block;width:100%}
+button.committee-metric{cursor:pointer}
+button.committee-metric:hover{border-color:#20b5c7;background:#f1fbfc}
+.committee-metric span{display:block;font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:#60737b}
+.committee-metric strong{display:block;margin-top:3px;font-size:18px;font-weight:800;color:#0c2027;line-height:1.15}
+.committee-metric small{display:block;margin-top:2px;font-size:11px;color:#7b8b92}
+.committee-metric.money strong{font-size:15px}
+.committee-metric.na strong{color:#94a4aa;font-weight:700}
+
+/* ---------- listas de fatos e decisões ---------- */
+.committee-list{display:flex;flex-direction:column;gap:8px}
+.committee-list-row{display:flex;gap:12px;align-items:flex-start;justify-content:space-between;background:#f7fafb;border:1px solid #e6eef0;border-radius:10px;padding:10px 12px}
+.committee-list-row b{display:block;font-size:13px;color:#0c2027}
+.committee-list-row small{display:block;font-size:11.5px;color:#7b8b92;margin-top:2px}
+.committee-list-meta{display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex:0 0 auto}
+
+/* ---------- apresentação executiva ---------- */
+.committee-presentation{display:flex;flex-wrap:wrap;gap:14px;align-items:center;justify-content:space-between}
+.committee-presentation .committee-metrics{flex:1 1 320px}
+.committee-presentation-actions{display:flex;flex-wrap:wrap;gap:8px}
+.committee-feedback{flex:1 1 100%;margin:0;font-size:12px;border-radius:9px;padding:9px 12px;border:1px solid #bfe7ed;background:#e9f7f9;color:#0d6b78}
+.committee-feedback.error{border-color:#f0c6c6;background:#fdf0f0;color:#8e2f2f}
+
+.committee-source{font-size:11px;color:#7b8b92;margin:8px 0 0}
+
+/* ---------- responsividade ---------- */
+@media (max-width:1100px){
+  .committee-panels{grid-template-columns:1fr}
+}
+@media (max-width:880px){
+  .committee-hero{padding:18px}
+  .committee-hero h1{font-size:23px}
+  .committee-hero-side{align-items:flex-start;width:100%}
+  .committee-actions{padding:9px}
+  .committee-action{flex:1 1 calc(50% - 8px);justify-content:center}
+}
+@media (max-width:680px){
+  .committee-filters{padding:10px}
+  .committee-filters .dashboard-filter{flex:1 1 100%}
+  .committee-filter-actions{width:100%}
+  .committee-filter-actions button{flex:1 1 0}
+  .committee-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .committee-action{flex:1 1 100%}
+  .committee-list-row{flex-direction:column}
+  .committee-list-meta{align-items:flex-start;flex-direction:row;flex-wrap:wrap}
+}
