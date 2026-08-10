@@ -49,6 +49,18 @@ test('interface consolidada mantém login acessível e MFA embutido', () => {
   assert.doesNotMatch(source, /prompt\s*\(/);
   assert.doesNotMatch(source, /Plataforma corporativa/i);
 });
+test('tela de login não traz credenciais pré-preenchidas nem chave de exemplo funcional', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  const loginForm = source.match(/function loginScreen\(\)\{[\s\S]*?\n/)[0];
+  assert.doesNotMatch(loginForm, /id="login-email"[^>]*\svalue=/);
+  assert.doesNotMatch(loginForm, /id="login-password"[^>]*\svalue=/);
+  assert.match(loginForm, /id="login-email"[^>]*required/);
+  assert.match(loginForm, /id="login-password"[^>]*required/);
+  const example = fs.readFileSync(path.join(__dirname, '..', '.env.example'), 'utf8');
+  const backupKey = example.match(/^\s*COEVO_BACKUP_KEY\s*=([^\r\n]*)/m)[1].trim();
+  assert.equal(backupKey, '', 'COEVO_BACKUP_KEY do .env.example deve ficar vazio');
+  assert.ok(backupKey.length < 32, 'placeholder não pode satisfazer o mínimo de 32 caracteres exigido por encryptBackup');
+});
 test('processos e demais pastas oferecem filtros múltiplos e títulos do Monday', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
   for (const field of ['Polo','Tipo','Ano','Mês','Empreendimento/Grupo','Escopo','Status']) assert.match(source, new RegExp(field));
