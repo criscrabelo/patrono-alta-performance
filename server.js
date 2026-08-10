@@ -174,7 +174,7 @@ function handler(req, res) {
   if (url.pathname.startsWith('/api/v1/')) url.pathname = url.pathname.replace('/api/v1/', '/api/');
   if (req.method === 'GET' && url.pathname === '/') return staticFile(res, path.join(ROOT, 'public', 'index.html'));
   if (req.method === 'GET' && url.pathname === '/status') return staticFile(res, path.join(ROOT, 'public', 'status.html'));
-  if (req.method === 'GET' && ['/app.js','/dashboard-widgets.js','/styles.css','/sidebar.css','/dashboard.css','/dashboard-widgets.css','/processes.css','/projects.css'].includes(url.pathname)) return staticFile(res, path.join(ROOT, 'public', path.basename(url.pathname)));
+  if (req.method === 'GET' && ['/app.js','/dashboard-widgets.js','/styles.css','/sidebar.css','/dashboard.css','/dashboard-widgets.css','/processes.css','/projects.css','/committee.css'].includes(url.pathname)) return staticFile(res, path.join(ROOT, 'public', path.basename(url.pathname)));
   if (req.method === 'GET' && /^\/logo-coevo[^/]*\.png$/.test(url.pathname)) { const file = path.join(ROOT, 'public', path.basename(url.pathname)); if (fs.existsSync(file)) return staticFile(res, file); return json(res,404,{error:'Não encontrado'}); }
   if (req.method === 'GET' && url.pathname.startsWith('/assets/')) { const file = path.join(ROOT, url.pathname); if (fs.existsSync(file)) return staticFile(res, file); return json(res,404,{error:'Não encontrado'}); }
   if (!url.pathname.startsWith('/api/')) return json(res,404,{error:'Não encontrado'});

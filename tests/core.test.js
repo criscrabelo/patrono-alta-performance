@@ -252,3 +252,46 @@ test('API de Projetos expõe ciclo de vida das entidades com exclusão lógica',
   assert.match(source,/restore\$/);
   for(const action of ['UPDATE','ARCHIVE','RESTORE'])assert.match(source,new RegExp(`'${action}'`));
 });
+
+test('Comitê Jurídico é roteado como painel executivo mensal, não como pasta genérica', () => {
+  const source=fs.readFileSync(path.join(__dirname,'..','public','app.js'),'utf8');
+  assert.match(source,/if\(state\.legalModule==='comite'\)return committeeExecutivePage\(\);/);
+  assert.match(source,/function committeeExecutivePage\(\)/);
+  assert.match(source,/function legalMonthlyMetrics\(\)/);
+});
+
+test('painel do Comitê Jurídico cobre os 12 blocos executivos exigidos', () => {
+  const source=fs.readFileSync(path.join(__dirname,'..','public','app.js'),'utf8');
+  for (const label of ['Resumo executivo','Atenção da Gestora','Contencioso','Notificações','Recuperação de crédito','Honorários','Distratos, retomadas e recompras','Contratos','Riscos','Prazos','Fatos relevantes','Decisões','Apresentação executiva']) {
+    assert.match(source, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
+});
+
+test('painel do Comitê Jurídico usa filtros compactos e não a grade de checkboxes genérica', () => {
+  const source=fs.readFileSync(path.join(__dirname,'..','public','app.js'),'utf8');
+  assert.match(source,/committee-filters/);
+  assert.match(source,/competencePicker\('legalDashboardFilters'\)/);
+  const committeeBody=source.slice(source.indexOf('function committeeExecutivePage'),source.indexOf('function committeeExecutivePage')+source.slice(source.indexOf('function committeeExecutivePage')).indexOf('\n}'));
+  assert.doesNotMatch(committeeBody,/Filtros múltiplos/);
+});
+
+test('Decisões e Apresentação executiva do comitê reutilizam os endpoints já existentes', () => {
+  const source=fs.readFileSync(path.join(__dirname,'..','public','app.js'),'utf8');
+  assert.match(source,/api\('\/committees'\)/);
+  assert.match(source,/api\('\/presentations\/validate'/);
+  assert.match(source,/api\('\/presentations\/export'/);
+  assert.match(source,/canManageCommittees/);
+  assert.match(source,/canExportPresentation/);
+});
+
+test('committee.css é carregado pelo index.html e não fica órfão', () => {
+  const html=fs.readFileSync(path.join(__dirname,'..','public','index.html'),'utf8');
+  assert.match(html,/<link rel="stylesheet" href="\/committee\.css">/);
+});
+
+test('RBAC do comitê continua restrita a quem tem permissão de exportação/criação', () => {
+  assert.equal(allowed({ role: 'colaborador' }, 'comites', 'export'), false);
+  assert.equal(allowed({ role: 'colaborador' }, 'comites', 'create'), false);
+  assert.equal(allowed({ role: 'lider' }, 'comites', 'create'), true);
+  assert.equal(allowed({ role: 'diretoria' }, 'comites', 'export'), true);
+});
