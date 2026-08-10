@@ -18,7 +18,6 @@ if (fs.existsSync(ENV_FILE)) {
 const DATA_DIR = path.join(ROOT, 'data');
 const DB_FILE = path.join(DATA_DIR, 'store.json');
 const PORT = Number(process.env.PORT || 3007);
-const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const sessions = new Map();
 const BACKUP_KEY = process.env.COEVO_BACKUP_KEY;
 const MONDAY_BOARDS = {
@@ -73,8 +72,7 @@ function getUser(req) {
   if (!header?.startsWith('Bearer ')) return null;
   const token = header.slice(7);
   const session = sessions.get(token);
-  if (session && session.expiresAt > Date.now()) return readStore().users.find(u => u.id === session.userId) || null;
-  if (!IS_PRODUCTION && token.startsWith('usr-')) return readStore().users.find(u => u.id === token) || null;
+  if (session && !session.challenge && session.expiresAt > Date.now()) return readStore().users.find(u => u.id === session.userId) || null;
   return null;
 }
 async function body(req) { let s=''; for await (const c of req) s += c; return s ? JSON.parse(s) : {}; }
@@ -186,8 +184,9 @@ function handler(req, res) {
     const found = store.users.find(u => u.email.toLowerCase() === String(input.email || '').toLowerCase());
     const configured = process.env.COEVO_DEMO_PASSWORD;
     if (!found || !configured || hash(input.password) !== hash(configured)) return json(res,401,{error:'Credenciais inválidas'});
+    if (!requireMfa(found)) { const token=crypto.randomBytes(32).toString('hex'); sessions.set(token,{userId:found.id,expiresAt:Date.now()+Number(process.env.COEVO_SESSION_MS||3600000)}); return json(res,200,{mfaRequired:false,token}); }
     const challenge = crypto.randomUUID(); sessions.set(challenge,{userId:found.id,challenge:true,expiresAt:Date.now()+300000});
-    return json(res,200,{mfaRequired:requireMfa(found),challenge,maskedPhone:'final ****'});
+    return json(res,200,{mfaRequired:true,challenge,maskedPhone:'final ****'});
   });
   if (req.method === 'POST' && url.pathname === '/api/auth/mfa') return body(req).then(input => {
     const pending=sessions.get(input.challenge); const expected=process.env.COEVO_MFA_CODE;

@@ -61,6 +61,16 @@ test('tela de login não traz credenciais pré-preenchidas nem chave de exemplo 
   assert.equal(backupKey, '', 'COEVO_BACKUP_KEY do .env.example deve ficar vazio');
   assert.ok(backupKey.length < 32, 'placeholder não pode satisfazer o mínimo de 32 caracteres exigido por encryptBackup');
 });
+test('autenticação não aceita bypass usr-* nem challenge como token de sessão', () => {
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.doesNotMatch(server, /token\.startsWith\('usr-'\)/, 'bypass usr-* deve estar removido de getUser');
+  assert.doesNotMatch(server, /IS_PRODUCTION/, 'constante deixa de existir junto com o bypass');
+  assert.match(server, /!session\.challenge/, 'challenge não pode ser aceito como sessão');
+  assert.match(server, /if \(!requireMfa\(found\)\)[\s\S]{0,200}sessions\.set\(token/, 'login deve emitir token quando MFA não é exigido');
+  const app = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  assert.doesNotMatch(app, /Bearer usr-/, 'frontend não deve ter fallback de bearer privilegiado');
+  assert.match(app, /window\.__coevoToken=result\.data\.token;state\.authenticated=true/, 'submitLogin deve guardar o token antes de autenticar');
+});
 test('processos e demais pastas oferecem filtros múltiplos e títulos do Monday', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
   for (const field of ['Polo','Tipo','Ano','Mês','Empreendimento/Grupo','Escopo','Status']) assert.match(source, new RegExp(field));
