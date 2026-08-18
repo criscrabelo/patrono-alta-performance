@@ -92,12 +92,20 @@ function Remover-Tags([string] $Html) {
     return ($texto -replace '\s+', ' ').Trim()
 }
 
-# Extrai o número do módulo de um texto livre ("Módulo 3 - ...", "MÓDULO III", "M03").
+# Extrai o número do módulo de um texto livre. Cobre os formatos reais vistos nos
+# nomes de arquivo da Receita Federal: "Módulo 3 - ...", "modulo-1-mombelli.pdf",
+# "modulo-8-cfc-rtc-simples...pdf", "3o-modulo-fcbf...pdf" (3º), "5deg-modulo...pdf" (5º),
+# "MÓDULO III", "M03".
 function Obter-NumeroModulo([string] $Texto) {
-    if ($Texto -match '(?i)m[oó]dulo\s*0*(\d{1,2})')      { return [int] $Matches[1] }
-    if ($Texto -match '(?i)\bm[_\-\s]?0*(\d{1,2})\b')      { return [int] $Matches[1] }
-    $romanos = @{ 'i'=1;'ii'=2;'iii'=3;'iv'=4;'v'=5;'vi'=6;'vii'=7;'viii'=8;'ix'=9;'x'=10;'xi'=11;'xii'=12 }
-    if ($Texto -match '(?i)m[oó]dulo\s+([ivx]{1,5})\b') {
+    # Número logo depois de "módulo" (com ou sem hífen/underscore/espaço no meio).
+    if ($Texto -match '(?i)m[oó]dulo[\s_-]*0*(\d{1,2})\b')                          { return [int] $Matches[1] }
+    # Número logo ANTES de "módulo", com sufixo ordinal opcional (3o, 5deg, 2a, 4º).
+    if ($Texto -match '(?i)\b0*(\d{1,2})\s*(?:deg|[oaº°]|\.)?[\s_-]*m[oó]dulo')      { return [int] $Matches[1] }
+    # Abreviação tipo "M03", "M-3", "M_3".
+    if ($Texto -match '(?i)\bm[_\-\s]?0*(\d{1,2})\b')                               { return [int] $Matches[1] }
+
+    $romanos = @{ 'i'=1;'ii'=2;'iii'=3;'iv'=4;'v'=5;'vi'=6;'vii'=7;'viii'=8;'ix'=9;'x'=10;'xi'=11;'xii'=12;'xiii'=13;'xiv'=14;'xv'=15;'xvi'=16;'xvii'=17;'xviii'=18 }
+    if ($Texto -match '(?i)m[oó]dulo\s+([ivx]{1,6})\b') {
         $chave = $Matches[1].ToLowerInvariant()
         if ($romanos.ContainsKey($chave)) { return $romanos[$chave] }
     }
