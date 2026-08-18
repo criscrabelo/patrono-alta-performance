@@ -36,7 +36,7 @@
 [CmdletBinding()]
 param(
     # Pasta raiz do curso na sua máquina.
-    [string] $Raiz = 'C:\Users\jurid\OneDrive\Área de Trabalho\TRANSFERIR PARA NOVO NOTE\AÇÕES JUDICIAIS\GUEU\PROTOCOLAR\REFORMA TRIBUTÁRIA DE CONSUMO',
+    [string] $Raiz = 'C:\Users\jurid\OneDrive\Área de Trabalho\REFORMA TRIBUTÁRIA DE CONSUMO',
 
     # Página oficial com os módulos do curso.
     [string] $Url = 'https://www.gov.br/receitafederal/pt-br/acesso-a-informacao/acoes-e-programas/programas-e-atividades/reforma-tributaria-do-consumo/curso/material-de-apoio/modulos-do-curso',
