@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SINOPSE
     Organiza por MÓDULO a pasta do curso "Reforma Tributária do Consumo" (Receita Federal)
     e baixa os materiais que estiverem faltando, direto do site da Receita.
