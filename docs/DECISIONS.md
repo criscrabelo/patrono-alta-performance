@@ -30,9 +30,12 @@ coluna "Bloqueia".
 | D9 | Provedor de autenticação e MFA | Segurança | Engenharia | Início da Fase 0 | Não bloqueia negócio; ver ADR-002 | **Resolvido nesta execução — ver ADR-002** |
 | D10 | Fornecedor de IA | Camada de IA | Engenharia + Compliance | Fase 7 | Nada no MVP | **Fora de escopo do Sprint 1** |
 
-**Nenhuma destas decisões de negócio (D1–D7) foi inventada, adivinhada ou resolvida por conveniência
-técnica nesta execução**, em conformidade com a regra explícita da v1.3 ("não invente prazo jurídico",
-"não invente source of truth", "decisões críticas de negócio não podem ser inventadas").
+**A D1 foi formalmente homologada pela Cristiane em 12/09/2026, conforme seção 1.1** — a única decisão
+deste backlog resolvida até aqui, e resolvida pelo rito devido (levantamento técnico, análise de
+alternativas, aprovação explícita da gestora/Jurídico), nunca por conveniência técnica. **As decisões
+D2–D7 permanecem pendentes** e não podem ser resolvidas, presumidas ou implementadas por conveniência
+técnica, em conformidade com a regra explícita da v1.3 ("não invente prazo jurídico", "não invente
+source of truth", "decisões críticas de negócio não podem ser inventadas").
 
 ---
 
@@ -127,9 +130,42 @@ obrigatório no Sprint 2. 9. Um Legal Process pode possuir N Legal Deadlines. 10
 Deadline. 11. Alteração do mesmo fato gerador (correção de data, suspensão, cancelamento, reabertura)
 preserva o **mesmo** registro e grava a alteração em histórico/auditoria. 12. Prazo suspenso não pode
 aparecer como atraso normal. 13. Prazo cancelado não pode continuar sendo tratado como ativo. 14. Prazo
-cumprido preserva histórico. 15. Reabertura preserva o ciclo anterior (ver proposta de status, abaixo).
-16. Nenhuma alteração apaga silenciosamente o valor anterior. 17. A Patrono MVP não calcula prazo
-processual automaticamente. 18. Nenhuma engine de cálculo jurídico será criada no Sprint 2.
+cumprido preserva histórico. 15. Reabertura preserva o ciclo anterior (ver "Status do Legal Deadline",
+abaixo). 16. Nenhuma alteração apaga silenciosamente o valor anterior. 17. A Patrono MVP não calcula
+prazo processual automaticamente. 18. Nenhuma engine de cálculo jurídico será criada no Sprint 2.
+
+### Status do Legal Deadline — APROVADO para o Sprint 2
+
+> **Status:** APROVADA / HOMOLOGADA PARA O SPRINT 2
+> **Data:** 12/09/2026
+> **Aprovadora:** Cristiane Carneiro Rabelo
+> **Complemento da D1**, vinculado à modelagem de Legal Deadline do Sprint 2 — não é uma nova decisão
+> arquitetural, segue o mesmo rito de homologação já registrado acima.
+
+**Enum aprovado (fechado, nenhum outro valor no Sprint 2):** `ativo`, `suspenso`, `cumprido`,
+`cancelado`. Nenhum status adicional foi aprovado nesta rodada.
+
+**Regra de reabertura aprovada:** reabertura **não é** um quinto status. Quando um Legal Deadline
+anteriormente `suspenso`, `cancelado` ou encerrado juridicamente for formalmente reaberto, conforme
+regra de negócio aplicável:
+- mantém o **mesmo `id`**;
+- o `status` retorna para `ativo`;
+- todo o estado anterior é preservado no histórico/auditoria (nunca apagado);
+- a alteração registra motivo, responsável, data/hora e `before`/`after`, pelo mesmo mecanismo de
+  auditoria já existente no motor genérico de entidades.
+- A informação de que houve reabertura é recuperável pelo histórico de auditoria — não existe, nem
+  pode ser criado, um valor de status `reaberto` persistido em nenhuma API.
+
+**Regra de atraso aprovada — "vencido"/"atrasado"/"em atraso" NÃO é status:** é uma condição **derivada
+de view**, nunca um valor persistido no campo `status`. Um Legal Deadline só pode ser exibido como
+vencido/em atraso quando, simultaneamente: `status = ativo` **e** `date` é anterior à data atual. Como
+consequência direta: `suspenso` nunca aparece como atraso normal; `cumprido` nunca aparece como atraso
+ativo; `cancelado` nunca aparece como atraso ativo — independentemente do valor de `date` armazenado.
+Isso evita divergência entre o `status` gravado e a data atual sendo interpretada de forma paralela e
+inconsistente por cada view.
+
+**Nada disto foi implementado nesta rodada.** Aplica-se apenas como especificação aprovada para a Fase 1
+do Sprint 2 (`docs/SPRINT2-PLANO.md`) e para o modelo de dados (`docs/DATA_MODEL.md`).
 
 ### Novo fato gerador × alteração do mesmo prazo
 

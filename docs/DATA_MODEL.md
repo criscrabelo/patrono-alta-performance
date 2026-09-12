@@ -9,7 +9,7 @@
 | Entidade (§6) | Implementação atual | Situação | Nota |
 |---|---|---|---|
 | Legal Process | Coleção `processos`, sincronizada do Monday (somente leitura), com `externalId`, `source`, `syncedAt`, `department:'Jurídico'` (atribuído explicitamente na rodada 2 — ver `docs/DECISIONS.md`, ADR-005). Mutação via motor genérico de entidades bloqueada (rodada 3, ADR-008) — só a sincronização Monday escreve nesta coleção | **Presente**, como registro operacional/transitório (Monday é System of Record transitório, §9) | Não é modelado com ID Patrono próprio ainda — usa o registro Monday normalizado diretamente |
-| Legal Deadline | Coleção genérica `legalDeadlines`, adicionada no Sprint 1 via `/api/entities/legalDeadlines` | **Esqueleto do Sprint 1 presente; D1 (fonte/origem) HOMOLOGADA — ver `docs/DECISIONS.md`, seção 1.1** | Exige `processId`, `origin`, `date` na criação; herda versionamento, exclusão lógica, restauração e auditoria do motor genérico. `originType` obrigatório e proposta de enum de `status` estão planejados para o Sprint 2 (ver seção "D1 homologada" abaixo) — **ainda não implementados** |
+| Legal Deadline | Coleção genérica `legalDeadlines`, adicionada no Sprint 1 via `/api/entities/legalDeadlines` | **Esqueleto do Sprint 1 presente; D1 (fonte/origem) e enum de `status` HOMOLOGADOS — ver `docs/DECISIONS.md`, seção 1.1** | Exige `processId`, `origin`, `date` na criação; herda versionamento, exclusão lógica, restauração e auditoria do motor genérico. `originType` obrigatório e enum fechado de `status` (ativo/suspenso/cumprido/cancelado) estão aprovados para o Sprint 2 (ver seção "D1 homologada" abaixo) — **ainda não implementados** |
 | Responsibility | Sem entidade própria; responsável é um campo textual dentro dos registros Monday normalizados (`processResponsibleValues`) | **Gap** | `responsibilities` reservado em `ENTITY_MODULE_MAP` para uso futuro quando a modelagem de Responsibility for necessária além do campo textual |
 | External Identity | Cada registro sincronizado do Monday já carrega `source: 'monday'`, `externalId`, `boardId`, `boardName`, `syncedAt` | **Presente**, de forma implícita (par sistema/id/timestamp por registro) | Padrão consistente com "`patrono_id → (sistema, id_externo, tipo de fonte, última sincronização)`" (§8); generalização como entidade própria fica para quando outra fonte além do Monday for integrada |
 | Document / File Reference | Não implementado | **Gap** — fora do escopo funcional atual (nenhum módulo de documentos ainda) | `documentReferences` reservado em `ENTITY_MODULE_MAP` para quando o piloto exigir referência documental (Google Drive, §10/§23) |
@@ -67,12 +67,21 @@ em código nesta etapa; permanece o esqueleto descrito acima até a implementaç
 homologação — permanece exclusivo de registros sincronizados do Monday (`source:'monday'`); Legal
 Deadline nunca tem esse campo preenchido, por nascer sempre de registro manual (D1.1).
 
-### Proposta de `status` — a aprovar antes da implementação
+### `status` — APROVADO para o Sprint 2 (ainda não implementado)
 
-Ver `docs/DECISIONS.md`, seção 1.1, e o plano do Sprint 2 para a recomendação técnica completa
-(ativo/suspenso/cumprido/cancelado, e a recomendação de tratar reabertura como retorno a `ativo` com
-evento preservado no histórico, em vez de um status próprio). **Não decidido silenciosamente** — segue
-como proposta até aprovação explícita, antes de qualquer implementação.
+Aprovado pela Cristiane em 12/09/2026 (`docs/DECISIONS.md`, seção 1.1, "Status do Legal Deadline"):
+
+- Enum fechado: `ativo`, `suspenso`, `cumprido`, `cancelado`. Nenhum outro valor é aceito no Sprint 2.
+- **Reabertura não é um quinto status.** Um Legal Deadline reaberto mantém o mesmo `id`, retorna
+  `status` para `ativo`, e preserva o ciclo anterior (motivo, responsável, data/hora, `before`/`after`)
+  no histórico de auditoria — nunca cria um valor `reaberto` persistido.
+- **"Vencido"/"atrasado"/"em atraso" não é status** — é condição **derivada de view**: só é exibida
+  quando `status = ativo` **e** `date` é anterior à data atual. `suspenso`, `cumprido` e `cancelado`
+  nunca são exibidos como atraso, independentemente do valor de `date`.
+
+**Isto é uma decisão aprovada, não uma implementação.** O campo `status` de `legalDeadlines` continua,
+hoje, sendo texto livre (sem enum, sem validação) — a validação do enum fechado e a lógica de "atraso
+derivado" nas views são tarefas da Fase 1 do Sprint 2 (`docs/SPRINT2-PLANO.md`), ainda não iniciadas.
 
 ### Regra de integridade obrigatória para o Sprint 2 (dashboard)
 

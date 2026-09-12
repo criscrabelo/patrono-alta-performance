@@ -28,8 +28,9 @@ além do já previsto acima.
 | Fase | Tarefa | Responsável | Dependência | Critério de Aceite |
 |---|---|---|---|---|
 | 1 | Adicionar `originType` (enum `JUDICIAL_PROCESSUAL` \| `INTERNAL_CONTROL`) como campo obrigatório de `legalDeadlines`, validado na criação e revalidado no PATCH (mesmo padrão de `processId`/`origin`/`date`) | Engenharia | D1.3 homologada (`docs/DECISIONS.md`) | `POST`/`PATCH` sem `originType` ou com valor fora do enum → `422`; PATCH que remove `originType` do estado candidato também rejeitado |
-| 1 | Definir e implementar o enum de `status` de Legal Deadline (ativo/suspenso/cumprido/cancelado), com a decisão de reabertura pendente de aprovação (ver seção "Proposta de status", abaixo) | Engenharia, com aprovação prévia do Jurídico sobre reabertura | Aprovação explícita da proposta de status desta seção antes da implementação | Enum fechado; transições de status auditadas (`before`/`after`); nenhum valor livre aceito |
-| 1 | Garantir que `status:'suspenso'` e `status:'cancelado'` sejam interpretados corretamente por qualquer view que listar prazos (não aparecer como vencimento normal nem como ativo) | Engenharia | Enum de status definido (tarefa acima) | Teste de integração cobrindo os casos 13/14 da seção QA |
+| 1 | Implementar o enum **já homologado** de `status` de Legal Deadline (`ativo`/`suspenso`/`cumprido`/`cancelado` — ver "Status do Legal Deadline — homologado", abaixo, e `docs/DECISIONS.md`, seção 1.1) | Engenharia | D1 homologada; enum/reabertura/atraso derivado aprovados em 12/09/2026 | `POST`/`PATCH` com `status` fora do enum → `422`; nenhum valor livre aceito; transições auditadas (`before`/`after`) |
+| 1 | Implementar a regra de reabertura homologada: mesmo `id`, `status` volta para `ativo`, ciclo anterior preservado no histórico — nunca criar `status:'reaberto'` | Engenharia | Enum de status implementado (tarefa acima) | Reabertura preserva `id`; histórico mostra o ciclo suspenso/cancelado anterior; nenhuma API aceita `reaberto` como valor de `status` |
+| 1 | Implementar a regra de atraso derivado homologada: view calcula "vencido/em atraso" apenas quando `status = ativo` **e** `date` anterior à data atual — nunca gravar isso como `status` | Engenharia | Enum de status implementado (tarefa acima) | `suspenso`/`cumprido`/`cancelado` nunca exibidos como atraso, independentemente de `date`; cobre os casos 13–15 da seção QA |
 | 2 | Corrigir `dashboard-service.js`: widgets de prazo do dashboard `legal` (`legal-deadlines`, `legal-risk`) devem consultar `legalDeadlines`, não `processDate()`/coluna bruta do board `processos` | Engenharia | Nenhuma (correção de integridade, independente de `originType`) | Teste de integração confirmando que o widget não usa `processDate()`; nenhuma lógica paralela de cálculo de prazo em `dashboard-service.js` |
 | 2 | Endpoint de listagem/filtro de Legal Deadline por processo, com filtro por `originType` e por `status` | Engenharia | Fase 1 concluída | Listagem filtra corretamente por `originType`/`status`; respeita `scoped()`/RBAC já vigentes |
 | 2 | Tela de detalhe de Legal Deadline (histórico via auditoria existente — `store.audit` por `entityId`/`correlationId`) | Engenharia + UX | Fase 1 concluída | Histórico exibido em ordem cronológica, sem sobrescrever estado anterior; nenhuma entidade nova de histórico criada (reaproveita auditoria existente, conforme instruído) |
@@ -39,28 +40,33 @@ além do já previsto acima.
 | 4 | Testes de permissão específicos de Legal Deadline com `originType` (TI vs. Jurídico; administrador técnico vs. conteúdo) | Engenharia (QA) | Fases 1–2 concluídas | Casos 8 e 9 da seção QA (abaixo) passam via HTTP real, reaproveitando `allowedInDepartment()`/`allowedContent()` já existentes — nenhum mecanismo de autorização novo |
 | 4 | Homologação formal com Gestora + Jurídico (MASTER_HANDOFF §32) | Negócio + Jurídico | Fases 1–3 concluídas, CI verde | Checklist de homologação do piloto jurídico aprovado |
 
-## Proposta de status do Legal Deadline (aguardando aprovação antes de implementar)
+## Status do Legal Deadline — HOMOLOGADO para o Sprint 2 (não implementado)
 
-Enum mínimo recomendado: `ativo`, `suspenso`, `cumprido`, `cancelado`.
+**Aprovado pela Cristiane em 12/09/2026** (`docs/DECISIONS.md`, seção 1.1, "Status do Legal Deadline").
+Registrado aqui apenas como referência de implementação para a Fase 1 — a decisão em si vive em
+`docs/DECISIONS.md`.
 
-**Reabertura — recomendação técnica:** tratar reabertura como **retorno ao status `ativo`**, preservando
-o evento de reabertura no histórico de auditoria (`before`/`after`, com `reason` explicando o motivo da
-reabertura), em vez de criar um quinto status `reaberto`. Justificativa: um Legal Deadline reaberto volta
-a se comportar exatamente como um prazo ativo em qualquer view (não deve ter tratamento visual ou de
-regra diferente de um "ativo" comum) — o que importa preservar é *que* ele foi reaberto e *por quê*, o
-que o histórico de auditoria já resolve sem precisar de um status paralelo. Um status `reaberto` dedicado
-só se justificaria se o negócio precisasse filtrar/reportar especificamente "prazos que já foram
-reabertos ao menos uma vez" como uma categoria operacional distinta de "ativo" — o que não foi solicitado
-até este momento. **Esta é uma recomendação, não uma decisão — aguarda aprovação explícita antes de
-qualquer implementação**, conforme pedido.
+- **Enum fechado aprovado:** `ativo`, `suspenso`, `cumprido`, `cancelado`. Nenhum outro valor.
+- **Reabertura aprovada:** retorno ao status `ativo`, preservando o evento de reabertura no histórico de
+  auditoria (`before`/`after`, com `reason` explicando o motivo), em vez de um quinto status `reaberto`.
+  Justificativa homologada: um Legal Deadline reaberto se comporta exatamente como um prazo ativo em
+  qualquer view; o que importa preservar é *que* ele foi reaberto e *por quê*, o que o histórico de
+  auditoria já resolve sem precisar de um status paralelo.
+- **Atraso é condição derivada, não status, aprovado:** "vencido"/"atrasado"/"em atraso" nunca é gravado
+  em `status`. Uma view só pode exibir essa condição quando `status = ativo` **e** `date` é anterior à
+  data atual — `suspenso`, `cumprido` e `cancelado` nunca aparecem como atraso.
+
+**Isto está aprovado, mas continua não implementado.** A Fase 1 (tabela acima) é onde essa implementação
+acontece — ainda não iniciada.
 
 ## QA a preparar (não implementado nesta etapa)
 
-Ver `docs/QA.md`, seção "QA planejado para o Sprint 2 — Legal Deadline com D1 homologada", para os 20
+Ver `docs/QA.md`, seção "QA planejado para o Sprint 2 — Legal Deadline com D1 homologada", para os 27
 casos completos (criação válida processual/interna, rejeições de `originType`/`origin`/`date`/`processId`,
 isolamento Jurídico×TI, administrador técnico sem acesso a conteúdo, múltiplos prazos, novo fato gerador
 vs. alteração, suspensão/cancelamento/cumprimento, correção do dashboard, falha do Monday, ausência de
-cálculo automático, Google Calendar não-fonte, acesso direto por ID fora do escopo).
+cálculo automático, Google Calendar não-fonte, acesso direto por ID fora do escopo, enum de `status`
+fora do domínio, atraso derivado por combinação `status`+`date`, e reabertura preservando histórico).
 
 ## Dependências entre fases
 
@@ -71,13 +77,15 @@ paralelo. Fase 3 (Agenda/Atenção) depende de Fase 1 e 2 estarem concluídas, p
 
 ## Riscos e bloqueios conhecidos antes de iniciar
 
-- A proposta de `status`/reabertura desta seção precisa de aprovação explícita antes da Fase 1 iniciar
-  (instrução expressa: "não decida silenciosamente").
+- O enum de `status`/regra de reabertura/regra de atraso derivado **já foi aprovado** (12/09/2026) — não
+  é mais um bloqueio para a Fase 1.
 - O levantamento de código não conseguiu confirmar, para os boards além de `processos`, se existe
   qualquer coluna de data relevante — isso não bloqueia o Sprint 2 (D1.2 já restringe o piloto a
   `processos`), mas deve ser revisitado se o Jurídico identificar necessidade de expandir o escopo de
   boards no futuro (rito descrito em `docs/DECISIONS.md`, seção 1.1, D1.2).
-- Nenhum bloqueio técnico identificado para iniciar a Fase 1 assim que autorizado.
+- Nenhum bloqueio técnico identificado para iniciar a Fase 1 assim que autorizado — a decisão de negócio
+  necessária (D1 + status) está integralmente homologada; falta apenas autorização explícita para
+  implementar.
 
 ---
 
