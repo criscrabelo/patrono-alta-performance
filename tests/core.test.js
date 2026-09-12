@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, seed, parseCsv, hash, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, isValidCivilDate, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, hasGlobalScope, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized } = require('../server');
+const { ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, seed, parseCsv, hash, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, isValidCivilDate, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, hasGlobalScope, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess } = require('../server');
 const { WIDGET_TYPES, DASHBOARD_DEFINITIONS } = require('../dashboard-model');
 const { dashboardPayload } = require('../dashboard-service');
 const { PROJECT_ID, ensureProjectStore, projectDetail, projectPermissions } = require('../project-service');
@@ -431,4 +431,57 @@ test('dashboardAuthorized() aplica módulo + alçada global corporativa + depart
   assert.equal(dashboardAuthorized(liderJuridico, legal), true, 'dashboard departamental permite o próprio departamento');
   assert.equal(dashboardAuthorized(liderTi, legal), false, 'dashboard departamental nega outro departamento');
   assert.equal(dashboardAuthorized(liderJuridico, null), false, 'dashboard inexistente nunca autoriza');
+});
+
+// ============================================================================================
+// Rodada 6 de correções de segurança — testes unitários
+// ============================================================================================
+
+test('allowedContent() nega administrador em módulo de CONTEÚDO de negócio, mesmo com modules/actions "*" (item 3)', () => {
+  const administrador = { role: 'administrador', department: null };
+  const diretoria = { role: 'diretoria', department: null };
+  const liderJuridico = { role: 'lider', department: 'Jurídico' };
+  for (const module of BUSINESS_CONTENT_MODULES) {
+    for (const action of ['create', 'update', 'archive', 'restore', 'export']) {
+      assert.equal(allowedContent(administrador, module, action), false, `administrador não pode "${action}" em módulo de conteúdo "${module}"`);
+    }
+  }
+  // Diretoria (alçada de negócio global) continua liberada para os módulos que de fato tem em ROLES.
+  assert.equal(allowedContent(diretoria, 'juridico', 'create'), true);
+  // Líder do próprio departamento continua liberado para o módulo departamental correspondente.
+  assert.equal(allowedContent(liderJuridico, 'juridico', 'create'), true);
+  // Líder de outro departamento continua negado (isolamento departamental, item 1, preservado por allowedContent).
+  assert.equal(allowedContent({ role: 'lider', department: 'TI' }, 'juridico', 'create'), false);
+});
+
+test('BUSINESS_CONTENT_MODULES contém exatamente os módulos operacionais/departamentais do CRUD de negócio', () => {
+  for (const module of ['central', 'estrategia', 'projetos', 'agenda', 'comites', 'orcamento', 'juridico', 'ti']) {
+    assert.ok(BUSINESS_CONTENT_MODULES.has(module), `"${module}" deveria estar em BUSINESS_CONTENT_MODULES`);
+  }
+});
+
+test('dashboardAuthorized() nega dashboard departamental para usuário sem department e sem alçada global (item 2)', () => {
+  const legal = { module: 'juridico', scope: 'department', departmentId: 'dep-juridico' };
+  const ti = { module: 'ti', scope: 'department', departmentId: 'dep-ti' };
+  const administrador = { role: 'administrador', department: null };
+  const diretoria = { role: 'diretoria', department: null };
+  assert.equal(dashboardAuthorized(administrador, legal), false, 'administrador sem department não pode acessar dashboard departamental Jurídico');
+  assert.equal(dashboardAuthorized(administrador, ti), false, 'administrador sem department não pode acessar dashboard departamental de TI');
+  assert.equal(dashboardAuthorized(diretoria, legal), true, 'diretoria (alçada global) continua acessando qualquer dashboard departamental');
+  assert.equal(dashboardAuthorized(diretoria, ti), true);
+});
+
+test('validateInternalizationProcess() valida fonte Monday e escopo do processo relacionado', () => {
+  const store = { records: { processos: [
+    { id: 'proc-ok', source: 'monday', department: 'Jurídico', deletedAt: null },
+    { id: 'proc-manual', source: 'manual', department: 'Jurídico', deletedAt: null },
+    { id: 'proc-arquivado', source: 'monday', department: 'Jurídico', deletedAt: '2026-01-01T00:00:00.000Z' }
+  ] } };
+  const liderJuridico = { role: 'lider', department: 'Jurídico' };
+  const liderTi = { role: 'lider', department: 'TI' };
+  assert.equal(validateInternalizationProcess('proc-ok', liderJuridico, store), null, 'processo Monday, existente e no escopo do usuário deve validar');
+  assert.equal(validateInternalizationProcess('proc-manual', liderJuridico, store)?.status, 422, 'processo sem source monday deve ser rejeitado');
+  assert.equal(validateInternalizationProcess('proc-arquivado', liderJuridico, store)?.status, 422, 'processo arquivado (deletedAt) não deve ser considerado existente');
+  assert.equal(validateInternalizationProcess('proc-inexistente', liderJuridico, store)?.status, 422, 'processo inexistente deve ser rejeitado');
+  assert.equal(validateInternalizationProcess('proc-ok', liderTi, store)?.status, 403, 'processo Monday fora do escopo do usuário deve ser rejeitado');
 });

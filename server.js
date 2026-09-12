@@ -102,6 +102,19 @@ function validateLegalDeadline(candidate, user, store) {
   candidate.scopeType = relatedProcess.scopeType;
   return null;
 }
+// P0 corrigido (rodada 6, item 4): a validação de processId de internalization (existe + source
+// 'monday' + escopo do usuário) foi introduzida na rodada 5 apenas no POST. O PATCH de sub-recurso de
+// projeto é genérico e não revalidava nada — uma internalização criada corretamente podia ser alterada
+// depois para um processId manual/fora de escopo/inexistente, sem nenhuma checagem, quebrando a
+// integridade relacional (mesma classe de falha já corrigida para Legal Deadline nas rodadas 3/4).
+// Extraída para uma função única, reaproveitada em POST e PATCH. `processId` continua não sendo
+// obrigatório (regra de negócio pré-existente, não alterada aqui) — só valida quando informado.
+function validateInternalizationProcess(processId, user, store) {
+  const relatedProcess = collection(store,'processos').find(item => item.id === processId && !item.deletedAt);
+  if (!relatedProcess || relatedProcess.source !== 'monday') return { status: 422, error: 'Processo relacionado não encontrado ou não pertence à fonte autorizada do piloto (Monday)' };
+  if (!scoped(user, relatedProcess)) return { status: 403, error: 'Sem permissão para relacionar este processo' };
+  return null;
+}
 // P0 corrigido (rodada 2): campos controlados pelo servidor (identidade do registro, versionamento,
 // metadados de auditoria e metadados de origem/sincronização) nunca podem vir do cliente — antes,
 // `{...input}` permitia que o corpo da requisição sobrescrevesse `id`, `version`, `createdBy`,
@@ -200,6 +213,25 @@ function allowedInDepartment(user, module, action = 'read') {
   if (hasGlobalScope(user) || user.role === 'administrador') return true;
   return user.department === requiredDepartment;
 }
+// P0 corrigido (rodada 6, item 3): `administrador` mantém modules:['*']/actions:['*'] — necessário para
+// as rotas técnicas de sistema/integração (auditoria, aprovação de cadastro, backup, Monday), gated por
+// `allowed(user,'*',ação)` (módulo literal `'*'`, não um módulo de negócio). O problema: como
+// `policy.modules.includes('*')` também torna `allowed(user, qualquerModulo, ação)` verdadeiro, o mesmo
+// wildcard "abria" qualquer módulo de CONTEÚDO de negócio (agenda/comitês/orçamento/projetos/jurídico/
+// TI) para criação/alteração/arquivamento/restauração/exportação — exatamente o que o MASTER_HANDOFF
+// §11 proíbe ("administrador técnico ≠ superusuário de conteúdo"). `allowedInDepartment()` sozinho não
+// resolve isso: seu bypass de departamento para `administrador` existe para permitir a operação técnica
+// de integração (ex.: `POST /api/monday/sync`), não para autorizar mutação de conteúdo.
+// BUSINESS_CONTENT_MODULES são os módulos operacionais/departamentais cujo CRUD é feito pelo motor
+// genérico de entidades, agenda, comitês, orçamento e sub-recursos de projeto — deny-by-default para
+// `administrador` em qualquer ação de MUTAÇÃO (tudo exceto leitura, que `scoped()` já filtra
+// corretamente — ver rodada 5, item 3). Leitura permanece via `allowed()`/`allowedInDepartment()`
+// normalmente, não por aqui.
+const BUSINESS_CONTENT_MODULES = new Set(['central','estrategia','projetos','agenda','comites','orcamento','juridico','ti']);
+function allowedContent(user, module, action) {
+  if (user.role === 'administrador' && BUSINESS_CONTENT_MODULES.has(module)) return false;
+  return allowedInDepartment(user, module, action);
+}
 // Normaliza um nome de departamento para o slug usado em departmentId ('dep-juridico', 'dep-ti', ...).
 // Extraído para evitar repetir a mesma expressão de normalização em múltiplos pontos do código.
 function normalizeDeptSlug(department) { return String(department || '').toLocaleLowerCase('pt-BR').normalize('NFD').replace(/[\u0300-\u036f]/g, ''); }
@@ -211,7 +243,16 @@ function dashboardAuthorized(user, definition) {
   if (!definition) return false;
   if (!allowed(user, definition.module)) return false;
   if (dashboardRequiresGlobalScope(definition) && !hasGlobalScope(user)) return false;
-  if (user.department && definition.departmentId && !definition.departmentId.endsWith(normalizeDeptSlug(user.department))) return false;
+  // P0 corrigido (rodada 6, item 2): dashboard departamental (`scope:'department'`) só pode ser
+  // acessado por (A) alçada de negócio global ou (B) usuário cujo department corresponde ao
+  // `departmentId` do dashboard. Antes, a negação só era avaliada quando `user.department` existia E
+  // não batia (`user.department && definition.departmentId && mismatch`) — um usuário SEM department
+  // (como `administrador` técnico, que não tem alçada global de negócio desde a rodada 5) nunca caía
+  // nessa condição e passava despercebido, apesar de `modules:['*']` fazer o gate de módulo acima
+  // sempre aceitar. Agora é deny-by-default: ausência de department correspondente nega, não libera.
+  if (definition.scope === 'department' && !hasGlobalScope(user)) {
+    if (!definition.departmentId || !user.department || !definition.departmentId.endsWith(normalizeDeptSlug(user.department))) return false;
+  }
   return true;
 }
 function json(res, status, body) { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'x-content-type-options': 'nosniff' }); res.end(JSON.stringify(body)); }
@@ -409,7 +450,9 @@ function handler(req, res) {
     return json(res,200,{...projectDetail(store,id),permissions:projectPermissions(user)});
   }
   if (req.method === 'PATCH' && /^\/api\/projects\/[^/]+\/governance$/.test(url.pathname)) {
-    if(!allowed(user,'projetos','update'))return json(res,403,{error:'Sem permissão para alterar a governança'});
+    // P0 corrigido (rodada 6, item 3): allowedContent() nega administrador — governança de projeto é
+    // conteúdo de negócio, não função técnica de sistema/integração.
+    if(!allowedContent(user,'projetos','update'))return json(res,403,{error:'Sem permissão para alterar a governança'});
     const id=url.pathname.split('/')[3],project=store.projects.find(item=>item.id===id&&!item.deletedAt);
     if(!project||!scoped(user,project))return json(res,404,{error:'Projeto não encontrado'});
     return body(req).then(input=>{const fields=['ownerUserId','managerUserId','sponsorUserId'],before=Object.fromEntries(fields.map(key=>[key,project[key]||null])),next={...before};for(const key of fields)if(Object.hasOwn(input,key)){if(input[key]&&!store.users.some(item=>item.id===input[key]))return json(res,422,{error:`Usuário inválido em ${key}`});next[key]=input[key]||null;}if(Object.hasOwn(input,'coOwnerUserIds')){const ids=[...new Set(input.coOwnerUserIds||[])];if(ids.some(value=>!store.users.some(item=>item.id===value)))return json(res,422,{error:'Co-responsável inválido'});project.coOwnerUserIds=ids;}Object.assign(project,next,{version:(project.version||1)+1,updatedAt:new Date().toISOString(),updatedBy:user.id});audit(store,user,'UPDATE_GOVERNANCE','projectGovernance',id,before,{...next,coOwnerUserIds:project.coOwnerUserIds},input.reason||'Alteração de responsabilidade do projeto');writeStore(store);return json(res,200,{...projectDetail(store,id),permissions:projectPermissions(user)})});
@@ -425,41 +468,35 @@ function handler(req, res) {
     // desconhecido em ROLES (ex.: `role:'externo'` com `department:'Jurídico'` herdava `edit`/`create`
     // por não ser 'colaborador' e por coincidência de department) — allowed(user,'projetos',...) fecha
     // essa lacuna em todas as rotas de sub-recurso que dependiam só de projectPermissions().
-    if(!allowed(user,'projetos','update'))return json(res,403,{error:'Sem permissão para o módulo Projetos'});
+    if(!allowedContent(user,'projetos','update'))return json(res,403,{error:'Sem permissão para o módulo Projetos'});
     if(!permissions.changeTarget)return json(res,403,{error:'Sem permissão para alterar a meta'});
     return body(req).then(input=>{if(!input.indicatorId||!store.projectIndicators.some(item=>item.id===input.indicatorId&&item.projectId===id))return json(res,422,{error:'Selecione um indicador válido'});const existing=store.projectTargets.find(item=>item.id===project.targetId),before=existing?structuredClone(existing):null,target={id:existing?.id||newId('ptg'),projectId:id,indicatorId:input.indicatorId,baseline:input.baseline??null,targetValue:input.targetValue??null,dueDate:input.dueDate||null,updatedAt:new Date().toISOString(),updatedBy:user.id};if(existing)Object.assign(existing,target);else store.projectTargets.push(target);project.targetId=target.id;project.updatedAt=new Date().toISOString();audit(store,user,existing?'UPDATE_TARGET':'CREATE_TARGET','projectTarget',target.id,before,target,input.reason||'Configuração de meta do projeto');writeStore(store);return json(res,200,{...projectDetail(store,id),permissions})});
   }
   if (req.method === 'PUT' && /^\/api\/projects\/[^/]+\/approval-rules$/.test(url.pathname)) {
     const id=url.pathname.split('/')[3],permissions=projectPermissions(user),project=store.projects.find(item=>item.id===id&&!item.deletedAt);
     if(!project||!scoped(user,project))return json(res,404,{error:'Projeto não encontrado'});
-    if(!allowed(user,'projetos','update'))return json(res,403,{error:'Sem permissão para o módulo Projetos'});
+    if(!allowedContent(user,'projetos','update'))return json(res,403,{error:'Sem permissão para o módulo Projetos'});
     if(!permissions.changeApprovalRule)return json(res,403,{error:'Sem permissão para alterar alçadas'});
     return body(req).then(input=>{const rule=store.projectApprovalRules.find(item=>item.projectId===id),before=structuredClone(rule);rule.levels=Array.isArray(input.levels)?input.levels:rule.levels;rule.version=(rule.version||1)+1;rule.updatedAt=new Date().toISOString();rule.updatedBy=user.id;audit(store,user,'UPDATE_APPROVAL_RULE','projectGovernance',id,before,rule,input.reason||'Alteração de alçada configurável');writeStore(store);return json(res,200,rule)});
   }
   if (req.method === 'PUT' && /^\/api\/projects\/[^/]+\/recovery-settings$/.test(url.pathname)) {
     const id=url.pathname.split('/')[3],permissions=projectPermissions(user),project=store.projects.find(item=>item.id===id&&!item.deletedAt),settings=store.projectRecoverySettings.find(item=>item.projectId===id);
     if(!project||!scoped(user,project))return json(res,404,{error:'Projeto não encontrado'});
-    if(!allowed(user,'projetos','update'))return json(res,403,{error:'Sem permissão para o módulo Projetos'});
+    if(!allowedContent(user,'projetos','update'))return json(res,403,{error:'Sem permissão para o módulo Projetos'});
     if(!permissions.changeApprovalRule)return json(res,403,{error:'Sem permissão para alterar parâmetros de recuperação'});if(!settings)return json(res,404,{error:'Configuração não encontrada'});
     return body(req).then(input=>{const before=structuredClone(settings);for(const key of ['internalizationStatuses','internalizationCriteria','agingBands','honorariumPolicies'])if(Array.isArray(input[key]))settings[key]=input[key];settings.version=(settings.version||1)+1;settings.updatedAt=new Date().toISOString();settings.updatedBy=user.id;audit(store,user,'UPDATE_RECOVERY_SETTINGS','projectGovernance',id,before,settings,input.reason||'Alteração de parâmetros de recuperação');writeStore(store);return json(res,200,settings)});
   }
   if (req.method === 'POST' && /^\/api\/projects\/[^/]+\/(actions|milestones|risks|internalizations|negotiations|legal-treatments|management-items)$/.test(url.pathname)) {
     const [, , , id, resource]=url.pathname.split('/'),project=store.projects.find(item=>item.id===id&&!item.deletedAt),permissions=projectPermissions(user);
     if(!project||!scoped(user,project))return json(res,404,{error:'Projeto não encontrado'});
-    if(!allowed(user,'projetos','create'))return json(res,403,{error:'Sem permissão para o módulo Projetos'});
+    if(!allowedContent(user,'projetos','create'))return json(res,403,{error:'Sem permissão para o módulo Projetos'});
     if(!permissions.edit)return json(res,403,{error:'Sem permissão para editar o projeto'});
     const [key,prefix]=PROJECT_RESOURCE_MAP[resource];
     return body(req).then(input=>{
       const sanitized=sanitizeProjectItemInput(input,user);
-      // P0 corrigido (rodada 5, item 4): antes só verificava se processId EXISTIA em 'processos' — um
-      // processo manual/falso (sem source:'monday') ou de outro escopo/departamento passava. Enquanto o
-      // Monday for a fonte autorizada do piloto (D1 continua pendente — não implementa cálculo/
-      // sincronização automática de prazo), a internalização precisa apontar para um processo real da
-      // fonte oficial e dentro do escopo do usuário — mesmo padrão já usado por Legal Deadline.
       if(resource==='internalizations'&&sanitized.processId){
-        const relatedProcess=collection(store,'processos').find(item=>item.id===sanitized.processId&&!item.deletedAt);
-        if(!relatedProcess||relatedProcess.source!=='monday')return json(res,422,{error:'Processo relacionado não encontrado ou não pertence à fonte autorizada do piloto (Monday)'});
-        if(!scoped(user,relatedProcess))return json(res,403,{error:'Sem permissão para relacionar este processo'});
+        const invalid=validateInternalizationProcess(sanitized.processId,user,store);
+        if(invalid)return json(res,invalid.status,{error:invalid.error});
       }
       const item={...sanitized,id:newId(prefix),projectId:id,status:resource==='management-items'?'Pendente':(sanitized.status||'Não iniciado'),createdAt:new Date().toISOString(),createdBy:user.id};store[key].push(item);audit(store,user,'CREATE',key,item.id,null,item,input.reason||'Registro vinculado ao projeto');writeStore(store);return json(res,201,item);
     });
@@ -467,31 +504,48 @@ function handler(req, res) {
   if (req.method === 'PATCH' && /^\/api\/projects\/[^/]+\/(actions|milestones|risks|internalizations|negotiations|legal-treatments|management-items)\/[^/]+$/.test(url.pathname)) {
     const [, , , id, resource, itemId]=url.pathname.split('/'),project=store.projects.find(item=>item.id===id&&!item.deletedAt),permissions=projectPermissions(user),[key]=PROJECT_RESOURCE_MAP[resource],item=store[key].find(entry=>entry.id===itemId&&entry.projectId===id&&!entry.deletedAt);
     if(!project||!scoped(user,project)||!item)return json(res,404,{error:'Registro do projeto não encontrado'});
-    if(!allowed(user,'projetos','update'))return json(res,403,{error:'Sem permissão para o módulo Projetos'});
+    if(!allowedContent(user,'projetos','update'))return json(res,403,{error:'Sem permissão para o módulo Projetos'});
     if(!permissions.edit)return json(res,403,{error:'Sem permissão para editar'});if(resource==='internalizations'&&!permissions.internalizeProcess)return json(res,403,{error:'Sem permissão para decidir internalização'});
-    return body(req).then(input=>{const before=structuredClone(item),reason=input.reason||'Atualização de registro do projeto';delete input.reason;const sanitized=sanitizeProjectItemInput(input,user);Object.assign(item,sanitized,{updatedAt:new Date().toISOString(),updatedBy:user.id});audit(store,user,'UPDATE',key,item.id,before,item,reason);writeStore(store);return json(res,200,item)});
+    return body(req).then(input=>{const before=structuredClone(item),reason=input.reason||'Atualização de registro do projeto';delete input.reason;const sanitized=sanitizeProjectItemInput(input,user);
+      if(resource==='internalizations'){
+        // P0 corrigido (rodada 6, item 4): revalida sobre o ESTADO CANDIDATO (processId do input, se
+        // enviado; senão o processId já gravado no item) — mesmo padrão de validateLegalDeadline() no
+        // PATCH: a invariante precisa valer para o registro como ficaria após a atualização, não apenas
+        // para os campos desta requisição específica.
+        const candidateProcessId=Object.hasOwn(sanitized,'processId')?sanitized.processId:item.processId;
+        if(candidateProcessId){
+          const invalid=validateInternalizationProcess(candidateProcessId,user,store);
+          if(invalid)return json(res,invalid.status,{error:invalid.error});
+        }
+      }
+      Object.assign(item,sanitized,{updatedAt:new Date().toISOString(),updatedBy:user.id});audit(store,user,'UPDATE',key,item.id,before,item,reason);writeStore(store);return json(res,200,item)});
   }
   if (req.method === 'DELETE' && /^\/api\/projects\/[^/]+\/(actions|milestones|risks|internalizations|negotiations|legal-treatments|management-items)\/[^/]+$/.test(url.pathname)) {
     const [, , , id, resource, itemId]=url.pathname.split('/'),permissions=projectPermissions(user),project=store.projects.find(entry=>entry.id===id&&!entry.deletedAt),[key]=PROJECT_RESOURCE_MAP[resource],item=store[key].find(entry=>entry.id===itemId&&entry.projectId===id&&!entry.deletedAt);
     if(!project||!scoped(user,project)||!item)return json(res,404,{error:'Registro do projeto não encontrado'});
-    if(!allowed(user,'projetos','archive'))return json(res,403,{error:'Sem permissão para o módulo Projetos'});
+    if(!allowedContent(user,'projetos','archive'))return json(res,403,{error:'Sem permissão para o módulo Projetos'});
     if(!permissions.archive)return json(res,403,{error:'Sem permissão para excluir'});const before=structuredClone(item);item.deletedAt=new Date().toISOString();item.deletedBy=user.id;audit(store,user,'ARCHIVE',key,item.id,before,item,'Exclusão lógica de registro do projeto');writeStore(store);return json(res,200,{archived:true,id:item.id});
   }
   if (req.method === 'POST' && /^\/api\/projects\/[^/]+\/(actions|milestones|risks|internalizations|negotiations|legal-treatments|management-items)\/[^/]+\/restore$/.test(url.pathname)) {
     const [, , , id, resource, itemId]=url.pathname.split('/'),permissions=projectPermissions(user),project=store.projects.find(entry=>entry.id===id&&!entry.deletedAt),[key]=PROJECT_RESOURCE_MAP[resource],item=store[key].find(entry=>entry.id===itemId&&entry.projectId===id&&entry.deletedAt);
     if(!project||!scoped(user,project)||!item)return json(res,404,{error:'Registro arquivado não encontrado'});
-    if(!allowed(user,'projetos','restore'))return json(res,403,{error:'Sem permissão para o módulo Projetos'});
+    if(!allowedContent(user,'projetos','restore'))return json(res,403,{error:'Sem permissão para o módulo Projetos'});
     if(!permissions.restore)return json(res,403,{error:'Sem permissão para restaurar'});const before=structuredClone(item);delete item.deletedAt;delete item.deletedBy;item.updatedAt=new Date().toISOString();item.updatedBy=user.id;audit(store,user,'RESTORE',key,item.id,before,item,'Restauração de registro do projeto');writeStore(store);return json(res,200,item);
   }
   if (req.method === 'POST' && /^\/api\/projects\/[^/]+\/management-items\/[^/]+\/(approve|reject|escalate)$/.test(url.pathname)) {
     const parts=url.pathname.split('/'),id=parts[3],itemId=parts[5],decision=parts[6],permissions=projectPermissions(user),project=store.projects.find(entry=>entry.id===id&&!entry.deletedAt),item=store.projectManagementItems.find(entry=>entry.id===itemId&&entry.projectId===id);
     if(!project||!scoped(user,project)||!item)return json(res,404,{error:'Pendência não encontrada'});
-    if(!allowed(user,'projetos','update'))return json(res,403,{error:'Sem permissão para o módulo Projetos'});
+    if(!allowedContent(user,'projetos','update'))return json(res,403,{error:'Sem permissão para o módulo Projetos'});
     if(decision!=='escalate'&&!permissions.approveAgreement)return json(res,403,{error:'Sem alçada para decidir'});
     return body(req).then(input=>{const before=structuredClone(item);item.status=decision==='approve'?'Aprovado':decision==='reject'?'Rejeitado':'Escalonado';item.decidedAt=new Date().toISOString();item.decidedBy=user.id;item.justification=input.reason||null;audit(store,user,decision.toUpperCase(),'projectGovernance',id,before,item,input.reason||`${decision} de pendência gerencial`);writeStore(store);return json(res,200,item)});
   }
+  // P0 corrigido (rodada 6, item 2): a listagem tinha um filtro ad hoc próprio (com uma exceção
+  // explícita `user.role === 'administrador'` que isentava o papel técnico do filtro departamental
+  // inteiro) em vez de reaproveitar `dashboardAuthorized()` — a mesma função usada em
+  // `GET /api/dashboards/:id` e em `/api/dashboard-preferences/:id`. Agora a listagem usa exatamente a
+  // mesma regra: nenhuma divergência possível entre "o que aparece listado" e "o que é de fato acessível".
   if (req.method === 'GET' && url.pathname === '/api/dashboards') {
-    const dashboards=visibleDashboards(user,allowed,hasGlobalScope).filter(item=>!user.department||hasGlobalScope(user)||user.role==='administrador'||!item.departmentId||item.departmentId===`dep-${normalizeDeptSlug(user.department)}`);
+    const dashboards=visibleDashboards(user,allowed,hasGlobalScope).filter(item=>dashboardAuthorized(user,item));
     return json(res,200,{widgetTypes:WIDGET_TYPES,dashboards});
   }
   if (req.method === 'GET' && /^\/api\/dashboards\/[^/]+$/.test(url.pathname)) {
@@ -516,7 +570,11 @@ function handler(req, res) {
     return body(req).then(input=>{const validIds=new Set(definition.widgets.map(item=>item.id)),preference={userId:user.id,dashboardId,hiddenWidgets:[...new Set(input.hiddenWidgets||[])].filter(id=>validIds.has(id)),widgetOrder:[...new Set(input.widgetOrder||[])].filter(id=>validIds.has(id)),density:input.density==='compact'?'compact':'comfortable',updatedAt:new Date().toISOString()};for(const id of validIds)if(!preference.widgetOrder.includes(id))preference.widgetOrder.push(id);store.dashboardPreferences=store.dashboardPreferences||[];const index=store.dashboardPreferences.findIndex(item=>item.userId===user.id&&item.dashboardId===dashboardId);if(index>=0)store.dashboardPreferences[index]=preference;else store.dashboardPreferences.push(preference);audit(store,user,'UPDATE','dashboardPreference',dashboardId,null,preference,'Personalização de dashboard');writeStore(store);return json(res,200,preference)});
   }
   if (req.method === 'POST' && url.pathname === '/api/monday/test') { if(!allowedInDepartment(user,'juridico','read')) return json(res,403,{error:'Sem permissão'}); return mondayQuery('{me{id name email}}').then(data=>json(res,200,{connected:true,account:data.me})).catch(error=>json(res,503,{connected:false,error:error.message})); }
-  if (req.method === 'GET' && url.pathname.startsWith('/api/legal/')) { const moduleName=url.pathname.split('/')[3]; if(!allowed(user,'juridico','read')) return json(res,403,{error:'Sem permissão para o módulo Jurídico'}); if(!LEGAL_MODULES.has(moduleName)) return json(res,404,{error:'Módulo jurídico não encontrado'}); if(moduleName==='honorariosJudiciais'){const processRows=collection(store,'processos').filter(x=>!x.deletedAt&&x.source==='monday'&&scoped(user,x));return json(res,200,{module:moduleName,...judicialHonorariumPayload(processRows)});}const rows=collection(store,moduleName).filter(x=>!x.deletedAt&&x.source==='monday'&&scoped(user,x)); if(moduleName==='processos'&&url.searchParams.get('paginated')==='1')return json(res,200,{module:moduleName,...filterProcesses(rows,url)});if(moduleName==='honorarios'&&url.searchParams.get('paginated')==='1')return json(res,200,{module:moduleName,...filterHonorariums(rows,url)});return json(res,200,{module:moduleName,count:rows.length,records:rows}); }
+  // P0 corrigido (rodada 6, item 1): allowed(user,'juridico','read') sozinho não nega um usuário de TI
+  // (que também tem o módulo 'juridico' em ROLES, ver docs/PERMISSIONS.md) — allowedInDepartment()
+  // fecha isso de forma transversal com as rotas de Monday da rodada 5, exigindo 403 (não apenas uma
+  // listagem vazia por scoped()) para quem não é do departamento Jurídico nem tem alçada global.
+  if (req.method === 'GET' && url.pathname.startsWith('/api/legal/')) { const moduleName=url.pathname.split('/')[3]; if(!allowedInDepartment(user,'juridico','read')) return json(res,403,{error:'Sem permissão para o módulo Jurídico'}); if(!LEGAL_MODULES.has(moduleName)) return json(res,404,{error:'Módulo jurídico não encontrado'}); if(moduleName==='honorariosJudiciais'){const processRows=collection(store,'processos').filter(x=>!x.deletedAt&&x.source==='monday'&&scoped(user,x));return json(res,200,{module:moduleName,...judicialHonorariumPayload(processRows)});}const rows=collection(store,moduleName).filter(x=>!x.deletedAt&&x.source==='monday'&&scoped(user,x)); if(moduleName==='processos'&&url.searchParams.get('paginated')==='1')return json(res,200,{module:moduleName,...filterProcesses(rows,url)});if(moduleName==='honorarios'&&url.searchParams.get('paginated')==='1')return json(res,200,{module:moduleName,...filterHonorariums(rows,url)});return json(res,200,{module:moduleName,count:rows.length,records:rows}); }
   if (req.method === 'POST' && url.pathname === '/api/monday/sync') { if(!allowedInDepartment(user,'juridico','create')) return json(res,403,{error:'Sem permissão para sincronizar'}); return body(req).then(async input=>{const modules=input.modules?.length?input.modules:Object.keys(MONDAY_BOARDS);store.mondayRuns=store.mondayRuns||[];const run={id:crypto.randomUUID(),startedAt:new Date().toISOString(),requestedBy:user.name,modules:[],status:'running'};store.mondayRuns.push(run);let failed=0;for(const moduleName of modules){const board=MONDAY_BOARDS[moduleName];if(!board)continue;try{const items=await fetchMondayBoard(board.id);const list=collection(store,moduleName);let created=0,updated=0;for(const raw of items){const normalized=normalizeMondayItem(raw,moduleName,board);const existing=list.find(x=>x.source==='monday'&&x.externalId===normalized.externalId);if(existing){const before=structuredClone(existing);Object.assign(existing,normalized,{id:existing.id,version:(existing.version||1)+1});updated++;}else{list.push({...normalized,version:1});created++;}}run.modules.push({module:moduleName,board:board.name,read:items.length,created,updated,status:'ok'});}catch(error){failed++;run.modules.push({module:moduleName,board:board.name,status:'error',error:error.message});}}run.status=failed?'partial':'completed';run.finishedAt=new Date().toISOString();audit(store,user,'SYNC','monday',run.id,null,run,'Sincronização somente leitura com preservação de dados anteriores');writeStore(store);return json(res,failed?207:200,run);}); }
   if (req.method === 'GET' && url.pathname === '/api/auth/requests') { if(!allowed(user,'*','approve')) return json(res,403,{error:'Somente aprovadores podem consultar solicitações'}); return json(res,200,store.registrationRequests); }
   if (req.method === 'POST' && url.pathname.match(/^\/api\/auth\/requests\/[^/]+\/approve$/)) { if(!allowed(user,'*','approve')) return json(res,403,{error:'Somente aprovadores podem aprovar'}); const id=url.pathname.split('/')[4]; const request=store.registrationRequests.find(r=>r.id===id&&r.status==='pending'); if(!request) return json(res,404,{error:'Solicitação não encontrada'}); request.status='approved';request.approvedAt=new Date().toISOString();request.approvedBy=user.name; const created={id:crypto.randomUUID(),name:request.name,email:request.email,role:request.requestedRole,department:request.department,mfa:false,temporaryPassword:true}; store.users.push(created); audit(store,user,'APPROVE','registration',id,{status:'pending'},{status:'approved',userId:created.id},'Aprovação de cadastro por responsável humano'); writeStore(store); return json(res,200,{approved:true,user:created}); }
@@ -549,7 +607,9 @@ function handler(req, res) {
   // departamental ainda podia enviar `scopeType:'global'`, `companyId` ou `speId` e criar um item de
   // agenda global ou de outra empresa/SPE. Reaproveita sanitizeEntityInput() (mesma política de escopo
   // já usada em /api/entities e /api/committees) em vez de uma sanitização própria e divergente.
-  if (req.method === 'POST' && url.pathname === '/api/agenda') { if (!allowed(user,'agenda','create')) return json(res,403,{error:'Sem permissão'}); return body(req).then(input=>{ const sanitized=sanitizeEntityInput(input,user); const item={...sanitized, id:crypto.randomUUID(), department: sanitized.department ?? (hasGlobalScope(user) ? null : (user.department||null))}; store.agenda.push(item); audit(store,user,'CREATE','agenda',item.id,null,item); writeStore(store); return json(res,201,item); }); }
+  // P0 corrigido (rodada 6, item 3): allowedContent() nega administrador (papel técnico) para a criação
+  // de conteúdo de agenda — módulo de negócio, não de sistema/integração.
+  if (req.method === 'POST' && url.pathname === '/api/agenda') { if (!allowedContent(user,'agenda','create')) return json(res,403,{error:'Sem permissão'}); return body(req).then(input=>{ const sanitized=sanitizeEntityInput(input,user); const item={...sanitized, id:crypto.randomUUID(), department: sanitized.department ?? (hasGlobalScope(user) ? null : (user.department||null))}; store.agenda.push(item); audit(store,user,'CREATE','agenda',item.id,null,item); writeStore(store); return json(res,201,item); }); }
   // P0 corrigido (rodada 3, item 5): GET devolvia store.departments (incluindo o objeto `budget`
   // completo) a qualquer usuário autenticado, independentemente do próprio departamento.
   // P0 corrigido (rodada 4, item 9): o objeto de departamento carrega orçamento (budget); "estar
@@ -566,14 +626,26 @@ function handler(req, res) {
   // política de deny-by-default por department, e mesma proteção contra scopeType/companyId/speId
   // forjados por papel não-global.
   if (req.method === 'GET' && url.pathname === '/api/committees') { if(!allowed(user,'comites','read')) return json(res,403,{error:'Sem permissão'}); return json(res,200,store.committees.filter(item=>scoped(user,item))); }
-  if (req.method === 'POST' && url.pathname === '/api/committees') { if (!allowed(user,'comites','create')) return json(res,403,{error:'Sem permissão'}); return body(req).then(input=>{ const sanitized=sanitizeEntityInput(input,user); const item={...sanitized, id:crypto.randomUUID(), status:sanitized.status||'Rascunho', createdBy:user.name, createdAt:new Date().toISOString(), department: sanitized.department ?? (hasGlobalScope(user) ? null : (user.department||null))}; store.committees.push(item); audit(store,user,'CREATE','committee',item.id,null,item); writeStore(store); return json(res,201,item); }); }
-  if (req.method === 'POST' && url.pathname === '/api/presentations/validate') { if (!allowed(user,'comites','export')) return json(res,403,{error:'Sem permissão para exportar'}); return body(req).then(input=>{ const blocked = input.audience === 'Diretoria' && input.classification === 'Compartilhável'; return json(res, blocked ? 422 : 200, blocked ? {error:'Classificação incompatível com o público Diretoria', complianceBlocked:true} : {valid:true, format:['pptx','pdf'], auditRequired:true}); }); }
-  if (req.method === 'POST' && url.pathname === '/api/presentations/export') { if (!allowed(user,'comites','export')) return json(res,403,{error:'Sem permissão para exportar'}); return body(req).then(async input=>{ if(input.audience === 'Diretoria' && input.classification === 'Compartilhável') return json(res,422,{error:'Classificação incompatível com o público Diretoria',complianceBlocked:true}); try { const result=await generatePresentation(input); audit(store,user,'EXPORT','presentation',result.id,null,{topics:result.topics,audience:input.audience,classification:input.classification,files:[result.pptxPath,result.pdfPath]},'Exportação validada'); writeStore(store); return json(res,201,result); } catch(error) { return json(res,500,{error:'Não foi possível gerar a apresentação'}); } }); }
+  // P0 corrigido (rodada 6, item 3): allowedContent() nega administrador para a criação de comitê —
+  // mesma classe de correção da agenda, acima.
+  if (req.method === 'POST' && url.pathname === '/api/committees') { if (!allowedContent(user,'comites','create')) return json(res,403,{error:'Sem permissão'}); return body(req).then(input=>{ const sanitized=sanitizeEntityInput(input,user); const item={...sanitized, id:crypto.randomUUID(), status:sanitized.status||'Rascunho', createdBy:user.name, createdAt:new Date().toISOString(), department: sanitized.department ?? (hasGlobalScope(user) ? null : (user.department||null))}; store.committees.push(item); audit(store,user,'CREATE','committee',item.id,null,item); writeStore(store); return json(res,201,item); }); }
+  // P0 corrigido (rodada 6, item 3): exportação de apresentação é conteúdo de negócio (export está na
+  // lista explícita de ações que administrador não deve receber automaticamente).
+  if (req.method === 'POST' && url.pathname === '/api/presentations/validate') { if (!allowedContent(user,'comites','export')) return json(res,403,{error:'Sem permissão para exportar'}); return body(req).then(input=>{ const blocked = input.audience === 'Diretoria' && input.classification === 'Compartilhável'; return json(res, blocked ? 422 : 200, blocked ? {error:'Classificação incompatível com o público Diretoria', complianceBlocked:true} : {valid:true, format:['pptx','pdf'], auditRequired:true}); }); }
+  if (req.method === 'POST' && url.pathname === '/api/presentations/export') { if (!allowedContent(user,'comites','export')) return json(res,403,{error:'Sem permissão para exportar'}); return body(req).then(async input=>{ if(input.audience === 'Diretoria' && input.classification === 'Compartilhável') return json(res,422,{error:'Classificação incompatível com o público Diretoria',complianceBlocked:true}); try { const result=await generatePresentation(input); audit(store,user,'EXPORT','presentation',result.id,null,{topics:result.topics,audience:input.audience,classification:input.classification,files:[result.pptxPath,result.pdfPath]},'Exportação validada'); writeStore(store); return json(res,201,result); } catch(error) { return json(res,500,{error:'Não foi possível gerar a apresentação'}); } }); }
   // P0 corrigido (item B do docs/SEGURANCA-CORRECOES.md): GET não verificava permissão de módulo,
   // permitindo que qualquer usuário autenticado lesse qualquer coleção via troca de :type na URL
   // (IDOR/BOLA — MASTER_HANDOFF §11/§26). Tipo fora de ENTITY_MODULE_MAP é negado por padrão.
-  if (req.method === 'GET' && url.pathname.startsWith('/api/entities/')) { const type=url.pathname.split('/')[3]; const module=entityModule(type); if(!module || !allowed(user,module,'read')) return json(res,403,{error:'Sem permissão'}); return json(res,200,collection(store,type).filter(x=>!x.deletedAt && scoped(user,x))); }
-  if (req.method === 'POST' && url.pathname.startsWith('/api/entities/') && !url.pathname.endsWith('/restore')) { const type=url.pathname.split('/')[3]; const module=entityModule(type); if(!module || !allowed(user,module,'create')) return json(res,403,{error:'Sem permissão'}); const blocked=rejectIfMondaySourced(type); if(blocked) return json(res,403,blocked); return body(req).then(input=>{
+  // P0 corrigido (rodada 6, item 1): allowed() sozinho não isola Jurídico x TI quando não há registro
+  // prévio para scoped() filtrar (ex.: POST cria um registro novo). allowedInDepartment() aplica a
+  // mesma regra departamental já usada nas rotas de Monday (rodada 5) de forma transversal ao CRUD
+  // genérico de entidades — deny-by-default para módulos departamentais (juridico/ti).
+  if (req.method === 'GET' && url.pathname.startsWith('/api/entities/')) { const type=url.pathname.split('/')[3]; const module=entityModule(type); if(!module || !allowedInDepartment(user,module,'read')) return json(res,403,{error:'Sem permissão'}); return json(res,200,collection(store,type).filter(x=>!x.deletedAt && scoped(user,x))); }
+  // P0 corrigido (rodada 6, itens 1 e 3): allowedContent() combina o isolamento departamental
+  // (allowedInDepartment) com a negação explícita de `administrador` em módulos de CONTEÚDO de negócio
+  // — sem isso, um líder de TI passava em allowed(user,'juridico','create') (item 1), e `administrador`
+  // conseguia criar um registro jurídico novo sem nenhum `scoped()` prévio para barrar (item 3).
+  if (req.method === 'POST' && url.pathname.startsWith('/api/entities/') && !url.pathname.endsWith('/restore')) { const type=url.pathname.split('/')[3]; const module=entityModule(type); if(!module || !allowedContent(user,module,'create')) return json(res,403,{error:'Sem permissão'}); const blocked=rejectIfMondaySourced(type); if(blocked) return json(res,403,blocked); return body(req).then(input=>{
     const sanitized = sanitizeEntityInput(input, user);
     if(type==='legalDeadlines'){
       const invalid = validateLegalDeadline(sanitized, user, store);
@@ -587,7 +659,7 @@ function handler(req, res) {
     const item={ ...sanitized, id:crypto.randomUUID(), version:1, createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(), createdBy:user.name, department: type==='legalDeadlines' ? (sanitized.department ?? null) : (sanitized.department ?? (hasGlobalScope(user) ? null : (user.department||null))) };
     collection(store,type).push(item); audit(store,user,'CREATE',type,item.id,null,item); writeStore(store); return json(res,201,item);
   }); }
-  if (req.method === 'PATCH' && url.pathname.startsWith('/api/entities/')) { const [, , , type, id]=url.pathname.split('/'); const module=entityModule(type); if(!module || !allowed(user,module,'update')) return json(res,403,{error:'Sem permissão'}); const blocked=rejectIfMondaySourced(type); if(blocked) return json(res,403,blocked); return body(req).then(input=>{
+  if (req.method === 'PATCH' && url.pathname.startsWith('/api/entities/')) { const [, , , type, id]=url.pathname.split('/'); const module=entityModule(type); if(!module || !allowedContent(user,module,'update')) return json(res,403,{error:'Sem permissão'}); const blocked=rejectIfMondaySourced(type); if(blocked) return json(res,403,blocked); return body(req).then(input=>{
     const list=collection(store,type); const item=list.find(x=>x.id===id && !x.deletedAt); if(!item || !scoped(user,item)) return json(res,404,{error:'Registro não encontrado'});
     const before=structuredClone(item); const sanitized=sanitizeEntityInput(input,user);
     // P0 corrigido (rodada 3, item 3): as invariantes de Legal Deadline precisam continuar válidas
@@ -605,18 +677,21 @@ function handler(req, res) {
     }
     Object.assign(item,sanitized,{version:item.version+1,updatedAt:new Date().toISOString(),updatedBy:user.name}); audit(store,user,'UPDATE',type,id,before,item); writeStore(store); return json(res,200,item);
   }); }
-  if (req.method === 'DELETE' && url.pathname.startsWith('/api/entities/')) { const [, , , type, id]=url.pathname.split('/'); const module=entityModule(type); if(!module || !allowed(user,module,'archive')) return json(res,403,{error:'Exclusão lógica não autorizada'}); const blocked=rejectIfMondaySourced(type); if(blocked) return json(res,403,blocked); const item=collection(store,type).find(x=>x.id===id); if(!item || !scoped(user,item)) return json(res,404,{error:'Registro não encontrado'}); const before=structuredClone(item); item.deletedAt=new Date().toISOString(); item.deletedBy=user.name; audit(store,user,'ARCHIVE',type,id,before,item); writeStore(store); return json(res,200,{archived:true,id}); }
-  if (req.method === 'POST' && url.pathname.match(/^\/api\/entities\/[^/]+\/[^/]+\/restore$/)) { const [, , , type, id]=url.pathname.split('/'); const module=entityModule(type); if(!module || !allowed(user,module,'restore')) return json(res,403,{error:'Restauração não autorizada'}); const blocked=rejectIfMondaySourced(type); if(blocked) return json(res,403,blocked); const item=collection(store,type).find(x=>x.id===id); if(!item || !scoped(user,item)) return json(res,404,{error:'Registro não encontrado'}); const before=structuredClone(item); delete item.deletedAt; delete item.deletedBy; item.version++; item.updatedAt=new Date().toISOString(); audit(store,user,'RESTORE',type,id,before,item); writeStore(store); return json(res,200,item); }
+  if (req.method === 'DELETE' && url.pathname.startsWith('/api/entities/')) { const [, , , type, id]=url.pathname.split('/'); const module=entityModule(type); if(!module || !allowedContent(user,module,'archive')) return json(res,403,{error:'Exclusão lógica não autorizada'}); const blocked=rejectIfMondaySourced(type); if(blocked) return json(res,403,blocked); const item=collection(store,type).find(x=>x.id===id); if(!item || !scoped(user,item)) return json(res,404,{error:'Registro não encontrado'}); const before=structuredClone(item); item.deletedAt=new Date().toISOString(); item.deletedBy=user.name; audit(store,user,'ARCHIVE',type,id,before,item); writeStore(store); return json(res,200,{archived:true,id}); }
+  if (req.method === 'POST' && url.pathname.match(/^\/api\/entities\/[^/]+\/[^/]+\/restore$/)) { const [, , , type, id]=url.pathname.split('/'); const module=entityModule(type); if(!module || !allowedContent(user,module,'restore')) return json(res,403,{error:'Restauração não autorizada'}); const blocked=rejectIfMondaySourced(type); if(blocked) return json(res,403,blocked); const item=collection(store,type).find(x=>x.id===id); if(!item || !scoped(user,item)) return json(res,404,{error:'Registro não encontrado'}); const before=structuredClone(item); delete item.deletedAt; delete item.deletedBy; item.version++; item.updatedAt=new Date().toISOString(); audit(store,user,'RESTORE',type,id,before,item); writeStore(store); return json(res,200,item); }
   if (req.method === 'POST' && url.pathname === '/api/budgets/import/preview') return body(req).then(input=>json(res,200,parseCsv(input.csv)));
   // P0 corrigido (rodada 4, item 5): a importação de orçamento não checava o `department` das linhas
   // do CSV contra o escopo do usuário — um usuário departamental podia importar/alterar linhas de
   // outro departamento. Papel sem escopo global precisa ter TODAS as linhas do próprio departamento;
   // qualquer linha fora do escopo bloqueia a operação inteira (nunca importação parcial silenciosa).
-  if (req.method === 'POST' && url.pathname === '/api/budgets/import/commit') { if(!allowed(user,'orcamento','create')) return json(res,403,{error:'Sem permissão'}); return body(req).then(input=>{const parsed=parseCsv(input.csv); if(parsed.invalid.length || parsed.duplicates.length) return json(res,422,{error:'Importação rejeitada',...parsed}); if(!hasGlobalScope(user)){const outOfScope=parsed.valid.filter(row=>row.department!==user.department);if(outOfScope.length)return json(res,403,{error:`Importação bloqueada: ${outOfScope.length} linha(s) pertencem a departamento fora do seu escopo (${[...new Set(outOfScope.map(row=>row.department))].join(', ')})`});} const batch={id:crypto.randomUUID(),checksum:hash(input.csv),createdAt:new Date().toISOString(),createdBy:user.name,rows:parsed.valid}; store.budgetImports=(store.budgetImports||[]).filter(x=>x.checksum!==batch.checksum); store.budgetImports.push(batch); audit(store,user,'IMPORT','budget',batch.id,null,batch,'Importação validada e deduplicada'); writeStore(store); return json(res,201,batch); }); }
+  // P0 corrigido (rodada 6, item 3): importação de orçamento cria/altera conteúdo de negócio —
+  // allowedContent() nega administrador, mantendo diretoria como única alçada capaz de importar
+  // múltiplos departamentos de uma vez.
+  if (req.method === 'POST' && url.pathname === '/api/budgets/import/commit') { if(!allowedContent(user,'orcamento','create')) return json(res,403,{error:'Sem permissão'}); return body(req).then(input=>{const parsed=parseCsv(input.csv); if(parsed.invalid.length || parsed.duplicates.length) return json(res,422,{error:'Importação rejeitada',...parsed}); if(!hasGlobalScope(user)){const outOfScope=parsed.valid.filter(row=>row.department!==user.department);if(outOfScope.length)return json(res,403,{error:`Importação bloqueada: ${outOfScope.length} linha(s) pertencem a departamento fora do seu escopo (${[...new Set(outOfScope.map(row=>row.department))].join(', ')})`});} const batch={id:crypto.randomUUID(),checksum:hash(input.csv),createdAt:new Date().toISOString(),createdBy:user.name,rows:parsed.valid}; store.budgetImports=(store.budgetImports||[]).filter(x=>x.checksum!==batch.checksum); store.budgetImports.push(batch); audit(store,user,'IMPORT','budget',batch.id,null,batch,'Importação validada e deduplicada'); writeStore(store); return json(res,201,batch); }); }
   if (req.method === 'POST' && url.pathname === '/api/backup') { if(!allowed(user,'*','approve')) return json(res,403,{error:'Backup restrito'}); try { const backup=encryptBackup(store); audit(store,user,'BACKUP','system',backup.checksum,null,{checksum:backup.checksum},'Backup cifrado'); writeStore(store); return json(res,201,backup); } catch(error) { return json(res,503,{error:error.message}); } }
   if (req.method === 'POST' && url.pathname === '/api/backup/restore') { if(!allowed(user,'*','approve')) return json(res,403,{error:'Restauração restrita'}); return body(req).then(input=>{ try { const restored=decryptBackup(input); if(!restored.users || !restored.departments || !restored.audit) return json(res,422,{error:'Backup inválido'}); audit(restored,user,'RESTORE_BACKUP','system','restore',null,{restoredAt:new Date().toISOString()},'Restauração autorizada'); writeStore(restored); return json(res,200,{restored:true}); } catch(error) { return json(res,422,{error:'Backup inválido ou não pôde ser decifrado'}); } }); }
   return json(res,404,{error:'Rota não encontrada'});
 }
 if (require.main === module) { ensureStore(); http.createServer((req,res)=>handler(req,res)).listen(PORT,()=>console.log(`COEVO Alta Performance disponível em http://localhost:${PORT}`)); setInterval(()=>scheduledMondayTick().catch(error=>console.error('Monday scheduler:',error.message)),60000); }
-module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized };
+module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess };
 

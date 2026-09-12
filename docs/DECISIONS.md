@@ -370,6 +370,50 @@ jurídico/financeiro para suas funções técnicas legítimas.
 `scoped()` reverte ao comportamento anterior (não recomendado, pois reabre a violação do MASTER_HANDOFF
 §11).
 
+**Complementado pela ADR-012 (rodada 6).** Esta ADR fechou a leitura (`scoped()`). A rodada 6 apontou que
+a mutação (criação de conteúdo via `POST`, onde não há registro prévio para `scoped()` filtrar)
+continuava aberta — ADR-012 é o complemento necessário para fechar o ciclo completo (leitura + mutação).
+
+### ADR-012 — `allowedContent()`: administrador técnico não recebe autorização de mutação em módulos de conteúdo de negócio
+
+**Contexto.** A ADR-011 (rodada 5) corrigiu a leitura de conteúdo por `administrador`, retirando
+`scopes:['*']`. Mas `modules:['*']`/`actions:['*']` permaneceram intactos — necessários para as rotas
+técnicas gated por `allowed(user,'*',ação)` (módulo literal `'*'`: auditoria, aprovação de cadastro,
+backup). O problema: como `policy.modules.includes('*')` também torna `allowed(user, qualquerModulo,
+ação)` verdadeiro, o mesmo wildcard "abria" qualquer módulo de CONTEÚDO de negócio (agenda, comitês,
+orçamento, projetos, jurídico, TI) para `administrador` criar/alterar/arquivar/restaurar/exportar — sem
+nenhum `scoped()` para impedir, já que um `POST` não tem registro anterior. A rodada 6 (item 3) apontou
+isso concretamente em `POST /api/agenda`, `POST /api/committees`, `POST /api/entities/documentReferences`
+e sub-recursos de projeto.
+
+**Decisão.** `BUSINESS_CONTENT_MODULES` (`server.js`) é o conjunto explícito e nomeado dos módulos
+operacionais/departamentais de negócio: `central`, `estrategia`, `projetos`, `agenda`, `comites`,
+`orcamento`, `juridico`, `ti` — distintos das rotas técnicas de sistema/integração, que continuam
+gated por `allowed(user,'*',ação)` (módulo literal, não um nome de `BUSINESS_CONTENT_MODULES`).
+`allowedContent(user, module, action)` combina `allowedInDepartment()` (isolamento departamental, ADR
+implícita na rodada 5/ADR desta mesma seção) com a negação explícita de `administrador` para qualquer
+ação em um módulo de `BUSINESS_CONTENT_MODULES` — aplicada em toda rota de **mutação** de conteúdo
+(todos os verbos exceto leitura, que `scoped()` já filtra corretamente desde a ADR-011).
+
+**Justificativa.** Rejeitada a alternativa de reorganizar `ROLES.administrador.modules`/`.actions` para
+deixarem de ser wildcards (ex.: enumerar explicitamente uma lista de módulos/ações técnicas) — isso
+quebraria todo callsite que hoje verifica `allowed(user,'*',ação)` esperando o wildcard literal, exigindo
+uma revisão maior do que o escopo desta rodada de fechamento pede ("não invente arquitetura grande").
+Uma função de gate adicional, aplicada apenas nos callsites de mutação de conteúdo, é uma mudança mínima
+e localizada que preserva 100% do comportamento técnico existente de `administrador` (nenhuma rota técnica
+foi tocada) e fecha exatamente a lacuna apontada, sem reescrever o modelo de papéis.
+
+**Consequência.** `administrador` perde a capacidade de criar/alterar/arquivar/restaurar/exportar
+conteúdo de negócio em qualquer rota que use `BUSINESS_CONTENT_MODULES` — inclusive rotas onde isso
+nunca havia sido testado antes (governança e configuração de projeto, importação de orçamento,
+exportação de apresentações). Mantém integralmente as funções técnicas legítimas (auditoria, aprovação
+de cadastro, backup, operação de integrações via `allowedInDepartment()`). `diretoria` não é afetada —
+`allowedContent()` só nega explicitamente `user.role === 'administrador'`.
+
+**Reversível.** Sim — remover a checagem de `BUSINESS_CONTENT_MODULES` em `allowedContent()` (ou
+substituir os callsites de volta para `allowed()`/`allowedInDepartment()`) restaura o comportamento
+anterior (não recomendado, pois reabre a violação do MASTER_HANDOFF §11 para mutação).
+
 ---
 
 ## 3. Conflitos entre código existente e MASTER_HANDOFF v1.3

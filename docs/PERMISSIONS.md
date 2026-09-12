@@ -24,11 +24,15 @@ nunca substitui autorização. Todo o RBAC deste sistema é decidido e aplicado 
 
 **Nota sobre o desenho atual:** `lider` e `colaborador` incluem os módulos `juridico` e `ti`
 **independentemente do próprio departamento** — ou seja, o gate de módulo (`allowed()`) por si só não
-impede um líder de TI de *tentar* uma rota jurídica. Para rotas com registro individual, quem impede é o
-gate de escopo por registro (`scoped()`), descrito abaixo. Para rotas **sem** registro individual (as de
-Monday: `/api/monday/status`, `/schedule`, `/test`, `/sync`), a rodada 5 (item 1, abaixo) introduziu
-`allowedInDepartment()`, que fecha esse gap adicionando a checagem de departamento diretamente no gate de
-módulo para os módulos `juridico`/`ti`.
+impede um líder de TI de *tentar* uma rota jurídica. A rodada 5 (item 1) introduziu
+`allowedInDepartment()` para as rotas de Monday, que não têm registro individual para `scoped()` filtrar;
+a **rodada 6 (item 1) generalizou essa proteção de forma transversal**: `allowedInDepartment()` (leitura)
+e `allowedContent()` (mutação — ver abaixo) são hoje o gate usado em **todo** o CRUD genérico de
+entidades (`/api/entities/:type`, todos os verbos) e em `GET /api/legal/:module`, não apenas nas rotas
+de Monday. Não existe mais nenhuma rota departamental (`juridico`/`ti`) que dependa apenas de `allowed()`
++ `scoped()` — a negação por departamento acontece no próprio gate de módulo, retornando `403` (não mais
+uma listagem vazia por filtragem de `scoped()`) para quem não é do departamento certo nem tem alçada
+global.
 
 ## Autorização em camadas (o que existe hoje, nesta ordem, por rota)
 
@@ -379,6 +383,100 @@ Testado em runtime: líder recebe `403` em `GET`/`PUT /api/dashboard-preferences
 `/budget`; diretoria consegue ler e gravar ambos; preferência de dashboard departamental permitido
 (`legal`) continua funcionando para o líder Jurídico, e é negada (`403`) para o líder de TI.
 
+## P0 corrigidos — rodada 6 (fechamento final de autorização/integridade)
+
+### 1. Isolamento Jurídico x TI generalizado a todo o CRUD genérico de entidades e `/api/legal/:module`
+
+A rodada 5 criou `allowedInDepartment()` só para as quatro rotas de Monday. Rotas equivalentes — que
+também usam módulos departamentais (`juridico`/`ti`) sem registro individual anterior para `scoped()`
+filtrar — continuavam vulneráveis: `POST /api/entities/:type` cria um registro **novo**, então não há
+nada para `scoped()` negar; um líder de TI passava em `allowed(user,'juridico','create')` e o servidor
+criava um registro jurídico com `department:'TI'`. `GET /api/legal/:module` e `GET /api/entities/:type`
+também usavam só `allowed()`, resultando em uma listagem vazia (200) em vez de negar a operação (403).
+
+**Correção:** todos os verbos de `/api/entities/:type` (GET/POST/PATCH/DELETE/restore) e
+`GET /api/legal/:module` passaram a usar `allowedInDepartment()` (leitura) ou `allowedContent()`
+(mutação — ver item 3, que combina `allowedInDepartment()` com a negação de `administrador` em módulos
+de conteúdo). Deny-by-default por departamento, aplicado no próprio gate de módulo, antes de qualquer
+acesso a `collection()` ou a `scoped()`.
+
+Testado em runtime: líder de TI recebe `403` (não mais 200 com lista vazia) em `GET /api/legal/processos`
+e em `POST /api/entities/documentReferences`; líder Jurídico recebe `403` no equivalente departamental
+de TI (hoje só exercitável via dashboard `ti`, já que nenhum tipo de entidade está mapeado para `ti` em
+`ENTITY_MODULE_MAP` — nenhum tipo foi inventado só para testar); diretoria continua acessando e criando
+normalmente.
+
+### 2. Dashboard departamental acessível por usuário sem department (administrador técnico)
+
+`dashboardAuthorized()` só negava quando `user.department` existia **e** não batia com o
+`departmentId` do dashboard (`user.department && definition.departmentId && mismatch`). Um usuário SEM
+`department` (como `administrador` técnico, que desde a rodada 5 não tem `department` de negócio nem
+alçada global) nunca caía nessa condição — passava despercebido pelos dashboards departamentais `legal`
+e `ti`, apesar de `modules:['*']` sempre aceitar o gate de módulo acima. A listagem (`GET /api/dashboards`)
+tinha ainda uma exceção **explícita** (`user.role === 'administrador'`) que isentava esse papel do
+filtro departamental inteiro.
+
+**Correção:** para dashboards com `scope:'department'`, `dashboardAuthorized()` agora exige
+positivamente (A) alçada de negócio global **ou** (B) `user.department` correspondente ao
+`departmentId` do dashboard — ausência de qualquer um dos dois nega. A exceção explícita para
+`administrador` foi removida da listagem, que passou a reutilizar `dashboardAuthorized()` diretamente
+(mesma função usada em `GET /api/dashboards/:id` e em `/api/dashboard-preferences/:id` — nenhuma lógica
+divergente).
+
+Testado em runtime: `administrador` recebe `403` em `GET /api/dashboards/legal` e `GET /api/dashboards/ti`,
+e nenhum dos dois aparece na sua listagem nem em `/api/dashboard-preferences/legal`; líder Jurídico,
+líder de TI e diretoria continuam acessando os dashboards departamentais correspondentes normalmente.
+
+### 3. Administrador técnico ainda podia criar/alterar conteúdo de negócio
+
+A rodada 5 retirou `scopes:['*']` de `administrador`, fechando a **leitura** irrestrita via `scoped()`.
+Mas `modules:['*']`/`actions:['*']` continuavam intactos — e como não há registro prévio no `POST`, não
+existe `scoped()` para barrar a **criação**. `administrador` continuava conseguindo criar/alterar/
+arquivar/restaurar/exportar conteúdo em `POST /api/agenda`, `POST /api/committees`,
+`POST /api/entities/documentReferences`, sub-recursos de projeto, importação de orçamento e exportação de
+apresentações.
+
+**Correção (mínima, sem reorganização de papéis):** `BUSINESS_CONTENT_MODULES` é o conjunto explícito dos
+módulos operacionais/departamentais de negócio (`central`, `estrategia`, `projetos`, `agenda`, `comites`,
+`orcamento`, `juridico`, `ti`) — distintos das rotas técnicas de sistema/integração gated por
+`allowed(user,'*',ação)` (módulo literal `'*'`: auditoria, aprovação de cadastro, backup), que
+`administrador` continua operando normalmente. `allowedContent(user, module, action)` combina
+`allowedInDepartment()` com a negação explícita de `administrador` para qualquer um desses módulos —
+aplicado em toda rota de **mutação** de conteúdo (todos os verbos exceto leitura, que `scoped()` já
+filtra corretamente desde a rodada 5): `POST`/`PATCH`/`DELETE`/`restore` de `/api/entities/:type`,
+`POST /api/agenda`, `POST /api/committees`, todas as rotas de sub-recurso e governança de projeto,
+`POST /api/presentations/validate`/`export` e `POST /api/budgets/import/commit`.
+
+`administrador` mantém integralmente as funções técnicas legítimas: auditoria (`GET /api/audit`),
+aprovação de cadastro (`GET`/`POST /api/auth/requests`), backup/restauração (`POST /api/backup`/`restore`),
+e a operação de integrações departamentais via `allowedInDepartment()` (Monday, que não muda nesta
+rodada — continua sendo uma função técnica de sistema, não criação de conteúdo via motor genérico).
+
+Testado em runtime: `administrador` recebe `403` em `POST /api/agenda`, `POST /api/committees`,
+`POST /api/entities/documentReferences` e `POST /api/projects/:id/actions` (este último, tecnicamente
+`404` — `scoped(user,project)` é avaliado antes do gate de conteúdo, e `administrador` não tem escopo
+sobre nenhum projeto; o resultado prático — não conseguir criar o registro — é o mesmo); continua
+acessando normalmente `GET /api/audit` e `GET /api/auth/requests`.
+
+### 4. PATCH de internalizations não revalidava `processId`
+
+A rodada 5 validou `processId` (existência + `source:'monday'` + `scoped()`) apenas no `POST` de
+`/api/projects/:id/internalizations`. O `PATCH` de sub-recurso de projeto é genérico e não repetia
+nenhuma dessas checagens — uma internalização criada corretamente podia ser alterada depois para um
+`processId` manual, inexistente ou fora de escopo, sem nenhuma validação, quebrando a integridade
+relacional (mesma classe de falha já corrigida para Legal Deadline nas rodadas 3/4).
+
+**Correção:** `validateInternalizationProcess(processId, user, store)` extrai a validação para uma
+função única, reaproveitada em `POST` e `PATCH`. No `PATCH`, valida o **estado candidato** — o
+`processId` do input, se enviado; senão o já gravado no item — mesmo padrão de `validateLegalDeadline()`
+no PATCH: a invariante precisa valer para o registro como ficaria após a atualização, não apenas para os
+campos desta requisição específica. `processId` continua não sendo obrigatório (regra de negócio
+pré-existente, não alterada); só valida quando informado/presente.
+
+Testado em runtime: PATCH para processo manual (`source` diferente de `'monday'`) → `422`; PATCH para
+processo inexistente → `422`; PATCH para processo do Monday mas fora do escopo do usuário → `403`; PATCH
+legítimo preservando o `processId` válido → `200`; nenhuma tentativa inválida altera o registro gravado.
+
 ## P0 corrigido — MFA por papel, não por flag do cadastro (item D, rodada 1)
 
 `requireMfa(user)` depende exclusivamente do papel (`diretoria`, `administrador`, `lider`), nunca da
@@ -407,8 +505,9 @@ flag `user.mfa` do cadastro. Testado em runtime: login como papel privilegiado s
 - **Unitários** (`tests/core.test.js`): `scoped()` (incluindo os casos sintéticos de companyId/speId, e o
   caso `administrador` da rodada 5), `sanitizeEntityInput()` (incluindo scopeType/companyId/speId),
   `entityModule()`, `LEGAL_MODULES`, `requireMfa()`, `hasGlobalScope()`, `allowedInDepartment()`,
-  `normalizeDeptSlug()`, `dashboardAuthorized()` (rodada 5) — chamadas diretas às funções exportadas,
-  sem passar por HTTP.
+  `normalizeDeptSlug()`, `dashboardAuthorized()` (rodada 5, e o caso departamento-sem-alçada-global da
+  rodada 6), `allowedContent()`, `BUSINESS_CONTENT_MODULES`, `validateInternalizationProcess()` (rodada
+  6) — chamadas diretas às funções exportadas, sem passar por HTTP.
 - **Integração HTTP real** (`tests/security-integration.test.js`): sobe um servidor HTTP real com o
   `handler` exportado, injeta usuários e dados de teste (incluindo um segundo projeto sintético em
   outro departamento, registros com companyId/speId sintéticos, e um usuário `administrador` — rodada

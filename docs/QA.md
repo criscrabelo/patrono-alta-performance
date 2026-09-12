@@ -29,12 +29,12 @@ própria v1.3 define o escopo por fase.
 Suíte: `npm test` (Node.js test runner nativo — cada arquivo `*.test.js` roda em processo próprio).
 
 ```
-tests 90
-pass 90
+tests 104
+pass 104
 fail 0
 ```
 
-**`tests/core.test.js` (39 testes)** — unitários e estruturais. Além dos 26 preexistentes e dos 6 da
+**`tests/core.test.js` (43 testes)** — unitários e estruturais. Além dos 26 preexistentes e dos 6 da
 rodada 2, dois testes foram **atualizados na rodada 3** porque a versão anterior validava exatamente o
 comportamento incorreto que a rodada 3 corrigiu:
 - `scoped()` — companyId/speId agora testados com deny-by-default real (ausência ou mismatch nega,
@@ -53,7 +53,14 @@ deixou de ter), `scoped()` com `administrador` (nega conteúdo departamental; ac
 passam), `normalizeDeptSlug()` (normalização de acentos/caixa) e `dashboardAuthorized()` (módulo + regra
 corporativa automática + departamento).
 
-**`tests/security-integration.test.js` (51 testes)** — HTTP real: sobe um servidor
+4 testes novos da **rodada 6**: `allowedContent()` (nega `administrador` em todo módulo de
+`BUSINESS_CONTENT_MODULES` para qualquer ação de mutação; diretoria e líder do próprio departamento
+continuam liberados), `BUSINESS_CONTENT_MODULES` (contém exatamente os 8 módulos operacionais/
+departamentais esperados), `dashboardAuthorized()` sem `department` (nega dashboard departamental para
+`administrador`; diretoria continua acessando) e `validateInternalizationProcess()` (fonte Monday +
+processo não arquivado + escopo do usuário, chamada direta).
+
+**`tests/security-integration.test.js` (61 testes)** — HTTP real: sobe um servidor
 `http.createServer(handler)` de verdade, isolado em diretório de dados temporário
 (`COEVO_DATA_DIR`), injeta usuários e dados de teste, e faz requisições HTTP reais, verificando status e
 corpo da resposta — não presença de texto no código-fonte.
@@ -123,6 +130,27 @@ Os 15 testes novos da **rodada 5** cobrem:
     diretoria consegue ler e gravar ambas.
 11. Preferência de dashboard departamental permitido (`legal`) continua funcionando para o líder do
     departamento correspondente, e é negada para líder de outro departamento.
+
+Os 10 testes novos da **rodada 6** cobrem:
+1. Líder de TI recebe `403` ao tentar criar conteúdo jurídico via motor genérico de entidades
+   (`POST /api/entities/documentReferences`) — isolamento transversal, não apenas nas rotas de Monday.
+2. Líder de TI recebe `403` em `GET /api/legal/processos` (não mais `200` com lista vazia).
+3. Líder Jurídico recebe `403` no módulo TI equivalente (dashboard departamental de TI — não existe
+   ainda tipo de entidade mapeado para `ti` em `ENTITY_MODULE_MAP` para testar via `/api/entities`).
+4. Diretoria (alçada global) continua acessando `/api/legal/processos` e criando conteúdo jurídico
+   normalmente.
+5. Administrador técnico recebe `403` em dashboards departamentais (`legal`, `ti`), que não aparecem em
+   sua listagem nem em `/api/dashboard-preferences/legal`.
+6. Líder Jurídico, líder de TI e diretoria continuam acessando seus dashboards departamentais
+   normalmente.
+7. Administrador técnico recebe `403` (ou `404`, quando `scoped()` nega antes do gate de conteúdo) ao
+   tentar criar conteúdo de negócio: `POST /api/agenda`, `POST /api/committees`,
+   `POST /api/entities/documentReferences`, `POST /api/projects/:id/actions`.
+8. Administrador técnico continua executando funções técnicas legítimas: `GET /api/audit`,
+   `GET /api/auth/requests`.
+9. PATCH de internalization para processo manual/não-Monday (`422`), processo inexistente (`422`) e
+   processo do Monday fora do escopo (`403`) são rejeitados, sem alterar o registro.
+10. PATCH de internalization preservando o `processId` válido continua funcionando (`200`).
 
 ## Catálogo Global de Regressão (§30)
 

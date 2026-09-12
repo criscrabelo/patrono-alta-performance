@@ -182,14 +182,15 @@ test('[HTTP] registro de outro departamento não aparece na listagem, e PATCH/re
   const deadlineId = created.body.id;
   assert.equal(created.body.department, 'Jurídico', 'registro criado por papel departamental herda o department do próprio usuário');
 
-  // TI não deve nem ver este registro na coleção...
+  // TI não deve nem ver este registro na coleção — desde a rodada 6 (item 1), o isolamento
+  // Jurídico x TI é transversal: allowedInDepartment() nega TI no próprio gate de módulo do CRUD
+  // genérico (403), não apenas por filtragem de scoped() (o que antes resultava em 200 com lista vazia).
   const listAsTi = await api('GET', '/api/entities/legalDeadlines', { token: tokenTi });
-  assert.equal(listAsTi.status, 200);
-  assert.ok(!listAsTi.body.some(item => item.id === deadlineId), 'registro do Jurídico não pode vazar para listagem do TI');
+  assert.equal(listAsTi.status, 403, 'líder de TI é negado no próprio gate de módulo departamental para um tipo jurídico (rodada 6, item 1), não apenas filtrado');
 
-  // ...nem alterar por ID direto...
+  // ...nem alterar por ID direto — mesma negação transversal, agora também 403 (não mais 404 via scoped()).
   const patchAsTi = await api('PATCH', `/api/entities/legalDeadlines/${deadlineId}`, { token: tokenTi, json: { origin: 'Alterado indevidamente' } });
-  assert.equal(patchAsTi.status, 404, 'PATCH por ID fora do escopo não pode revelar nem alterar o registro');
+  assert.equal(patchAsTi.status, 403, 'PATCH por módulo departamental de outro departamento é negado no gate de módulo (rodada 6, item 1)');
 
   // ...nem restaurar um registro que arquivou não sendo dele. Hoje só diretoria/administrador têm a
   // ação 'restore' em ROLES — um lider de outro departamento já é barrado no gate de ação (403), antes
@@ -341,10 +342,11 @@ test('[HTTP] usuário departamental não consegue definir scopeType:"global" via
   assert.notEqual(patch.body.scopeType, 'global', 'scopeType não pode ser definido por papel departamental via PATCH');
 
   // Prova que a tentativa de forjar scopeType:'global' realmente não teve efeito: TI continua sem
-  // enxergar o registro do Jurídico.
+  // enxergar o registro do Jurídico — desde a rodada 6 (item 1), líder de TI é negado no próprio gate
+  // de módulo departamental para um tipo jurídico (403), antes mesmo de chegar a scoped().
   const tokenTi = await loginAs(EMAILS.liderTi);
   const listAsTi = await api('GET', '/api/entities/legalDeadlines', { token: tokenTi });
-  assert.ok(!listAsTi.body.some(item => item.id === created.body.id), 'registro não pode ter se tornado global via forjamento de scopeType');
+  assert.equal(listAsTi.status, 403, 'líder de TI é negado no gate de módulo departamental, não apenas filtrado por scoped()');
 });
 
 // --- Item 2: companyId/speId negam por ausência ou mismatch, mesmo com department correspondente ---
@@ -877,4 +879,115 @@ test('[HTTP] preferência de dashboard departamental permitido continua funciona
 
   const tokenTi = await loginAs(EMAILS.liderTi);
   assert.equal((await api('GET', '/api/dashboard-preferences/legal', { token: tokenTi })).status, 403, 'TI não pode configurar preferência do dashboard departamental do Jurídico');
+});
+
+// ============================================================================================
+// Rodada 6 de correções de segurança — testes de integração HTTP real
+// ============================================================================================
+
+// --- Item 1: isolamento Jurídico x TI transversal ao CRUD genérico de entidades e /api/legal ---
+
+test('[HTTP] líder de TI recebe 403 ao tentar criar um registro jurídico via motor genérico de entidades', async () => {
+  const tokenTi = await loginAs(EMAILS.liderTi);
+  const res = await api('POST', '/api/entities/documentReferences', { token: tokenTi, json: { title: 'Referência de teste' } });
+  assert.equal(res.status, 403, 'líder de TI não pode criar conteúdo jurídico só porque `lider` também tem o módulo "juridico" em ROLES');
+});
+
+test('[HTTP] líder de TI recebe 403 em GET /api/legal/processos (não apenas uma listagem vazia)', async () => {
+  const tokenTi = await loginAs(EMAILS.liderTi);
+  const res = await api('GET', '/api/legal/processos', { token: tokenTi });
+  assert.equal(res.status, 403, 'líder de TI é negado no próprio gate de módulo departamental, antes de scoped() filtrar qualquer registro');
+});
+
+test('[HTTP] líder Jurídico recebe 403 no módulo TI equivalente (dashboard departamental de TI) — não existe ainda tipo de entidade mapeado para "ti" em ENTITY_MODULE_MAP', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const res = await api('GET', '/api/dashboards/ti', { token: tokenJuridico });
+  assert.equal(res.status, 403, 'líder Jurídico não pode acessar o equivalente departamental de TI, mesmo tendo o módulo "ti" em ROLES');
+});
+
+test('[HTTP] diretoria (alçada global) continua acessando /api/legal/processos e criando conteúdo jurídico normalmente', async () => {
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  const legal = await api('GET', '/api/legal/processos', { token: tokenDiretoria });
+  assert.equal(legal.status, 200);
+  assert.ok(legal.body.records.length > 0);
+  const created = await api('POST', '/api/entities/documentReferences', { token: tokenDiretoria, json: { title: 'Referência de teste diretoria' } });
+  assert.equal(created.status, 201);
+});
+
+// --- Item 2: administrador técnico não pode acessar dashboards de conteúdo (departamentais) ---
+
+test('[HTTP] administrador técnico recebe 403 em dashboards departamentais (legal/ti), e eles não aparecem na listagem', async () => {
+  const tokenAdministrador = await loginAs(EMAILS.administrador);
+  assert.equal((await api('GET', '/api/dashboards/legal', { token: tokenAdministrador })).status, 403, 'administrador não tem department — não pode acessar dashboard departamental Jurídico');
+  assert.equal((await api('GET', '/api/dashboards/ti', { token: tokenAdministrador })).status, 403, 'idem para o dashboard departamental de TI');
+
+  const list = await api('GET', '/api/dashboards', { token: tokenAdministrador });
+  assert.equal(list.status, 200);
+  assert.ok(!list.body.dashboards.some(d => d.id === 'legal'), 'dashboard departamental Jurídico não deve aparecer na listagem do administrador');
+  assert.ok(!list.body.dashboards.some(d => d.id === 'ti'), 'dashboard departamental de TI não deve aparecer na listagem do administrador');
+});
+
+test('[HTTP] administrador técnico recebe 403 em dashboard-preferences de dashboard departamental (legal)', async () => {
+  const tokenAdministrador = await loginAs(EMAILS.administrador);
+  assert.equal((await api('GET', '/api/dashboard-preferences/legal', { token: tokenAdministrador })).status, 403);
+  assert.equal((await api('PUT', '/api/dashboard-preferences/legal', { token: tokenAdministrador, json: { density: 'compact' } })).status, 403);
+});
+
+test('[HTTP] líder Jurídico, líder de TI e diretoria continuam acessando seus dashboards departamentais normalmente', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  assert.equal((await api('GET', '/api/dashboards/legal', { token: tokenJuridico })).status, 200);
+  const tokenTi = await loginAs(EMAILS.liderTi);
+  assert.equal((await api('GET', '/api/dashboards/ti', { token: tokenTi })).status, 200);
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  assert.equal((await api('GET', '/api/dashboards/legal', { token: tokenDiretoria })).status, 200);
+  assert.equal((await api('GET', '/api/dashboards/ti', { token: tokenDiretoria })).status, 200);
+});
+
+// --- Item 3: administrador técnico não pode criar/alterar conteúdo de negócio ---
+
+test('[HTTP] administrador técnico recebe 403 ao tentar criar conteúdo de negócio (agenda, comitês, entidade jurídica, sub-recurso de projeto)', async () => {
+  const tokenAdministrador = await loginAs(EMAILS.administrador);
+  assert.equal((await api('POST', '/api/agenda', { token: tokenAdministrador, json: { title: 'Evento de teste administrador' } })).status, 403, 'administrador não pode criar agenda — conteúdo de negócio, não função técnica');
+  assert.equal((await api('POST', '/api/committees', { token: tokenAdministrador, json: { title: 'Comitê de teste administrador' } })).status, 403);
+  assert.equal((await api('POST', '/api/entities/documentReferences', { token: tokenAdministrador, json: { title: 'Referência de teste administrador' } })).status, 403);
+  // scoped(user,project) é avaliado ANTES do gate de módulo/conteúdo nas rotas de sub-recurso de
+  // projeto (mesmo padrão de "erro de permissão nunca revela existência de registro restrito" já usado
+  // em outras rotas) — como administrador não tem alçada global nem department, nunca está no escopo de
+  // nenhum projeto, e a rota nega com 404 antes mesmo de chegar a allowedContent(). O resultado prático
+  // é o mesmo pedido (administrador não consegue criar o registro), só o código HTTP muda.
+  assert.equal((await api('POST', `/api/projects/${PROJECT_ID}/actions`, { token: tokenAdministrador, json: { title: 'Ação de teste administrador' } })).status, 404, 'administrador não pode criar conteúdo de projeto (negado por escopo antes do gate de conteúdo)');
+});
+
+test('[HTTP] administrador técnico continua podendo executar funções técnicas legítimas (auditoria, aprovação de cadastro)', async () => {
+  const tokenAdministrador = await loginAs(EMAILS.administrador);
+  assert.equal((await api('GET', '/api/audit', { token: tokenAdministrador })).status, 200, 'auditoria é função técnica de sistema, não conteúdo de negócio');
+  assert.equal((await api('GET', '/api/auth/requests', { token: tokenAdministrador })).status, 200, 'aprovação de cadastro continua sendo função técnica de administrador');
+});
+
+// --- Item 4: PATCH de internalizations revalida processId (fonte Monday + escopo) ---
+
+test('[HTTP] PATCH de internalization para processo manual/não-Monday é rejeitado com 422, sem alterar o registro', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', `/api/projects/${PROJECT_ID}/internalizations`, { token: tokenJuridico, json: { processId: 'proc-juridico-teste', title: 'Internalização válida rodada 6' } });
+  assert.equal(created.status, 201);
+  const id = created.body.id;
+
+  const patchManual = await api('PATCH', `/api/projects/${PROJECT_ID}/internalizations/${id}`, { token: tokenJuridico, json: { processId: 'proc-falso-nao-monday' } });
+  assert.equal(patchManual.status, 422);
+
+  const patchInexistente = await api('PATCH', `/api/projects/${PROJECT_ID}/internalizations/${id}`, { token: tokenJuridico, json: { processId: 'processo-que-nao-existe' } });
+  assert.equal(patchInexistente.status, 422);
+
+  const patchForaDeEscopo = await api('PATCH', `/api/projects/${PROJECT_ID}/internalizations/${id}`, { token: tokenJuridico, json: { processId: 'proc-ti-teste' } });
+  assert.equal(patchForaDeEscopo.status, 403, 'processo do Monday mas de outro departamento não pode ser relacionado via PATCH');
+
+  // Nenhuma das tentativas inválidas deve ter alterado o processId gravado.
+  const listAfterInvalid = await api('GET', `/api/projects/${PROJECT_ID}`, { token: tokenJuridico });
+  const stillValid = (listAfterInvalid.body.internalizations || listAfterInvalid.body.recoveryCases || []).find(item => item.id === id);
+  if (stillValid) assert.equal(stillValid.processId, 'proc-juridico-teste', 'tentativas inválidas de PATCH não podem ter alterado o processId gravado');
+
+  const patchValido = await api('PATCH', `/api/projects/${PROJECT_ID}/internalizations/${id}`, { token: tokenJuridico, json: { title: 'Internalização atualizada legitimamente' } });
+  assert.equal(patchValido.status, 200, 'PATCH legítimo preservando o processId válido continua funcionando');
+  assert.equal(patchValido.body.processId, 'proc-juridico-teste');
+  assert.equal(patchValido.body.title, 'Internalização atualizada legitimamente');
 });
