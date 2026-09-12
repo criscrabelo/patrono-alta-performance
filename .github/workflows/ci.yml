@@ -1,0 +1,39 @@
+name: CI
+
+# Pipeline mínimo, coerente com o que o projeto realmente usa hoje — sem inventar ferramentas
+# (lint/typecheck) que não existem no package.json. Roda em todo Pull Request e push para as branches
+# principais, para que "os testes passam" nunca dependa apenas da afirmação local de quem abriu o PR.
+on:
+  pull_request:
+  push:
+    branches: [master, main]
+
+jobs:
+  test:
+    name: npm test (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20.x, 22.x]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Instalação determinística das dependências
+        run: npm ci
+
+      - name: npm test (unitários + integração HTTP real)
+        run: npm test
+
+      - name: npm audit (relatório informativo, não bloqueia o merge)
+        # Duas vulnerabilidades altas conhecidas em pptxgenjs/image-size (docs/SECURITY.md) — o upgrade
+        # disponível é major e precisa de validação própria da exportação PPTX/PDF antes de ser aplicado.
+        # Mantido como relatório visível no CI, não como gate, para não travar todo PR por essa pendência
+        # já registrada e rastreada separadamente.
+        run: npm audit --audit-level=high || true
