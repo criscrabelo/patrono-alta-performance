@@ -9,7 +9,7 @@
 | Entidade (§6) | Implementação atual | Situação | Nota |
 |---|---|---|---|
 | Legal Process | Coleção `processos`, sincronizada do Monday (somente leitura), com `externalId`, `source`, `syncedAt`, `department:'Jurídico'` (atribuído explicitamente na rodada 2 — ver `docs/DECISIONS.md`, ADR-005). Mutação via motor genérico de entidades bloqueada (rodada 3, ADR-008) — só a sincronização Monday escreve nesta coleção | **Presente**, como registro operacional/transitório (Monday é System of Record transitório, §9) | Não é modelado com ID Patrono próprio ainda — usa o registro Monday normalizado diretamente |
-| Legal Deadline | Coleção genérica `legalDeadlines`, adicionada no Sprint 1 via `/api/entities/legalDeadlines` | **Esqueleto do Sprint 1 presente; D1 (fonte/origem) e enum de `status` HOMOLOGADOS — ver `docs/DECISIONS.md`, seção 1.1** | Exige `processId`, `origin`, `date` na criação; herda versionamento, exclusão lógica, restauração e auditoria do motor genérico. `originType` obrigatório e enum fechado de `status` (ativo/suspenso/cumprido/cancelado) estão aprovados para o Sprint 2 (ver seção "D1 homologada" abaixo) — **ainda não implementados** |
+| Legal Deadline | Coleção genérica `legalDeadlines`, adicionada no Sprint 1 via `/api/entities/legalDeadlines` | **Sprint 2, Fase 1 implementada** — `originType` obrigatório e enum fechado de `status` (com default server-side `ativo`) validados em `validateLegalDeadline()`; `isLegalDeadlineOverdue()` pronta e testada, ainda não consumida por nenhuma view (Fase 2) | Exige `processId`, `origin`, `date`, `originType` na criação; herda versionamento, exclusão lógica, restauração e auditoria do motor genérico |
 | Responsibility | Sem entidade própria; responsável é um campo textual dentro dos registros Monday normalizados (`processResponsibleValues`) | **Gap** | `responsibilities` reservado em `ENTITY_MODULE_MAP` para uso futuro quando a modelagem de Responsibility for necessária além do campo textual |
 | External Identity | Cada registro sincronizado do Monday já carrega `source: 'monday'`, `externalId`, `boardId`, `boardName`, `syncedAt` | **Presente**, de forma implícita (par sistema/id/timestamp por registro) | Padrão consistente com "`patrono_id → (sistema, id_externo, tipo de fonte, última sincronização)`" (§8); generalização como entidade própria fica para quando outra fonte além do Monday for integrada |
 | Document / File Reference | Não implementado | **Gap** — fora do escopo funcional atual (nenhum módulo de documentos ainda) | `documentReferences` reservado em `ENTITY_MODULE_MAP` para quando o piloto exigir referência documental (Google Drive, §10/§23) |
@@ -34,7 +34,8 @@ revalidação no PATCH adicionada na rodada 3 de correções de segurança — `
 | `processId` | Sim | Referência ao Legal Process relacionado — validada na criação **e no PATCH** contra a coleção `processos` (existência + `source==='monday'` + escopo do usuário sobre o processo; ver `docs/DECISIONS.md`, ADR-004 para a ambiguidade `processos`/`legalProcesses`, e ADR-008 para o bloqueio de mutação genérica sobre tipos Monday-sourced) |
 | `origin` | Sim | Origem identificada do prazo (nunca inventada; deve vir de fonte validada ou registro autorizado, §6) — não pode ser esvaziada por PATCH |
 | `date` | Sim | Data-limite — não pode ser esvaziada por PATCH |
-| `status` | Não (default implícito) | Ex.: Ativo, Suspenso, Cumprido — suspensão preserva motivo/estado, nunca é exibida como vencimento comum (§30 caso 6) |
+| `originType` | Sim (Sprint 2, Fase 1) | Enum fechado `JUDICIAL_PROCESSUAL` \| `INTERNAL_CONTROL` (D1.3 homologada, `docs/DECISIONS.md` seção 1.1) — nunca ausente, vazio ou fora do enum, na criação e no PATCH (estado candidato) |
+| `status` | Não na criação (default server-side `ativo`); enum fechado sempre validado | `ativo` \| `suspenso` \| `cumprido` \| `cancelado` (D1 homologada). `reaberto`/`vencido`/`atrasado`/`em_atraso` nunca são valores aceitos — reabertura é o retorno a `ativo` (mesmo `id`, histórico preservado); atraso é condição derivada, calculada por `isLegalDeadlineOverdue()`, nunca persistida |
 | `responsible` | Não | Responsável pelo cumprimento |
 
 A revalidação no PATCH roda sobre o **estado candidato** (registro atual mesclado com o input
@@ -50,47 +51,79 @@ processo relacionado tenha sido excluído/desescopado desde a criação do prazo
   `CITAÇÃO/PROTOCOLO`) é tratada como prazo jurídico por si só.
 - Não infere prazo a partir do Google Calendar (§10: "Google Calendar não é fonte do prazo jurídico").
 
-## D1 homologada — modelo previsto para o Sprint 2 (não implementado nesta etapa)
+## Sprint 2, Fase 1 — implementada (D1 homologada, `docs/DECISIONS.md` seção 1.1)
 
-A decisão D1 (`docs/DECISIONS.md`, seção 1.1) foi homologada pela Cristiane em 12/09/2026. Esta seção
-documenta o modelo de dados **previsto** para o Sprint 2 — nenhum destes campos foi criado ou alterado
-em código nesta etapa; permanece o esqueleto descrito acima até a implementação ser autorizada.
+A D1 e a decisão de `status` complementar foram homologadas pela Cristiane em 12/09/2026. A Fase 1 do
+Sprint 2 (`docs/SPRINT2-PLANO.md`) implementou a modelagem e as invariantes correspondentes — **Fases
+2–4 continuam não iniciadas** (correção dos widgets do dashboard, listagem/filtros/tela de detalhe,
+Agenda/Atenção, Google Calendar).
 
-### Campos adicionais previstos para `legalDeadlines`
+### `originType` — implementado
 
-| Campo | Obrigatório (Sprint 2) | Descrição |
-|---|---|---|
-| `originType` | Sim | Enum fechado — `JUDICIAL_PROCESSUAL` (fato jurídico formal: intimação, publicação, despacho, decisão, audiência, mandado, ciência formal) ou `INTERNAL_CONTROL` (prazo gerencial interno do Jurídico). Impede que os dois tipos recebam a mesma semântica/criticidade visual; ambos devem ser filtráveis separadamente nas views |
-| `evidenceReference` | Não (evolução futura, fora do Sprint 2) | Referência a Document/File Reference quando essa entidade existir (gap já registrado abaixo). Sem este campo, um Legal Deadline é considerado **"Confirmado pelo Jurídico"**, nunca "comprovado documentalmente" — distinção de linguagem obrigatória em toda tela/mensagem do produto |
+Enum fechado `JUDICIAL_PROCESSUAL` (fato jurídico formal: intimação, publicação, despacho, decisão,
+audiência, mandado, ciência formal) \| `INTERNAL_CONTROL` (prazo gerencial interno do Jurídico), validado
+por `validateLegalDeadline()` — obrigatório na criação; no PATCH, revalidado sobre o **estado candidato**
+(mesmo padrão de `processId`/`origin`/`date`), rejeitando ausência, `null`, string vazia/só com espaços,
+ou qualquer valor fora do enum, sem gravar nada. `evidenceReference` **não foi implementado** (evolução
+futura, fora da Fase 1) — referência a Document/File Reference quando essa entidade existir (gap já
+registrado abaixo). Sem esse campo, um Legal Deadline é considerado **"Confirmado pelo Jurídico"**, nunca
+"comprovado documentalmente" — distinção de linguagem que passa a valer para qualquer tela/mensagem que
+o Sprint 2 (Fase 2+) vier a construir sobre este modelo.
 
-`source` (campo já reservado pelo motor genérico) **não** foi adotado para Legal Deadline nesta
-homologação — permanece exclusivo de registros sincronizados do Monday (`source:'monday'`); Legal
-Deadline nunca tem esse campo preenchido, por nascer sempre de registro manual (D1.1).
+`source` (campo já reservado pelo motor genérico) **não** foi adotado para Legal Deadline — permanece
+exclusivo de registros sincronizados do Monday (`source:'monday'`); Legal Deadline nunca tem esse campo
+preenchido, por nascer sempre de registro manual (D1.1).
 
-### `status` — APROVADO para o Sprint 2 (ainda não implementado)
+### `status` — implementado
 
-Aprovado pela Cristiane em 12/09/2026 (`docs/DECISIONS.md`, seção 1.1, "Status do Legal Deadline"):
+Enum fechado `ativo`, `suspenso`, `cumprido`, `cancelado`, validado por `validateLegalDeadline()` em
+toda criação e PATCH. Nenhum outro valor é aceito — incluindo, explicitamente, `reaberto`, `vencido`,
+`atrasado` e `em_atraso`. **Default server-side:** quando o cliente não informa `status` na criação, o
+servidor atribui `ativo` antes da validação (só o campo **ausente** recebe o default — um valor explícito,
+mesmo inválido, segue para validação normal, nunca é silenciosamente substituído).
 
-- Enum fechado: `ativo`, `suspenso`, `cumprido`, `cancelado`. Nenhum outro valor é aceito no Sprint 2.
-- **Reabertura não é um quinto status.** Um Legal Deadline reaberto mantém o mesmo `id`, retorna
-  `status` para `ativo`, e preserva o ciclo anterior (motivo, responsável, data/hora, `before`/`after`)
-  no histórico de auditoria — nunca cria um valor `reaberto` persistido.
-- **"Vencido"/"atrasado"/"em atraso" não é status** — é condição **derivada de view**: só é exibida
-  quando `status = ativo` **e** `date` é anterior à data atual. `suspenso`, `cumprido` e `cancelado`
-  nunca são exibidos como atraso, independentemente do valor de `date`.
+**Reabertura não é um quinto status.** Um Legal Deadline reaberto é um `PATCH` comum para
+`status:'ativo'`: mantém o mesmo `id`, incrementa `version`, atualiza `updatedAt`/`updatedBy`. Para
+`legalDeadlines` especificamente (e só para este tipo — nenhuma outra entidade genérica recebe este
+tratamento), o `PATCH` de `/api/entities/:type` extrai `reason` do input antes de sanitizar, para
+alimentar `audit()` com o motivo da alteração; o ciclo anterior (`before`/`after`, quem alterou, quando,
+por quê) fica preservado no histórico de auditoria, nunca em um valor de status separado. **Reabertura
+exige `reason` textual não vazio (após remover espaços):** quando o registro atual tem `status` diferente
+de `ativo` e o `PATCH` está levando o estado candidato de volta a `ativo`, a ausência de `reason` (ou um
+valor só com espaços) é rejeitada com `422`, sem alterar `status`, `version` ou qualquer campo do
+registro, e sem criar evento de auditoria — a suspensão/cancelamento/cumprimento anterior permanece
+intocado. `reason` nunca é persistido como campo do registro `legalDeadlines`; alimenta exclusivamente o
+evento de auditoria.
 
-**Isto é uma decisão aprovada, não uma implementação.** O campo `status` de `legalDeadlines` continua,
-hoje, sendo texto livre (sem enum, sem validação) — a validação do enum fechado e a lógica de "atraso
-derivado" nas views são tarefas da Fase 1 do Sprint 2 (`docs/SPRINT2-PLANO.md`), ainda não iniciadas.
+**"Vencido"/"atrasado"/"em atraso" é condição derivada, não status.** Nova função pura e centralizada
+`isLegalDeadlineOverdue(deadline, today)`: retorna `true` somente quando `status === 'ativo'` **e**
+`date` é anterior a `today` (data civil `YYYY-MM-DD`, comparação lexicográfica determinística, sem
+conversão para `Date`/UTC — `today` default usa o fuso `America/Sao_Paulo`, mesmo padrão já usado por
+`scheduleDueNow()`). `suspenso`, `cumprido` e `cancelado` nunca são considerados atrasados,
+independentemente de `date`; um prazo `ativo` com `date` igual a hoje também não é considerado atrasado
+(só vence após o fim da data civil). **Esta função ainda não é consumida por nenhuma view** — ela existe,
+está testada, mas `dashboard-service.js` e demais telas continuam como estavam (ver item abaixo);
+conectá-la a uma view é tarefa da Fase 2.
 
-### Regra de integridade obrigatória para o Sprint 2 (dashboard)
+### Regra de integridade obrigatória para a Fase 2 do Sprint 2 (dashboard) — ainda pendente
 
 O levantamento técnico da D1 identificou que `dashboard-service.js` (widgets do dashboard `legal`
 relacionados a prazo) usa hoje uma coluna bruta de data do Monday (`processDate()`, sobre o board
-`processos`) em vez da coleção `legalDeadlines`. Isso contraria a D1 homologada e é registrado como
-**tarefa obrigatória do Sprint 2** (não corrigida nesta etapa — é alteração de código, fora do escopo de
-homologação documental): nenhuma view pode calcular ou apresentar "prazo jurídico" com lógica própria
-paralela; `legalDeadlines` passa a ser a única fonte canônica para qualquer widget de prazo.
+`processos`) em vez da coleção `legalDeadlines`. Isso contraria a D1 homologada e **continua registrado
+como tarefa obrigatória da Fase 2** — deliberadamente **não corrigido nesta Fase 1** (fora do escopo
+autorizado desta rodada): nenhuma view pode calcular ou apresentar "prazo jurídico" com lógica própria
+paralela; `legalDeadlines` (e `isLegalDeadlineOverdue()` para atraso) devem ser a única fonte canônica
+para qualquer widget de prazo, quando a Fase 2 for autorizada.
+
+### Registros legados anteriores à D1 — sem backfill automático
+
+`originType` é uma decisão jurídica sobre a natureza do prazo (fato jurídico-processual vs. controle
+interno) — **não pode ser inferida automaticamente** a partir de dados existentes. Esta rodada
+**não criou nenhuma migration nem backfill** para Legal Deadlines eventualmente persistidos antes da
+homologação da D1 (12/09/2026). Caso existam registros assim em dados persistidos, eles precisam ser
+**revisados e classificados manualmente pelo Jurídico** (atribuindo `originType`/`status` corretos via
+`PATCH` comum, um a um) antes de qualquer edição ou homologação formal do piloto — nenhuma tela ou rotina
+deve assumir que um Legal Deadline pré-D1 já tem `originType` válido sem essa revisão.
 
 ## Distinções que não podem ser violadas (checadas nesta execução)
 

@@ -176,7 +176,7 @@ test('[HTTP] registro de outro departamento não aparece na listagem, e PATCH/re
 
   const created = await api('POST', '/api/entities/legalDeadlines', {
     token: tokenJuridico,
-    json: { processId: 'proc-juridico-teste', origin: 'Intimação eletrônica (teste)', date: '2026-12-01' }
+    json: { processId: 'proc-juridico-teste', origin: 'Intimação eletrônica (teste)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' }
   });
   assert.equal(created.status, 201);
   const deadlineId = created.body.id;
@@ -223,7 +223,7 @@ test('[HTTP] POST /api/entities/:type ignora id/version/createdBy/department for
       id: 'id-forjado-pelo-cliente', version: 999, createdAt: '2000-01-01T00:00:00.000Z', createdBy: 'Invasor',
       updatedAt: '2000-01-01T00:00:00.000Z', updatedBy: 'Invasor', source: 'monday', externalId: 'ext-forjado',
       department: 'TI', // colaborador não pode escolher o department do próprio registro
-      processId: 'proc-juridico-teste', origin: 'Intimação eletrônica (teste)', date: '2026-12-05'
+      processId: 'proc-juridico-teste', origin: 'Intimação eletrônica (teste)', date: '2026-12-05', originType: 'JUDICIAL_PROCESSUAL'
     }
   });
   assert.equal(res.status, 201);
@@ -239,7 +239,7 @@ test('[HTTP] POST /api/entities/:type ignora id/version/createdBy/department for
 test('[HTTP] PATCH /api/entities/:type ignora id/createdBy/version/deletedAt/department forjados no corpo da requisição', async () => {
   const token = await loginAs(EMAILS.liderJuridico);
   const created = await api('POST', '/api/entities/legalDeadlines', {
-    token, json: { processId: 'proc-juridico-teste', origin: 'Origem original (teste)', date: '2026-12-10' }
+    token, json: { processId: 'proc-juridico-teste', origin: 'Origem original (teste)', date: '2026-12-10', originType: 'JUDICIAL_PROCESSUAL' }
   });
   assert.equal(created.status, 201);
   const originalId = created.body.id;
@@ -266,25 +266,29 @@ test('[HTTP] PATCH /api/entities/:type ignora id/createdBy/version/deletedAt/dep
 
 // --- 7 e 8. Legal Deadline: origem obrigatória e integridade relacional do processo ---
 
-test('[HTTP] Legal Deadline sem origem/processId/date é rejeitado com 422', async () => {
+test('[HTTP] Legal Deadline sem origem/processId/date/originType é rejeitado com 422', async () => {
   const token = await loginAs(EMAILS.liderJuridico);
-  const semOrigem = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', date: '2026-12-01' } });
+  const semOrigem = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
   assert.equal(semOrigem.status, 422);
-  const semProcesso = await api('POST', '/api/entities/legalDeadlines', { token, json: { origin: 'Teste', date: '2026-12-01' } });
+  const semProcesso = await api('POST', '/api/entities/legalDeadlines', { token, json: { origin: 'Teste', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
   assert.equal(semProcesso.status, 422);
-  const semData = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Teste' } });
+  const semData = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Teste', originType: 'JUDICIAL_PROCESSUAL' } });
   assert.equal(semData.status, 422);
+  // Sprint 2, Fase 1 (D1.3 homologada): originType passa a ser obrigatório na mesma classe de
+  // validação — ausência, null, string vazia ou valor fora do enum são todos rejeitados com 422.
+  const semOriginType = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Teste', date: '2026-12-01' } });
+  assert.equal(semOriginType.status, 422, 'originType ausente deve ser rejeitado');
 });
 
 test('[HTTP] Legal Deadline com processId inexistente é rejeitado com 422', async () => {
   const token = await loginAs(EMAILS.liderJuridico);
-  const res = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'processo-que-nao-existe', origin: 'Teste', date: '2026-12-01' } });
+  const res = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'processo-que-nao-existe', origin: 'Teste', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
   assert.equal(res.status, 422);
 });
 
 test('[HTTP] Legal Deadline apontando para processo fora do escopo do usuário é rejeitado com 403, nunca criado', async () => {
   const token = await loginAs(EMAILS.liderJuridico);
-  const res = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-ti-teste', origin: 'Teste', date: '2026-12-01' } });
+  const res = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-ti-teste', origin: 'Teste', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
   assert.equal(res.status, 403);
   const list = await api('GET', '/api/entities/legalDeadlines', { token });
   assert.ok(!list.body.some(item => item.processId === 'proc-ti-teste'), 'nenhum registro deve ter sido criado apontando para o processo fora de escopo');
@@ -333,7 +337,7 @@ test('[HTTP] __proto__ e outros tipos arbitrários são negados em todos os verb
 
 test('[HTTP] usuário departamental não consegue definir scopeType:"global" via POST nem PATCH', async () => {
   const token = await loginAs(EMAILS.colaboradorJuridico);
-  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Teste scopeType', date: '2026-12-15', scopeType: 'global' } });
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Teste scopeType', date: '2026-12-15', scopeType: 'global', originType: 'JUDICIAL_PROCESSUAL' } });
   assert.equal(created.status, 201);
   assert.notEqual(created.body.scopeType, 'global', 'scopeType não pode ser definido por papel departamental na criação');
 
@@ -374,7 +378,7 @@ test('[HTTP] companyId nega por ausência mesmo quando department coincide (deny
 
 test('[HTTP] PATCH de Legal Deadline não permite quebrar as invariantes de origem/processo/data', async () => {
   const token = await loginAs(EMAILS.liderJuridico);
-  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem válida', date: '2026-12-25' } });
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem válida', date: '2026-12-25', originType: 'JUDICIAL_PROCESSUAL' } });
   assert.equal(created.status, 201);
   const id = created.body.id;
 
@@ -661,10 +665,10 @@ test('[HTTP] importação de orçamento bloqueia linha de outro departamento par
 
 test('[HTTP] Legal Deadline rejeita origin em branco (POST e PATCH)', async () => {
   const token = await loginAs(EMAILS.liderJuridico);
-  const semOrigem = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: '   ', date: '2026-12-01' } });
+  const semOrigem = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: '   ', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
   assert.equal(semOrigem.status, 422, 'origin só com espaços deve ser rejeitado, não apenas origin ausente');
 
-  const valido = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem válida rodada 4', date: '2026-12-01' } });
+  const valido = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem válida rodada 4', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
   assert.equal(valido.status, 201);
   const patchVazio = await api('PATCH', `/api/entities/legalDeadlines/${valido.body.id}`, { token, json: { origin: '   ' } });
   assert.equal(patchVazio.status, 422, 'PATCH também rejeita origin só com espaços');
@@ -673,11 +677,11 @@ test('[HTTP] Legal Deadline rejeita origin em branco (POST e PATCH)', async () =
 test('[HTTP] Legal Deadline rejeita data inválida — "banana", espaço, e "2026-99-99" (POST e PATCH)', async () => {
   const token = await loginAs(EMAILS.liderJuridico);
   for (const badDate of ['banana', ' ', '2026-99-99', '']) {
-    const res = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Teste data inválida', date: badDate } });
+    const res = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Teste data inválida', date: badDate, originType: 'JUDICIAL_PROCESSUAL' } });
     assert.equal(res.status, 422, `date="${badDate}" deveria ser rejeitado`);
   }
 
-  const valido = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem para PATCH de data inválida', date: '2026-12-05' } });
+  const valido = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem para PATCH de data inválida', date: '2026-12-05', originType: 'JUDICIAL_PROCESSUAL' } });
   assert.equal(valido.status, 201);
   for (const badDate of ['banana', '2026-99-99']) {
     const patch = await api('PATCH', `/api/entities/legalDeadlines/${valido.body.id}`, { token, json: { date: badDate } });
@@ -690,7 +694,7 @@ test('[HTTP] Legal Deadline herda o escopo (department/companyId/speId/scopeType
   // Diretoria tenta forjar department:'TI' e scopeType:'global' num prazo ligado a um processo do Jurídico
   const created = await api('POST', '/api/entities/legalDeadlines', {
     token: tokenDiretoria,
-    json: { processId: 'proc-juridico-teste', origin: 'Teste herança de escopo', date: '2026-12-10', department: 'TI', scopeType: 'global', companyId: 'empresa-forjada' }
+    json: { processId: 'proc-juridico-teste', origin: 'Teste herança de escopo', date: '2026-12-10', department: 'TI', scopeType: 'global', companyId: 'empresa-forjada', originType: 'JUDICIAL_PROCESSUAL' }
   });
   assert.equal(created.status, 201);
   assert.equal(created.body.department, 'Jurídico', 'department deve ser herdado do processo relacionado, nunca escolhido livremente — nem por diretoria');
@@ -1029,7 +1033,7 @@ test('[HTTP] diretoria (alçada de negócio global) continua acessando GET e POS
 test('[HTTP] administrador técnico recebe 200 em GET /api/audit, mas sem before/after; diretoria recebe o evento completo', async () => {
   // Gera um evento de auditoria com before/after de conteúdo real (PATCH de Legal Deadline já audita).
   const tokenJuridico = await loginAs(EMAILS.liderJuridico);
-  const created = await api('POST', '/api/entities/legalDeadlines', { token: tokenJuridico, json: { processId: 'proc-juridico-teste', origin: 'Origem para auditoria rodada 7', date: '2026-12-20' } });
+  const created = await api('POST', '/api/entities/legalDeadlines', { token: tokenJuridico, json: { processId: 'proc-juridico-teste', origin: 'Origem para auditoria rodada 7', date: '2026-12-20', originType: 'JUDICIAL_PROCESSUAL' } });
   assert.equal(created.status, 201);
   await api('PATCH', `/api/entities/legalDeadlines/${created.body.id}`, { token: tokenJuridico, json: { origin: 'Origem alterada para teste de auditoria' } });
 
@@ -1055,4 +1059,327 @@ test('[HTTP] administrador técnico recebe 200 em GET /api/audit, mas sem before
 test('[HTTP] usuário sem autorização de auditoria recebe 403 em GET /api/audit', async () => {
   const tokenLider = await loginAs(EMAILS.liderJuridico);
   assert.equal((await api('GET', '/api/audit', { token: tokenLider })).status, 403, 'líder não tem allowed(user,"*") — sem alçada de auditoria');
+});
+
+// ============================================================================================
+// Sprint 2, Fase 1 — testes de integração HTTP real (D1 homologada: originType, status,
+// reabertura, atraso derivado). Escopo estritamente limitado à Fase 1 — nenhuma correção de
+// dashboard, Agenda/Atenção, Google Calendar ou cálculo automático de prazo nesta rodada.
+// ============================================================================================
+
+test('[HTTP] líder Jurídico cria Legal Deadline JUDICIAL_PROCESSUAL válido', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const res = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Intimação eletrônica Fase 1', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(res.status, 201);
+  assert.equal(res.body.originType, 'JUDICIAL_PROCESSUAL');
+  assert.equal(res.body.status, 'ativo', 'status recebe o default server-side "ativo" quando não informado na criação');
+});
+
+test('[HTTP] líder Jurídico cria Legal Deadline INTERNAL_CONTROL válido', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const res = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Controle interno de acompanhamento', date: '2026-12-01', originType: 'INTERNAL_CONTROL' } });
+  assert.equal(res.status, 201);
+  assert.equal(res.body.originType, 'INTERNAL_CONTROL');
+});
+
+test('[HTTP] POST sem originType é rejeitado com 422', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const res = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Teste', date: '2026-12-01' } });
+  assert.equal(res.status, 422);
+});
+
+test('[HTTP] POST com originType fora do enum é rejeitado com 422', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const res = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Teste', date: '2026-12-01', originType: 'ALGO_INVALIDO' } });
+  assert.equal(res.status, 422);
+});
+
+test('[HTTP] PATCH com originType fora do enum é rejeitado com 422, sem alterar o registro', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem válida Fase 1', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(created.status, 201);
+  const patch = await api('PATCH', `/api/entities/legalDeadlines/${created.body.id}`, { token, json: { originType: 'ALGO_INVALIDO' } });
+  assert.equal(patch.status, 422);
+  const list = await api('GET', '/api/entities/legalDeadlines', { token });
+  const record = list.body.find(item => item.id === created.body.id);
+  assert.equal(record.originType, 'JUDICIAL_PROCESSUAL', 'tentativa inválida de PATCH não pode ter alterado o originType gravado');
+});
+
+test('[HTTP] PATCH que tenta esvaziar originType é rejeitado com 422, sem alterar o registro', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem válida Fase 1b', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(created.status, 201);
+  const patch = await api('PATCH', `/api/entities/legalDeadlines/${created.body.id}`, { token, json: { originType: '' } });
+  assert.equal(patch.status, 422);
+  const list = await api('GET', '/api/entities/legalDeadlines', { token });
+  const record = list.body.find(item => item.id === created.body.id);
+  assert.equal(record.originType, 'JUDICIAL_PROCESSUAL', 'originType não pode ser esvaziado por PATCH');
+});
+
+test('[HTTP] POST com status fora do enum é rejeitado com 422', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const res = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Teste', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', status: 'inexistente' } });
+  assert.equal(res.status, 422);
+});
+
+test('[HTTP] POST com status "reaberto" é rejeitado com 422 — reabertura nunca é um status persistido', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const res = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Teste', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', status: 'reaberto' } });
+  assert.equal(res.status, 422);
+});
+
+test('[HTTP] PATCH com status fora do enum é rejeitado com 422, sem alterar o registro', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem válida Fase 1c', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(created.status, 201);
+  const patch = await api('PATCH', `/api/entities/legalDeadlines/${created.body.id}`, { token, json: { status: 'reaberto' } });
+  assert.equal(patch.status, 422);
+  const list = await api('GET', '/api/entities/legalDeadlines', { token });
+  const record = list.body.find(item => item.id === created.body.id);
+  assert.equal(record.status, 'ativo', 'status permanece "ativo" após tentativa inválida de PATCH');
+});
+
+test('[HTTP] PATCH para "suspenso" é aceito (200) e audita before/after; reabertura para "ativo" preserva o mesmo id, incrementa version e mantém o histórico', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token: tokenJuridico, json: { processId: 'proc-juridico-teste', origin: 'Origem para reabertura', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(created.status, 201);
+  const id = created.body.id;
+  assert.equal(created.body.status, 'ativo');
+
+  const suspended = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token: tokenJuridico, json: { status: 'suspenso', reason: 'Suspenso por acordo entre as partes' } });
+  assert.equal(suspended.status, 200);
+  assert.equal(suspended.body.status, 'suspenso');
+  assert.equal(suspended.body.id, id, 'suspensão preserva o mesmo id — nunca cria um registro novo');
+  assert.equal(suspended.body.version, 2, 'version incrementa a cada alteração');
+
+  // Diretoria (alçada global) consegue ver o evento de auditoria completo, incluindo before/after,
+  // confirmando que o motivo (reason) e o ciclo anterior ficam preservados no histórico.
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  const auditList = await api('GET', '/api/audit', { token: tokenDiretoria });
+  const suspendEvent = auditList.body.find(event => event.entityId === id && event.after?.status === 'suspenso');
+  assert.ok(suspendEvent, 'evento de auditoria da suspensão deve existir');
+  assert.equal(suspendEvent.before.status, 'ativo', 'before preserva o status anterior à suspensão');
+  assert.equal(suspendEvent.reason, 'Suspenso por acordo entre as partes', 'motivo da alteração é preservado no histórico');
+
+  // Reabertura: retorna para "ativo", mantém o mesmo id, version incrementa novamente, e o ciclo
+  // suspenso anterior continua recuperável no histórico de auditoria (nunca um status "reaberto").
+  const reopened = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token: tokenJuridico, json: { status: 'ativo', reason: 'Reaberto após revogação do acordo' } });
+  assert.equal(reopened.status, 200);
+  assert.equal(reopened.body.status, 'ativo');
+  assert.equal(reopened.body.id, id, 'reabertura preserva o mesmo id — não é um registro novo');
+  assert.equal(reopened.body.version, 3, 'version incrementa também na reabertura');
+
+  const auditAfterReopen = await api('GET', '/api/audit', { token: tokenDiretoria });
+  const reopenEvent = auditAfterReopen.body.find(event => event.entityId === id && event.reason === 'Reaberto após revogação do acordo');
+  assert.ok(reopenEvent, 'evento de reabertura deve existir no histórico');
+  assert.equal(reopenEvent.before.status, 'suspenso', 'histórico preserva que o ciclo anterior foi "suspenso" — nada desaparece');
+  assert.equal(reopenEvent.after.status, 'ativo');
+});
+
+test('[HTTP] líder de TI recebe 403 ao tentar criar Legal Deadline', async () => {
+  const token = await loginAs(EMAILS.liderTi);
+  const res = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-ti-teste', origin: 'Teste TI', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(res.status, 403, 'líder de TI não pode criar Legal Deadline — isolamento departamental preservado (allowedInDepartment/allowedContent)');
+});
+
+test('[HTTP] administrador técnico recebe 403 (ou 404) ao tentar criar Legal Deadline — não é superusuário de conteúdo', async () => {
+  const token = await loginAs(EMAILS.administrador);
+  const res = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Teste administrador', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.ok([403, 404].includes(res.status), `esperado 403 ou 404, recebido ${res.status}`);
+});
+
+test('[HTTP] acesso a Legal Deadline por ID fora do escopo do usuário é negado sem revelar existência/conteúdo', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token: tokenJuridico, json: { processId: 'proc-juridico-teste', origin: 'Origem restrita ao Jurídico', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(created.status, 201);
+
+  const tokenTi = await loginAs(EMAILS.liderTi);
+  const patchAsTi = await api('PATCH', `/api/entities/legalDeadlines/${created.body.id}`, { token: tokenTi, json: { status: 'cumprido' } });
+  assert.equal(patchAsTi.status, 403, 'líder de TI é negado no gate de módulo departamental, nunca revela o conteúdo do registro');
+});
+
+test('[HTTP] Legal Deadline continua rejeitando processo manual/não-Monday e processo inexistente, mesmo com originType/status válidos', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const manual = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-falso-nao-monday', origin: 'Teste', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', status: 'ativo' } });
+  assert.equal(manual.status, 422, 'processo sem source:"monday" continua rejeitado');
+  const inexistente = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'processo-que-nao-existe', origin: 'Teste', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(inexistente.status, 422, 'processo inexistente continua rejeitado');
+});
+
+test('[HTTP] mass assignment continua bloqueado em Legal Deadline mesmo com originType/status no corpo da requisição', async () => {
+  const token = await loginAs(EMAILS.colaboradorJuridico);
+  const res = await api('POST', '/api/entities/legalDeadlines', {
+    token,
+    json: {
+      id: 'id-forjado-fase1', version: 999, createdBy: 'Invasor', department: 'TI',
+      processId: 'proc-juridico-teste', origin: 'Teste mass assignment Fase 1', date: '2026-12-01',
+      originType: 'JUDICIAL_PROCESSUAL', status: 'ativo'
+    }
+  });
+  assert.equal(res.status, 201);
+  assert.notEqual(res.body.id, 'id-forjado-fase1');
+  assert.equal(res.body.version, 1);
+  assert.notEqual(res.body.createdBy, 'Invasor');
+  assert.equal(res.body.department, 'Jurídico', 'department continua herdado do processo/usuário, nunca do corpo da requisição');
+});
+
+test('[HTTP] um processo pode ter múltiplos Legal Deadlines (originType/status distintos) coexistindo', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const first = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Prazo para contestação', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  const second = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Controle interno de acompanhamento', date: '2026-12-15', originType: 'INTERNAL_CONTROL' } });
+  assert.equal(first.status, 201);
+  assert.equal(second.status, 201);
+  assert.notEqual(first.body.id, second.body.id, 'cada Legal Deadline é um registro próprio, nunca um único campo de data no processo');
+
+  const list = await api('GET', '/api/entities/legalDeadlines', { token });
+  assert.ok(list.body.some(item => item.id === first.body.id));
+  assert.ok(list.body.some(item => item.id === second.body.id));
+});
+
+test('[HTTP] novo fato gerador (nova intimação) cria novo Legal Deadline, sem alterar o anterior', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const original = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Intimação original', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(original.status, 201);
+
+  const novaIntimacao = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Nova intimação (fato gerador distinto)', date: '2027-01-15', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(novaIntimacao.status, 201);
+  assert.notEqual(novaIntimacao.body.id, original.body.id, 'novo fato gerador cria um Legal Deadline novo, com id próprio');
+
+  const list = await api('GET', '/api/entities/legalDeadlines', { token });
+  const stillOriginal = list.body.find(item => item.id === original.body.id);
+  assert.equal(stillOriginal.origin, 'Intimação original', 'o registro original permanece inalterado após o novo fato gerador');
+  assert.equal(stillOriginal.date, '2026-12-01');
+});
+
+// --- Correção pós-revisão do PR #4: reabertura exige `reason` explícito; `reason` fica restrito a
+// legalDeadlines; body(req) tratado de forma null-safe. Nenhum dos 132 testes anteriores foi removido.
+
+test('[HTTP] reabertura de "suspenso" para "ativo" sem reason é rejeitada com 422 e não altera o registro', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem reabertura sem motivo', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(created.status, 201);
+  const id = created.body.id;
+
+  const suspended = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { status: 'suspenso', reason: 'Suspenso para o teste' } });
+  assert.equal(suspended.status, 200);
+  assert.equal(suspended.body.version, 2);
+
+  const reopenSemReason = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { status: 'ativo' } });
+  assert.equal(reopenSemReason.status, 422, 'reabertura sem reason deve ser rejeitada com 422');
+  assert.ok(reopenSemReason.body.error, 'mensagem de erro clara deve ser retornada');
+
+  const list = await api('GET', '/api/entities/legalDeadlines', { token });
+  const record = list.body.find(item => item.id === id);
+  assert.equal(record.status, 'suspenso', 'tentativa rejeitada sem reason não altera o status — permanece "suspenso"');
+  assert.equal(record.version, 2, 'tentativa rejeitada sem reason não incrementa version');
+});
+
+test('[HTTP] reabertura de "cancelado" para "ativo" sem reason é rejeitada com 422', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem cancelado sem motivo', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(created.status, 201);
+  const id = created.body.id;
+
+  const cancelled = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { status: 'cancelado', reason: 'Cancelado para o teste' } });
+  assert.equal(cancelled.status, 200);
+
+  const reopenSemReason = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { status: 'ativo' } });
+  assert.equal(reopenSemReason.status, 422, 'reabertura de "cancelado" sem reason também é rejeitada');
+
+  const list = await api('GET', '/api/entities/legalDeadlines', { token });
+  const record = list.body.find(item => item.id === id);
+  assert.equal(record.status, 'cancelado', 'status permanece "cancelado" após tentativa rejeitada');
+});
+
+test('[HTTP] reabertura de "cumprido" para "ativo" sem reason é rejeitada com 422', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem cumprido sem motivo', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(created.status, 201);
+  const id = created.body.id;
+
+  const cumprido = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { status: 'cumprido', reason: 'Cumprido para o teste' } });
+  assert.equal(cumprido.status, 200);
+
+  const reopenSemReason = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { status: 'ativo' } });
+  assert.equal(reopenSemReason.status, 422, 'reabertura de "cumprido" sem reason também é rejeitada');
+});
+
+test('[HTTP] reabertura com reason não vazio é aceita (200), mantém o mesmo id e incrementa version', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem reabertura com motivo', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  const id = created.body.id;
+  await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { status: 'suspenso', reason: 'Suspensão para o teste' } });
+
+  const reopened = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { status: 'ativo', reason: 'Motivo explícito de reabertura' } });
+  assert.equal(reopened.status, 200, 'reabertura com reason válido é aceita');
+  assert.equal(reopened.body.id, id, 'reabertura mantém o mesmo id');
+  assert.equal(reopened.body.version, 3, 'reabertura incrementa version');
+  assert.equal(reopened.body.status, 'ativo');
+
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  const auditList = await api('GET', '/api/audit', { token: tokenDiretoria });
+  const reopenEvent = auditList.body.find(event => event.entityId === id && event.after?.status === 'ativo' && event.before?.status === 'suspenso');
+  assert.ok(reopenEvent, 'evento de auditoria da reabertura deve existir');
+  assert.equal(reopenEvent.reason, 'Motivo explícito de reabertura', 'reason do audit é exatamente o texto informado pelo usuário');
+});
+
+test('[HTTP] reason de rejeição textual apenas com espaços em branco é tratado como ausente (422)', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem reason em branco', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  const id = created.body.id;
+  await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { status: 'suspenso', reason: 'Suspensão para o teste' } });
+
+  const reopenComEspacos = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { status: 'ativo', reason: '   ' } });
+  assert.equal(reopenComEspacos.status, 422, 'reason contendo apenas espaços em branco não é aceito como motivo válido');
+});
+
+test('[HTTP] reason não é persistido como campo de negócio do registro Legal Deadline', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem sem persistir reason', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  const id = created.body.id;
+
+  const patched = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { status: 'suspenso', reason: 'Este texto não deve virar campo do registro' } });
+  assert.equal(patched.status, 200);
+  assert.equal(patched.body.reason, undefined, 'reason não aparece na resposta do PATCH como campo do registro');
+
+  const list = await api('GET', '/api/entities/legalDeadlines', { token });
+  const record = list.body.find(item => item.id === id);
+  assert.equal(record.reason, undefined, 'reason não é persistido como campo comum do Legal Deadline — alimenta apenas a auditoria');
+});
+
+test('[HTTP] PATCH de Legal Deadline com body JSON null não derruba o servidor e responde de forma controlada', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem body null', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(created.status, 201);
+  const id = created.body.id;
+
+  const patchComBodyNull = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: null });
+  assert.notEqual(patchComBodyNull.status, 500, 'body JSON null não pode derrubar o servidor com 500');
+  assert.ok([200, 422].includes(patchComBodyNull.status), `esperado 200 ou 422 para body null, recebido ${patchComBodyNull.status}`);
+  assert.ok(patchComBodyNull.body && typeof patchComBodyNull.body === 'object', 'resposta deve ser um corpo JSON estruturado, nunca um crash sem corpo');
+
+  const list = await api('GET', '/api/entities/legalDeadlines', { token });
+  const record = list.body.find(item => item.id === id);
+  assert.equal(record.status, 'ativo', 'registro permanece consistente após PATCH com body null');
+});
+
+test('[HTTP] entidade genérica não-legalDeadlines não sofre extração/remoção de reason nesta Fase 1', async () => {
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  const created = await api('POST', '/api/entities/documentReferences', { token: tokenDiretoria, json: { title: 'Referência não-Legal-Deadline' } });
+  assert.equal(created.status, 201);
+  const id = created.body.id;
+
+  const patched = await api('PATCH', `/api/entities/documentReferences/${id}`, { token: tokenDiretoria, json: { title: 'Referência atualizada', reason: 'Este reason não deve ganhar tratamento especial' } });
+  assert.equal(patched.status, 200);
+  assert.equal(patched.body.title, 'Referência atualizada');
+  // Comportamento idêntico ao anterior ao PR #4: `reason` não está em PROTECTED_ENTITY_FIELDS, então
+  // para entidades genéricas ele é persistido como um campo comum do registro (igual a qualquer outro
+  // campo não reconhecido) — exatamente como acontecia antes desta Fase 1. O tratamento especial
+  // (extrair, apagar do registro, alimentar audit()) é exclusivo de legalDeadlines.
+  assert.equal(patched.body.reason, 'Este reason não deve ganhar tratamento especial', 'reason continua sendo persistido como campo comum para entidades genéricas, igual ao comportamento anterior ao PR #4');
+
+  const auditList = await api('GET', '/api/audit', { token: tokenDiretoria });
+  const updateEvent = auditList.body.find(event => event.entityId === id && event.entity === 'documentReferences' && event.after?.title === 'Referência atualizada');
+  assert.ok(updateEvent, 'evento de auditoria de documentReferences deve existir');
+  assert.equal(updateEvent.reason, 'Operação solicitada pelo usuário', 'auditoria de entidade genérica usa o default de audit(), sem o tratamento especial de reason da Fase 1 (restrito a legalDeadlines)');
 });

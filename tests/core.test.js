@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, seed, parseCsv, hash, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, isValidCivilDate, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, hasGlobalScope, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser } = require('../server');
+const { ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, seed, parseCsv, hash, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, isValidCivilDate, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, hasGlobalScope, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, validateLegalDeadline, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue } = require('../server');
 const { WIDGET_TYPES, DASHBOARD_DEFINITIONS } = require('../dashboard-model');
 const { dashboardPayload } = require('../dashboard-service');
 const { PROJECT_ID, ensureProjectStore, projectDetail, projectPermissions } = require('../project-service');
@@ -509,4 +509,56 @@ test('AUDIT_TECHNICAL_FIELDS não inclui before/after nem qualquer campo de cont
   for (const field of ['id', 'action', 'entity', 'entityId', 'responsible', 'date', 'reason', 'correlationId']) {
     assert.ok(AUDIT_TECHNICAL_FIELDS.includes(field), `"${field}" deveria estar em AUDIT_TECHNICAL_FIELDS`);
   }
+});
+
+// ============================================================================================
+// Sprint 2, Fase 1 — testes unitários (D1 homologada: originType, status, atraso derivado)
+// ============================================================================================
+
+test('validateLegalDeadline() exige originType do enum fechado — JUDICIAL_PROCESSUAL/INTERNAL_CONTROL válidos; ausente/vazio/espaços/inválido rejeitados', () => {
+  const store = { records: { processos: [{ id: 'proc-1', source: 'monday', department: 'Jurídico', deletedAt: null }] } };
+  const user = { role: 'lider', department: 'Jurídico' };
+  const base = { processId: 'proc-1', origin: 'Teste', date: '2026-12-01', status: 'ativo' };
+
+  assert.equal(validateLegalDeadline({ ...base, originType: 'JUDICIAL_PROCESSUAL' }, user, store), null);
+  assert.equal(validateLegalDeadline({ ...base, originType: 'INTERNAL_CONTROL' }, user, store), null);
+  assert.equal(validateLegalDeadline({ ...base }, user, store)?.status, 422, 'originType ausente deve ser rejeitado');
+  assert.equal(validateLegalDeadline({ ...base, originType: '' }, user, store)?.status, 422, 'originType vazio deve ser rejeitado');
+  assert.equal(validateLegalDeadline({ ...base, originType: '   ' }, user, store)?.status, 422, 'originType só com espaços deve ser rejeitado (fora do enum)');
+  assert.equal(validateLegalDeadline({ ...base, originType: null }, user, store)?.status, 422, 'originType null deve ser rejeitado');
+  assert.equal(validateLegalDeadline({ ...base, originType: 'ALGO_INVALIDO' }, user, store)?.status, 422, 'originType fora do enum deve ser rejeitado');
+});
+
+test('validateLegalDeadline() exige status do enum fechado — ativo/suspenso/cumprido/cancelado válidos; "reaberto"/"vencido"/ausente/inválido rejeitados', () => {
+  const store = { records: { processos: [{ id: 'proc-1', source: 'monday', department: 'Jurídico', deletedAt: null }] } };
+  const user = { role: 'lider', department: 'Jurídico' };
+  const base = { processId: 'proc-1', origin: 'Teste', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' };
+
+  assert.deepEqual([...LEGAL_DEADLINE_STATUSES], ['ativo', 'suspenso', 'cumprido', 'cancelado']);
+  for (const status of LEGAL_DEADLINE_STATUSES) {
+    assert.equal(validateLegalDeadline({ ...base, status }, user, store), null, `status "${status}" deveria ser aceito`);
+  }
+  assert.equal(validateLegalDeadline({ ...base, status: 'reaberto' }, user, store)?.status, 422, 'status "reaberto" nunca é aceito — reabertura é o retorno a "ativo", não um status próprio');
+  assert.equal(validateLegalDeadline({ ...base, status: 'vencido' }, user, store)?.status, 422, '"vencido" é condição derivada, nunca um status persistido');
+  assert.equal(validateLegalDeadline({ ...base, status: 'em_atraso' }, user, store)?.status, 422);
+  assert.equal(validateLegalDeadline({ ...base, status: 'pendente' }, user, store)?.status, 422);
+  assert.equal(validateLegalDeadline({ ...base }, user, store)?.status, 422, 'status ausente é rejeitado pela validação pura — o default "ativo" é aplicado pelo handler HTTP na criação, não por validateLegalDeadline()');
+});
+
+test('isLegalDeadlineOverdue() — atraso é condição derivada de status+date, nunca persistida', () => {
+  assert.equal(isLegalDeadlineOverdue({ status: 'ativo', date: '2026-01-01' }, '2026-06-01'), true, 'ativo + data passada = atrasado');
+  assert.equal(isLegalDeadlineOverdue({ status: 'ativo', date: '2026-12-31' }, '2026-06-01'), false, 'ativo + data futura = não atrasado');
+  assert.equal(isLegalDeadlineOverdue({ status: 'ativo', date: '2026-06-01' }, '2026-06-01'), false, 'ativo + data de hoje = não atrasado até o fim da data civil');
+  assert.equal(isLegalDeadlineOverdue({ status: 'suspenso', date: '2026-01-01' }, '2026-06-01'), false, 'suspenso nunca aparece como atraso, mesmo com data passada');
+  assert.equal(isLegalDeadlineOverdue({ status: 'cumprido', date: '2026-01-01' }, '2026-06-01'), false, 'cumprido nunca aparece como atraso');
+  assert.equal(isLegalDeadlineOverdue({ status: 'cancelado', date: '2026-01-01' }, '2026-06-01'), false, 'cancelado nunca aparece como atraso');
+});
+
+test('isLegalDeadlineOverdue() não sofre deslocamento por timezone/UTC — comparação lexicográfica determinística de datas civis', () => {
+  assert.equal(isLegalDeadlineOverdue({ status: 'ativo', date: '2026-03-09' }, '2026-03-10'), true);
+  assert.equal(isLegalDeadlineOverdue({ status: 'ativo', date: '2026-03-10' }, '2026-03-10'), false);
+  assert.equal(isLegalDeadlineOverdue({ status: 'ativo', date: '2026-03-11' }, '2026-03-10'), false);
+  assert.equal(isLegalDeadlineOverdue(null, '2026-03-10'), false, 'deadline ausente nunca é atrasado');
+  assert.equal(isLegalDeadlineOverdue({ status: 'ativo', date: 'banana' }, '2026-03-10'), false, 'data inválida nunca é considerada atrasada');
+  assert.equal(isLegalDeadlineOverdue({ status: 'ativo', date: '2026-99-99' }, '2026-03-10'), false, 'data civil inexistente nunca é considerada atrasada');
 });

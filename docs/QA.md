@@ -29,12 +29,12 @@ própria v1.3 define o escopo por fase.
 Suíte: `npm test` (Node.js test runner nativo — cada arquivo `*.test.js` roda em processo próprio).
 
 ```
-tests 111
-pass 111
+tests 140
+pass 140
 fail 0
 ```
 
-**`tests/core.test.js` (45 testes)** — unitários e estruturais. Além dos 26 preexistentes e dos 6 da
+**`tests/core.test.js` (49 testes)** — unitários e estruturais. Além dos 26 preexistentes e dos 6 da
 rodada 2, dois testes foram **atualizados na rodada 3** porque a versão anterior validava exatamente o
 comportamento incorreto que a rodada 3 corrigiu:
 - `scoped()` — companyId/speId agora testados com deny-by-default real (ausência ou mismatch nega,
@@ -64,7 +64,14 @@ processo não arquivado + escopo do usuário, chamada direta).
 tem `hasGlobalScope()`; diretoria recebe o evento completo; campos técnicos sempre presentes) e
 `AUDIT_TECHNICAL_FIELDS` (não inclui `before`/`after` nem qualquer campo de conteúdo de negócio).
 
-**`tests/security-integration.test.js` (66 testes)** — HTTP real: sobe um servidor
+4 testes novos do **Sprint 2, Fase 1** (D1 homologada): `validateLegalDeadline()` exige `originType`
+do enum fechado (`JUDICIAL_PROCESSUAL`/`INTERNAL_CONTROL` válidos; ausente/vazio/espaços/`null`/inválido
+rejeitados) e `status` do enum fechado (`ativo`/`suspenso`/`cumprido`/`cancelado` válidos;
+`reaberto`/`vencido`/`em_atraso`/`pendente`/ausente rejeitados); `isLegalDeadlineOverdue()` (atraso só
+quando `status==='ativo'` e `date` anterior a hoje; `suspenso`/`cumprido`/`cancelado` nunca atrasados) e
+sua imunidade a deslocamento de timezone/UTC (comparação lexicográfica pura de datas civis).
+
+**`tests/security-integration.test.js` (91 testes)** — HTTP real: sobe um servidor
 `http.createServer(handler)` de verdade, isolado em diretório de dados temporário
 (`COEVO_DATA_DIR`), injeta usuários e dados de teste, e faz requisições HTTP reais, verificando status e
 corpo da resposta — não presença de texto no código-fonte.
@@ -167,6 +174,47 @@ Os 5 testes novos da **rodada 7** cobrem:
    Legal Deadline gerado no próprio teste.
 5. Usuário sem `allowed(user,'*')` recebe `403` em `GET /api/audit` (comportamento pré-existente).
 
+Os 17 testes novos do **Sprint 2, Fase 1** (D1 homologada) cobrem:
+1. Líder Jurídico cria Legal Deadline `JUDICIAL_PROCESSUAL` válido — `201`, `status` default `ativo`.
+2. Líder Jurídico cria Legal Deadline `INTERNAL_CONTROL` válido — `201`.
+3. `POST` sem `originType` → `422`.
+4. `POST` com `originType` fora do enum → `422`.
+5. `PATCH` com `originType` fora do enum → `422`, sem alterar o registro gravado.
+6. `PATCH` tentando esvaziar `originType` → `422`, sem alterar o registro gravado.
+7. `POST` com `status` fora do enum → `422`.
+8. `POST` com `status:'reaberto'` → `422` (reabertura nunca é status persistido).
+9. `PATCH` com `status` fora do enum → `422`, sem alterar o registro gravado.
+10. `PATCH` para `status:'suspenso'` → `200`, audita `before`/`after` e o `reason` informado; reabertura
+    subsequente (`status:'ativo'`) preserva o mesmo `id`, incrementa `version` e mantém o ciclo
+    `suspenso` anterior recuperável no histórico de auditoria.
+11. Líder de TI recebe `403` ao tentar criar Legal Deadline.
+12. Administrador técnico recebe `403`/`404` ao tentar criar Legal Deadline (não é superusuário de
+    conteúdo).
+13. Acesso a Legal Deadline por ID fora do escopo do usuário é negado (`403`) sem revelar conteúdo.
+14. Legal Deadline continua rejeitando processo manual/não-Monday (`422`) e processo inexistente
+    (`422`), mesmo com `originType`/`status` válidos.
+15. Mass assignment continua bloqueado (`id`/`version`/`createdBy`/`department`) mesmo com
+    `originType`/`status` no corpo da requisição.
+16. Um processo pode ter múltiplos Legal Deadlines (`originType` distintos) coexistindo.
+17. Novo fato gerador (nova intimação) cria novo Legal Deadline, sem alterar o registro anterior.
+
+Os 8 testes novos da **correção pós-revisão do PR #4** (reason obrigatório na reabertura, restrito a
+`legalDeadlines`, body null-safe) cobrem:
+1. Reabertura de `suspenso` → `ativo` sem `reason` → `422`; `status`/`version` do registro não se alteram.
+2. Reabertura de `cancelado` → `ativo` sem `reason` → `422`.
+3. Reabertura de `cumprido` → `ativo` sem `reason` → `422`.
+4. Reabertura com `reason` válido → `200`; mesmo `id`; `version` incrementada; evento de auditoria com o
+   `reason` exato informado.
+5. `reason` contendo apenas espaços em branco é tratado como ausente → `422`.
+6. `reason` nunca aparece como campo persistido no registro `legalDeadlines` (nem na resposta do `PATCH`
+   nem na listagem subsequente) — alimenta somente o evento de auditoria.
+7. `PATCH` de Legal Deadline com corpo JSON `null` não derruba o servidor (nunca `500`) e responde de
+   forma controlada (`200`/`422`, corpo estruturado), sem corromper o registro existente.
+8. Entidade genérica (`documentReferences`) não sofreu nenhuma alteração de comportamento: `reason`
+   enviado no corpo continua sendo persistido como campo comum do registro (como antes do PR #4), e o
+   evento de auditoria continua usando o `reason` default de `audit()` — o tratamento especial desta
+   rodada é exclusivo de `legalDeadlines`.
+
 ## Catálogo Global de Regressão (§30)
 
 Ativado apenas quando a funcionalidade correspondente entrar em release — nenhum item deste catálogo é
@@ -198,49 +246,56 @@ seção "CI", para o detalhamento.
 4. Decisão de negócio sobre o módulo/escopo definitivo de Compliance (ADR-007, `docs/DECISIONS.md`) —
    hoje restrito a alçada global por deny-by-default, não por desenho final pretendido.
 
-## QA planejado para o Sprint 2 — Legal Deadline com D1 homologada (não implementado nesta etapa)
+## QA do Sprint 2 — Legal Deadline com D1 homologada
 
 A D1 (`docs/DECISIONS.md`, seção 1.1) foi homologada, incluindo o enum de `status`, a regra de
-reabertura e a regra de atraso derivado. Os 27 casos abaixo são o plano de QA do Sprint 2 para
-`originType`/`status`/isolamento departamental de Legal Deadline — **nenhum destes testes foi escrito ou
-executado nesta etapa**; ficam registrados aqui como critério de aceite a implementar junto do código.
+reabertura e a regra de atraso derivado. **A Fase 1 do Sprint 2 (`docs/SPRINT2-PLANO.md`) implementou
+o modelo de dados correspondente** — os casos abaixo marcados ✅ têm teste real (unitário e/ou HTTP) em
+`tests/core.test.js`/`tests/security-integration.test.js`; os marcados ⏳ dependem de Fases 2–4
+(dashboard, listagem, Agenda/Atenção, Google Calendar) e continuam apenas planejados.
 
-1. Criar Legal Deadline `JUDICIAL_PROCESSUAL` válido (com `processId`, `origin`, `date`, `originType`).
-2. Criar Legal Deadline `INTERNAL_CONTROL` válido.
-3. `originType` ausente ou fora do enum → rejeitado.
-4. `origin` vazio (ou só espaços) → rejeitado (mesmo padrão já testado hoje para Legal Deadline).
-5. `date` inválida → rejeitado (mesmo padrão já testado hoje).
-6. `processId` inexistente → rejeitado (mesmo padrão já testado hoje).
-7. Processo fora do escopo do usuário → negado (mesmo padrão já testado hoje).
-8. Líder/colaborador de TI tentando criar Legal Deadline (módulo `juridico`) → `403` (mesmo mecanismo
-   `allowedInDepartment()`/`allowedContent()` já testado nas rodadas de segurança 5–6).
-9. Administrador técnico tentando criar Legal Deadline (conteúdo de negócio) → negado
-   (`allowedContent()`, já testado na rodada 6).
-10. Um processo com múltiplos Legal Deadlines coexistindo (já coberto hoje; reafirmar com `originType`).
-11. Nova intimação/novo fato gerador → novo Legal Deadline (novo `id`, mesmo `processId`).
-12. Alteração do mesmo prazo/fato gerador → mesmo `id`, histórico preservado via auditoria.
-13. Suspensão → não aparece como vencimento normal (enum de `status` HOMOLOGADO — ver
-    `docs/DECISIONS.md`, seção 1.1).
-14. Cancelamento → não aparece como ativo.
-15. Cumprimento → histórico preservado.
-16. Dashboard jurídico usa `legalDeadlines`, nunca a coluna bruta `DATA`/`CITAÇÃO/PROTOCOLO` do Monday
-    (corrige o risco identificado em `docs/DATA_MODEL.md`, seção "D1 homologada").
-17. Falha do Monday não apaga o último Legal Deadline válido conhecido (comportamento já garantido hoje
-    para as demais coleções — reafirmar para `legalDeadlines`, que nem é escrita pelo pipeline de sync).
-18. Nenhuma rota de Legal Deadline gera cálculo automático de prazo (confirmação negativa — nenhuma
-    função de cálculo deve existir no código do Sprint 2).
-19. Google Calendar (quando ativado) não atua como fonte de Legal Deadline — nenhuma leitura de
-    Calendar cria ou altera um Legal Deadline.
-20. Acesso direto por ID de Legal Deadline fora do escopo do usuário → bloqueado (mesmo padrão
-    `scoped()`/404 já testado hoje para `legalDeadlines`).
-21. `status` fora do enum homologado (`ativo`/`suspenso`/`cumprido`/`cancelado`) → rejeitado com `422`,
-    em POST e em PATCH.
-22. Legal Deadline `ativo` com `date` anterior à data atual → view PODE sinalizar atraso (condição
-    derivada, não persistida).
-23. Legal Deadline `suspenso` com `date` anterior à data atual → view NÃO sinaliza atraso normal.
-24. Legal Deadline `cumprido` com `date` anterior à data atual → view NÃO sinaliza atraso ativo.
-25. Legal Deadline `cancelado` com `date` anterior à data atual → view NÃO sinaliza atraso ativo.
-26. Reabertura de Legal Deadline `suspenso`/`cancelado` → mesmo `id`, `status` retorna para `ativo`,
-    histórico preserva o ciclo anterior (`before`/`after`, motivo, responsável, data/hora).
-27. Nenhuma API aceita `status:'reaberto'` como valor persistido — sempre rejeitado por estar fora do
-    enum fechado (mesmo mecanismo do caso 21).
+1. ✅ Criar Legal Deadline `JUDICIAL_PROCESSUAL` válido (com `processId`, `origin`, `date`, `originType`).
+2. ✅ Criar Legal Deadline `INTERNAL_CONTROL` válido.
+3. ✅ `originType` ausente, vazio, só com espaços ou fora do enum → rejeitado com `422` (POST e PATCH).
+4. ✅ `origin` vazio (ou só espaços) → rejeitado (já testado desde a rodada 4).
+5. ✅ `date` inválida → rejeitado (já testado desde a rodada 4).
+6. ✅ `processId` inexistente → rejeitado (já testado desde a rodada 2).
+7. ✅ Processo fora do escopo do usuário → negado (já testado desde a rodada 2/5).
+8. ✅ Líder de TI tentando criar Legal Deadline (módulo `juridico`) → `403`
+   (`allowedInDepartment()`/`allowedContent()`, mesmo mecanismo das rodadas de segurança 5–6).
+9. ✅ Administrador técnico tentando criar Legal Deadline (conteúdo de negócio) → negado
+   (`allowedContent()`, mesmo mecanismo da rodada 6).
+10. ✅ Um processo com múltiplos Legal Deadlines coexistindo, com `originType` distintos.
+11. ✅ Nova intimação/novo fato gerador → novo Legal Deadline (novo `id`, mesmo `processId`, registro
+    anterior inalterado).
+12. ✅ Alteração do mesmo prazo/fato gerador → mesmo `id`, histórico preservado via auditoria.
+13. ✅ Suspensão → aceita (`200`), audita `before`/`after` e o `reason` informado.
+14. ✅ Reabertura (`suspenso` → `ativo`) → mesmo `id`, `version` incrementada, histórico preserva o
+    ciclo suspenso anterior (não apenas o estado final).
+15. ✅ Cumprimento/cancelamento são valores válidos do enum (mesmo mecanismo do caso 3/21 abaixo).
+16. ⏳ Dashboard jurídico usa `legalDeadlines`, nunca a coluna bruta `DATA`/`CITAÇÃO/PROTOCOLO` do Monday
+    — **Fase 2, não implementado ainda** (risco registrado em `docs/DATA_MODEL.md`).
+17. ✅ Falha do Monday não apaga o último Legal Deadline válido conhecido (comportamento pré-existente,
+    reafirmado — `legalDeadlines` não é escrita pelo pipeline de sync).
+18. ✅ Nenhuma rota de Legal Deadline gera cálculo automático de prazo — confirmado por inspeção de
+    código (nenhuma função de cálculo processual existe) e pelos testes de `isLegalDeadlineOverdue()`,
+    que é puramente derivada (não persiste nem calcula prazo, só interpreta `status`+`date` já gravados).
+19. ⏳ Google Calendar (quando ativado) não atua como fonte de Legal Deadline — **Fase 3, não aplicável
+    ainda** (Calendar não integrado).
+20. ✅ Acesso direto por ID de Legal Deadline fora do escopo do usuário → bloqueado, sem revelar
+    conteúdo (`403` no gate de módulo departamental).
+21. ✅ `status` fora do enum homologado (`ativo`/`suspenso`/`cumprido`/`cancelado`) → rejeitado com
+    `422`, em POST e em PATCH.
+22. ✅ `isLegalDeadlineOverdue()`: `ativo` + `date` anterior a hoje → `true` (testado com `today`
+    explícito, determinístico). **Nenhuma view ainda consome essa função** (Fase 2).
+23. ✅ `isLegalDeadlineOverdue()`: `suspenso` + `date` anterior a hoje → `false`.
+24. ✅ `isLegalDeadlineOverdue()`: `cumprido` + `date` anterior a hoje → `false`.
+25. ✅ `isLegalDeadlineOverdue()`: `cancelado` + `date` anterior a hoje → `false`.
+26. ✅ Reabertura de Legal Deadline `suspenso` → mesmo `id`, `status` retorna para `ativo`, histórico
+    preserva o ciclo anterior (`before`/`after`, motivo, responsável, data/hora).
+27. ✅ Nenhuma API aceita `status:'reaberto'` (nem `vencido`/`atrasado`/`em_atraso`/`pendente`) como
+    valor persistido — sempre rejeitado por estar fora do enum fechado (POST e PATCH, unitário e HTTP).
+
+**Resumo:** 24 de 27 casos implementados e testados nesta Fase 1 (unitário e/ou HTTP real); os 3
+restantes (16, 19, e a integração de `isLegalDeadlineOverdue()` a uma view em 22) dependem de Fases 2–3,
+não iniciadas nesta rodada.
