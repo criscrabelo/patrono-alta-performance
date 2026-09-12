@@ -101,19 +101,51 @@ evento de auditoria.
 conversão para `Date`/UTC — `today` default usa o fuso `America/Sao_Paulo`, mesmo padrão já usado por
 `scheduleDueNow()`). `suspenso`, `cumprido` e `cancelado` nunca são considerados atrasados,
 independentemente de `date`; um prazo `ativo` com `date` igual a hoje também não é considerado atrasado
-(só vence após o fim da data civil). **Esta função ainda não é consumida por nenhuma view** — ela existe,
-está testada, mas `dashboard-service.js` e demais telas continuam como estavam (ver item abaixo);
-conectá-la a uma view é tarefa da Fase 2.
+(só vence após o fim da data civil). Consumida na Fase 2 por `dashboard-service.js` e pela listagem/
+detalhe de Legal Deadline (ver seção "Sprint 2, Fase 2" abaixo) — sempre a mesma função, nunca
+recalculada em paralelo.
 
-### Regra de integridade obrigatória para a Fase 2 do Sprint 2 (dashboard) — ainda pendente
+## Sprint 2, Fase 2 — implementada (views e consumo canônico de Legal Deadline)
 
-O levantamento técnico da D1 identificou que `dashboard-service.js` (widgets do dashboard `legal`
-relacionados a prazo) usa hoje uma coluna bruta de data do Monday (`processDate()`, sobre o board
-`processos`) em vez da coleção `legalDeadlines`. Isso contraria a D1 homologada e **continua registrado
-como tarefa obrigatória da Fase 2** — deliberadamente **não corrigido nesta Fase 1** (fora do escopo
-autorizado desta rodada): nenhuma view pode calcular ou apresentar "prazo jurídico" com lógica própria
-paralela; `legalDeadlines` (e `isLegalDeadlineOverdue()` para atraso) devem ser a única fonte canônica
-para qualquer widget de prazo, quando a Fase 2 for autorizada.
+Corrige o risco identificado na D1: nenhuma view/widget jurídico pode mais apresentar "prazo crítico"/
+"próximo prazo"/"prazo vencido"/"prazo em atraso"/"prazo processual" com base em DATA/CITAÇÃO/PROTOCOLO
+ou qualquer outra coluna bruta do Monday. A única fonte canônica de prazo jurídico é `legalDeadlines`.
+
+**`dashboard-service.js` corrigido:** a função `processDate()` (que lia `CITAÇÃO/PROTOCOLO`/`DATA` do
+board `processos` e tratava isso como prazo) foi **removida**. Os widgets `legal-risk` e `legal-deadlines`
+do dashboard `legal` passam a consumir `store.records.legalDeadlines`, relacionado ao processo por
+`processId` — nunca o campo de data bruto do processo. `isLegalDeadlineOverdue()` (já existente, Fase 1)
+é reutilizada tal como está: não há uma segunda regra de atraso dentro do dashboard. `scoped()` também é
+reaplicado, tanto sobre o próprio Legal Deadline quanto sobre o processo relacionado, como defesa em
+profundidade — um prazo nunca é exibido se o processo ao qual está vinculado deixou de ser acessível ao
+usuário, mesmo que o prazo já tenha herdado esse escopo na criação/PATCH (Fase 1). `dashboardPayload()`
+passou a receber `user` e um objeto de dependências (`scoped`, `isLegalDeadlineOverdue`,
+`civilDateAfterDays`) injetado por `server.js`, evitando duplicar essas funções em `dashboard-service.js`.
+
+`JUDICIAL_PROCESSUAL` × `INTERNAL_CONTROL`: os indicadores rotulados como "prazo processual"/"risco
+jurídico" (`legal-risk`, `legal-deadlines`) só consideram Legal Deadlines com `originType:
+'JUDICIAL_PROCESSUAL'`. `INTERNAL_CONTROL` nunca é somado a essas métricas nem aparece rotulado como
+prazo processual — permanece disponível apenas via listagem/filtro dedicada (abaixo).
+
+**Listagem/filtro:** `GET /api/entities/legalDeadlines?paginated=1` (mesma rota genérica, sem
+arquitetura paralela) aceita `processId`, `originType`, `status`, `overdue` (`true`/`false`),
+`dateFrom`/`dateTo`, com paginação no mesmo padrão de `filterProcesses()`/`filterHonorariums()`
+(`pageSize` em `[25,50,100]`, `page`/`totalPages`). Sem `?paginated=1`, a rota mantém o array simples já
+existente desde a Fase 1 (nenhum chamador existente quebra). Cada registro retornado inclui `overdue`
+(via `isLegalDeadlineOverdue()`) e `dataIntegrity` (ver "Registros legados", abaixo).
+
+**Detalhe/histórico:** `GET /api/entities/legalDeadlines/:id/detail` retorna o registro completo, o
+processo relacionado (`{id, title}`), `overdue`, `dataIntegrity` e o histórico de auditoria (`store.audit`
+filtrado por `entity:'legalDeadlines'`/`entityId`, em ordem cronológica). Mesmo gate de autorização da
+listagem (`allowedInDepartment` + `scoped()` sobre o prazo **e** sobre o processo relacionado — defesa em
+profundidade). O histórico reaproveita `sanitizeAuditEventForUser()` sem modificação: só quem tem alçada
+de negócio global (hoje, diretoria) recebe `before`/`after` completo; os demais (incluindo líder/
+colaborador Jurídico) veem apenas os metadados técnicos (ação, responsável, data, `reason`,
+`correlationId`) — nenhuma entidade nova de histórico foi criada.
+
+Nenhuma tela nova de UI foi construída nesta Fase 2 — listagem/filtro/detalhe existem como capacidade de
+API; a semântica de copy "Confirmado pelo Jurídico" (D1.4) permanece pendente para quando houver uma tela
+dedicada. Agenda/Atenção e Google Calendar não foram tocados (Fase 3, não iniciada).
 
 ### Registros legados anteriores à D1 — sem backfill automático
 
@@ -124,6 +156,12 @@ homologação da D1 (12/09/2026). Caso existam registros assim em dados persisti
 **revisados e classificados manualmente pelo Jurídico** (atribuindo `originType`/`status` corretos via
 `PATCH` comum, um a um) antes de qualquer edição ou homologação formal do piloto — nenhuma tela ou rotina
 deve assumir que um Legal Deadline pré-D1 já tem `originType` válido sem essa revisão.
+
+**Sinalização na Fase 2 (`legalDeadlineIntegrityFlag()`):** a listagem (`?paginated=1`) e o detalhe
+(`.../detail`) calculam, de forma puramente apresentacional (nunca persistida), um campo `dataIntegrity`
+— `'requires_review'` quando `originType` e/ou `status` estiverem ausentes no registro, `'ok'` caso
+contrário. Nenhum valor é inferido ou corrigido silenciosamente; a view apenas sinaliza a inconsistência
+para revisão manual, sem inventar um status novo persistido.
 
 ## Distinções que não podem ser violadas (checadas nesta execução)
 
