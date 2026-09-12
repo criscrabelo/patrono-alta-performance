@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { ROLES, allowed, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, seed, parseCsv, hash } = require('../server');
+const { ROLES, allowed, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, seed, parseCsv, hash, ENTITY_MODULE_MAP, entityModule, requireMfa } = require('../server');
 const { WIDGET_TYPES, DASHBOARD_DEFINITIONS } = require('../dashboard-model');
 const { dashboardPayload } = require('../dashboard-service');
 const { PROJECT_ID, ensureProjectStore, projectDetail, projectPermissions } = require('../project-service');
@@ -251,4 +251,53 @@ test('API de Projetos expõe ciclo de vida das entidades com exclusão lógica',
   assert.match(source,/req\.method === 'DELETE'.*deletedAt/s);
   assert.match(source,/restore\$/);
   for(const action of ['UPDATE','ARCHIVE','RESTORE'])assert.match(source,new RegExp(`'${action}'`));
+});
+
+// --- Sprint 1 / Fundação: testes de object-level authorization e MFA por papel (item B, D e §11/§26) ---
+
+test('GET /api/entities/:type nega tipo fora do allowlist (deny-by-default, sem depender de coincidência com módulo)', () => {
+  assert.equal(entityModule('processos'), 'juridico');
+  assert.equal(entityModule('legalDeadlines'), 'juridico');
+  assert.equal(entityModule('financeiroBancario'), null, 'tipo não mapeado deve ser negado, nunca aceito por coincidência de nome');
+  assert.equal(entityModule('__proto__'), null);
+});
+
+test('GET /api/entities e /api/legal aplicam allowed() por módulo, não apenas scoped() por registro', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(
+    source,
+    /url\.pathname\.startsWith\('\/api\/entities\/'\)\) \{ const type=url\.pathname\.split\('\/'\)\[3\]; const module=entityModule\(type\); if\(!module \|\| !allowed\(user,module,'read'\)\)/,
+    'GET /api/entities/:type deve verificar entityModule + allowed antes de devolver a coleção (P0 item B corrigido)'
+  );
+  assert.match(
+    source,
+    /url\.pathname\.startsWith\('\/api\/legal\/'\)\) \{ const moduleName=url\.pathname\.split\('\/'\)\[3\]; if\(!allowed\(user,'juridico','read'\)\)/,
+    'GET /api/legal/:module deve verificar allowed(user, "juridico", "read") antes de devolver registros (P0 item H corrigido)'
+  );
+});
+
+test('restauração de entidade genérica respeita escopo departamental do registro (object-level authorization)', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(
+    source,
+    /restore\$\/\)\) \{ const \[, , , type, id\]=url\.pathname\.split\('\/'\); const module=entityModule\(type\); if\(!module \|\| !allowed\(user,module,'restore'\)\)[\s\S]{0,200}!scoped\(user,item\)/,
+    'restauração deve validar módulo e escopo do registro, não apenas existência do id'
+  );
+});
+
+test('MFA de perfis privilegiados independe da flag mfa do cadastro (item D corrigido)', () => {
+  assert.equal(requireMfa({ role: 'lider', mfa: false }), true, 'papel privilegiado deve exigir MFA mesmo com mfa:false');
+  assert.equal(requireMfa({ role: 'diretoria', mfa: false }), true);
+  assert.equal(requireMfa({ role: 'administrador', mfa: false }), true);
+  assert.equal(requireMfa({ role: 'colaborador', mfa: false }), false, 'colaborador não é perfil privilegiado');
+});
+
+test('Legal Deadline não é criado sem origem, processo relacionado ou data (esqueleto do piloto, MASTER_HANDOFF §6/§30)', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(source, /legalDeadlines/, 'ENTITY_MODULE_MAP e validação devem referenciar legalDeadlines');
+  assert.match(
+    source,
+    /type==='legalDeadlines'\)\{ const missing=\['processId','origin','date'\]\.filter/,
+    'criação de Legal Deadline deve exigir processId, origin e date — sem fonte identificada, o cadastro é bloqueado'
+  );
 });

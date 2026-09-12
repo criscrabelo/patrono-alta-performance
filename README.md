@@ -1,6 +1,14 @@
-# COEVO Alta Performance
+# COEVO Alta Performance (Patrono Alta Performance)
 
 Núcleo executável da plataforma corporativa multidepartamental, com Jurídico e TI como departamentos piloto.
+
+> **Fonte de arquitetura oficial:** [`docs/MASTER_HANDOFF.md`](docs/MASTER_HANDOFF.md) (Handoff Master
+> v1.3). Qualquer decisão funcional, de dados, permissões ou integrações deste repositório segue esse
+> documento. Decisões técnicas e conflitos registrados estão em [`docs/DECISIONS.md`](docs/DECISIONS.md).
+> Demais documentos de referência: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) ·
+> [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md) · [`docs/PERMISSIONS.md`](docs/PERMISSIONS.md) ·
+> [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md) · [`docs/AI_GOVERNANCE.md`](docs/AI_GOVERNANCE.md) ·
+> [`docs/SECURITY.md`](docs/SECURITY.md) · [`docs/QA.md`](docs/QA.md).
 
 ## Executar
 
