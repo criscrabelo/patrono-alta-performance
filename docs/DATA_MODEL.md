@@ -9,7 +9,7 @@
 | Entidade (§6) | Implementação atual | Situação | Nota |
 |---|---|---|---|
 | Legal Process | Coleção `processos`, sincronizada do Monday (somente leitura), com `externalId`, `source`, `syncedAt`, `department:'Jurídico'` (atribuído explicitamente na rodada 2 — ver `docs/DECISIONS.md`, ADR-005). Mutação via motor genérico de entidades bloqueada (rodada 3, ADR-008) — só a sincronização Monday escreve nesta coleção | **Presente**, como registro operacional/transitório (Monday é System of Record transitório, §9) | Não é modelado com ID Patrono próprio ainda — usa o registro Monday normalizado diretamente |
-| Legal Deadline | Coleção genérica `legalDeadlines`, adicionada nesta execução via `/api/entities/legalDeadlines` | **Esqueleto criado no Sprint 1** — sem pipeline automático de origem (decisão D1 pendente, ver `docs/DECISIONS.md`) | Exige `processId`, `origin`, `date` na criação; herda versionamento, exclusão lógica, restauração e auditoria do motor genérico |
+| Legal Deadline | Coleção genérica `legalDeadlines`, adicionada no Sprint 1 via `/api/entities/legalDeadlines` | **Esqueleto do Sprint 1 presente; D1 (fonte/origem) HOMOLOGADA — ver `docs/DECISIONS.md`, seção 1.1** | Exige `processId`, `origin`, `date` na criação; herda versionamento, exclusão lógica, restauração e auditoria do motor genérico. `originType` obrigatório e proposta de enum de `status` estão planejados para o Sprint 2 (ver seção "D1 homologada" abaixo) — **ainda não implementados** |
 | Responsibility | Sem entidade própria; responsável é um campo textual dentro dos registros Monday normalizados (`processResponsibleValues`) | **Gap** | `responsibilities` reservado em `ENTITY_MODULE_MAP` para uso futuro quando a modelagem de Responsibility for necessária além do campo textual |
 | External Identity | Cada registro sincronizado do Monday já carrega `source: 'monday'`, `externalId`, `boardId`, `boardName`, `syncedAt` | **Presente**, de forma implícita (par sistema/id/timestamp por registro) | Padrão consistente com "`patrono_id → (sistema, id_externo, tipo de fonte, última sincronização)`" (§8); generalização como entidade própria fica para quando outra fonte além do Monday for integrada |
 | Document / File Reference | Não implementado | **Gap** — fora do escopo funcional atual (nenhum módulo de documentos ainda) | `documentReferences` reservado em `ENTITY_MODULE_MAP` para quando o piloto exigir referência documental (Google Drive, §10/§23) |
@@ -45,9 +45,43 @@ processo relacionado tenha sido excluído/desescopado desde a criação do prazo
 **O que este esqueleto não faz** (por instrução explícita da v1.3 e do usuário):
 - Não calcula prazo processual automaticamente.
 - Não aplica CPC, calendário forense ou regra jurídica.
-- Não é populado automaticamente a partir de nenhum board do Monday — a fonte/origem por tipo de
-  processo/board (Decision Backlog D1) precisa ser homologada antes do Sprint 2.
+- Não é populado automaticamente a partir de nenhum board do Monday — confirmado pela D1 homologada
+  (`docs/DECISIONS.md`, seção 1.1): nenhuma coluna de data do Monday (incluindo `DATA`/
+  `CITAÇÃO/PROTOCOLO`) é tratada como prazo jurídico por si só.
 - Não infere prazo a partir do Google Calendar (§10: "Google Calendar não é fonte do prazo jurídico").
+
+## D1 homologada — modelo previsto para o Sprint 2 (não implementado nesta etapa)
+
+A decisão D1 (`docs/DECISIONS.md`, seção 1.1) foi homologada pela Cristiane em 12/09/2026. Esta seção
+documenta o modelo de dados **previsto** para o Sprint 2 — nenhum destes campos foi criado ou alterado
+em código nesta etapa; permanece o esqueleto descrito acima até a implementação ser autorizada.
+
+### Campos adicionais previstos para `legalDeadlines`
+
+| Campo | Obrigatório (Sprint 2) | Descrição |
+|---|---|---|
+| `originType` | Sim | Enum fechado — `JUDICIAL_PROCESSUAL` (fato jurídico formal: intimação, publicação, despacho, decisão, audiência, mandado, ciência formal) ou `INTERNAL_CONTROL` (prazo gerencial interno do Jurídico). Impede que os dois tipos recebam a mesma semântica/criticidade visual; ambos devem ser filtráveis separadamente nas views |
+| `evidenceReference` | Não (evolução futura, fora do Sprint 2) | Referência a Document/File Reference quando essa entidade existir (gap já registrado abaixo). Sem este campo, um Legal Deadline é considerado **"Confirmado pelo Jurídico"**, nunca "comprovado documentalmente" — distinção de linguagem obrigatória em toda tela/mensagem do produto |
+
+`source` (campo já reservado pelo motor genérico) **não** foi adotado para Legal Deadline nesta
+homologação — permanece exclusivo de registros sincronizados do Monday (`source:'monday'`); Legal
+Deadline nunca tem esse campo preenchido, por nascer sempre de registro manual (D1.1).
+
+### Proposta de `status` — a aprovar antes da implementação
+
+Ver `docs/DECISIONS.md`, seção 1.1, e o plano do Sprint 2 para a recomendação técnica completa
+(ativo/suspenso/cumprido/cancelado, e a recomendação de tratar reabertura como retorno a `ativo` com
+evento preservado no histórico, em vez de um status próprio). **Não decidido silenciosamente** — segue
+como proposta até aprovação explícita, antes de qualquer implementação.
+
+### Regra de integridade obrigatória para o Sprint 2 (dashboard)
+
+O levantamento técnico da D1 identificou que `dashboard-service.js` (widgets do dashboard `legal`
+relacionados a prazo) usa hoje uma coluna bruta de data do Monday (`processDate()`, sobre o board
+`processos`) em vez da coleção `legalDeadlines`. Isso contraria a D1 homologada e é registrado como
+**tarefa obrigatória do Sprint 2** (não corrigida nesta etapa — é alteração de código, fora do escopo de
+homologação documental): nenhuma view pode calcular ou apresentar "prazo jurídico" com lógica própria
+paralela; `legalDeadlines` passa a ser a única fonte canônica para qualquer widget de prazo.
 
 ## Distinções que não podem ser violadas (checadas nesta execução)
 

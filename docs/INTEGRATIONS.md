@@ -63,7 +63,13 @@ jurídico (§10, §23). Nenhuma automação desta execução liga Legal Deadline
 ## Próximos passos (fora do Sprint 1)
 
 1. Anexar status de frescor por registro (`stale`/Parcial/Indisponível) em vez de apenas por execução.
-2. Definir, por decisão de negócio (Decision Backlog D1, `docs/DECISIONS.md`), a fonte/origem do Legal
-   Deadline por tipo de processo/board antes de automatizar seu preenchimento a partir do Monday.
+2. **D1 (fonte/origem do Legal Deadline) foi HOMOLOGADA** — ver `docs/DECISIONS.md`, seção 1.1: nenhum
+   board Monday preenche Legal Deadline automaticamente; somente `processos` participa do fluxo no
+   piloto (D1.2), e mesmo assim apenas como referência/contexto, nunca como origem automática (D1.1).
+   Monday permanece somente leitura e transitório, sem nenhuma mudança de papel por esta decisão.
 3. Avaliar conector Google Drive como referência documental quando o piloto exigir Document/File
    Reference.
+4. Corrigir, no Sprint 2, o uso de coluna bruta de data do Monday (`processDate()` em
+   `dashboard-service.js`) em widgets de "prazo" do dashboard `legal` — deve passar a consultar
+   `legalDeadlines`, nunca uma coluna de data do board `processos` diretamente (ver
+   `docs/DATA_MODEL.md`, seção "D1 homologada").

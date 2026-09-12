@@ -19,7 +19,7 @@ coluna "Bloqueia".
 
 | # | Questão | Impacto | Responsável | Quando | Bloqueia | Status |
 |---|---|---|---|---|---|---|
-| D1 | Fonte/origem do Legal Deadline por tipo de processo/board no piloto | Prazo jurídico e Agenda | Negócio + Jurídico + TI | Antes do Sprint 2 | Piloto jurídico / Legal Deadline | **Pendente — bloqueia Sprint 2** |
+| D1 | Fonte/origem do Legal Deadline por tipo de processo/board no piloto | Prazo jurídico e Agenda | Negócio + Jurídico + TI | Antes do Sprint 2 | Piloto jurídico / Legal Deadline | **HOMOLOGADA — 12/09/2026 — ver seção 1.1** |
 | D2 | Fonte oficial de CPF/CNPJ | Matching, dedup, snapshot | Negócio | Antes de matching/dedup definitivo | Cadastro Mestre, views 360, snapshots | **Pendente** |
 | D3 | Data owner por domínio | Nenhum campo crítico tem responsável definido | Negócio | Fase 1 | Governança de dados | **Pendente** |
 | D4 | Fonte oficial do contato do cliente | Divergência CV × Sienge | Negócio | Fase 2 | Resolução de divergências | **Pendente** |
@@ -33,6 +33,143 @@ coluna "Bloqueia".
 **Nenhuma destas decisões de negócio (D1–D7) foi inventada, adivinhada ou resolvida por conveniência
 técnica nesta execução**, em conformidade com a regra explícita da v1.3 ("não invente prazo jurídico",
 "não invente source of truth", "decisões críticas de negócio não podem ser inventadas").
+
+---
+
+## 1.1. D1 — Decisão Homologada: Fonte/Origem do Legal Deadline
+
+> **Status:** HOMOLOGADA / DECIDIDA
+> **Data:** 12/09/2026
+> **Aprovadora:** Cristiane Carneiro Rabelo (Gestora + Jurídico)
+> **Responsáveis pela análise técnica:** Negócio + Jurídico + TI (conforme MASTER_HANDOFF §27)
+> **Base da decisão:** levantamento técnico prévio (boards Monday configurados, `server.js`,
+> `docs/DATA_MODEL.md`, `docs/INTEGRATIONS.md`, `docs/PERMISSIONS.md`), revisado e aprovado pela
+> Cristiane antes deste registro.
+
+### Decisão
+
+No MVP/piloto jurídico, **nenhum Legal Deadline é criado ou confirmado automaticamente a partir do
+Monday.** Todo Legal Deadline nasce de **registro humano autorizado**, realizado pelo Jurídico
+diretamente na Patrono. O Monday continua sendo o System of Record operacional/transitório do Legal
+Process (MASTER_HANDOFF §9), podendo fornecer contexto, referência e, futuramente, sugestões — mas
+nunca cria, nunca confirma e nunca vira prazo jurídico oficial pela simples existência de uma coluna de
+data. Isso vale para **qualquer** coluna de data do Monday, incluindo nominalmente `DATA` e
+`CITAÇÃO/PROTOCOLO` do board `processos` — nenhuma delas é, por si só, evidência suficiente de prazo
+processual.
+
+### D1.1 — Origem do Legal Deadline: OPÇÃO A (aprovada)
+
+Nenhum Legal Deadline nasce automaticamente do Monday. Todo registro exige ato humano autorizado do
+Jurídico na Patrono, com `origin` preenchido por quem registra.
+
+- **Alternativas rejeitadas:**
+  - Opção B (uma coluna específica do Monday validada como origem confiável, sugerindo o prazo
+    pendente de validação humana) — rejeitada para o MVP por exigir identificação prévia, pelo
+    Jurídico, de qual coluna realmente representa um ato processual (não confirmado no levantamento).
+  - Opção C (outra fonte jurídica homologada, ex.: push de tribunal) — rejeitada por não existir hoje
+    nenhuma fonte desse tipo integrada ou disponível.
+- **Consequência:** o Sprint 2 entrega Legal Deadline como registro manual, sem nenhuma sugestão
+  automática a partir do Monday. Reavaliação futura da Opção B exige nova análise + homologação
+  jurídica específica (não é assumida como próximo passo automático).
+
+### D1.2 — Escopo dos boards no piloto: OPÇÃO A (aprovada)
+
+Somente o board `processos` participa do fluxo de Legal Deadline no piloto do Sprint 2. Os boards
+`notificacoes`, `distratos`, `unidades`, `compraVenda`, `transferenciaIntermediaria`, `honorarios` e o
+módulo derivado `honorariosJudiciais` **não geram Legal Deadline** — permanecem como referência,
+visualização, registro operacional ou financeiro, exatamente como hoje.
+
+- **Consequência:** qualquer expansão futura de Legal Deadline para outro board exige, nesta ordem: (1)
+  decisão de negócio, (2) identificação da coluna, (3) definição da origem, (4) definição da evidência,
+  (5) homologação jurídica, (6) alteração formal desta D1 ou nova ADR. Nenhuma expansão é automática.
+
+### D1.3 — `originType` obrigatório no Sprint 2: OPÇÃO A (aprovada)
+
+Legal Deadline passa a exigir um campo `originType`, com um conjunto fechado de valores, para nunca
+confundir prazo jurídico/processual com prazo interno de controle. Valores mínimos aprovados:
+
+- `JUDICIAL_PROCESSUAL` — prazo relacionado a fato jurídico formal registrado pelo Jurídico (categoria A
+  do levantamento: intimação, publicação, despacho, decisão, audiência, mandado, ciência formal).
+- `INTERNAL_CONTROL` — prazo gerencial criado pelo próprio Jurídico para acompanhamento interno
+  (categoria D do levantamento).
+
+Nenhuma categoria jurídica adicional (administrativa, contratual) foi aprovada nesta rodada — o
+levantamento não encontrou evidência de negócio suficiente para essas categorias em nenhum board hoje
+configurado (ver D1.2). Caso o Jurídico identifique a necessidade dessas categorias no futuro, isso
+exige nova decisão, não uma extensão silenciosa deste enum.
+
+- **Consequência para views:** os dois tipos não podem receber a mesma semântica visual nem ser
+  confundidos em nenhuma tela; devem ser filtráveis separadamente. Detalhamento técnico na seção "Plano
+  do Sprint 2", abaixo, e em `docs/DATA_MODEL.md`.
+
+### D1.4 — Evidência no MVP: OPÇÃO A, com qualificação (aprovada)
+
+`evidenceReference` **não é** requisito técnico obrigatório para registrar ou confirmar um Legal
+Deadline no MVP. Um prazo é considerado **"Confirmado pelo Jurídico"** quando: registrado por usuário
+autorizado; vinculado a um Legal Process válido; com `date` válida; com `origin` obrigatório; com
+`originType` válido (Sprint 2); dentro do escopo de autorização do usuário.
+
+- **Regra de linguagem obrigatória (P0 de UX/copy para o Sprint 2):** na ausência de
+  `evidenceReference`, nenhuma tela, rótulo ou mensagem do sistema pode sugerir "comprovação
+  documental validada", "evidência documental conferida" ou "confirmação automática da fonte externa".
+  A única semântica permitida é **"Confirmado pelo Jurídico"** — que descreve autoria/autorização do
+  registro, nunca validação documental que não existe.
+- **Evolução futura (não é requisito para iniciar o Sprint 2):** `evidenceReference` ligado a
+  Document/File Reference (gap já registrado em `docs/DATA_MODEL.md`), quando essa entidade existir.
+
+### Regra oficial do MVP (consolidada)
+
+1. Monday não cria Legal Deadline. 2. Monday não confirma Legal Deadline. 3. Google Calendar não é fonte
+de Legal Deadline (MASTER_HANDOFF §10/§23). 4. Legal Deadline nasce por registro humano autorizado. 5.
+`processId` é obrigatório. 6. `date` é obrigatória. 7. `origin` é obrigatória. 8. `originType` será
+obrigatório no Sprint 2. 9. Um Legal Process pode possuir N Legal Deadlines. 10. Novo fato gerador
+(nova intimação/publicação/decisão/despacho/audiência/ato jurídico relevante) gera **novo** Legal
+Deadline. 11. Alteração do mesmo fato gerador (correção de data, suspensão, cancelamento, reabertura)
+preserva o **mesmo** registro e grava a alteração em histórico/auditoria. 12. Prazo suspenso não pode
+aparecer como atraso normal. 13. Prazo cancelado não pode continuar sendo tratado como ativo. 14. Prazo
+cumprido preserva histórico. 15. Reabertura preserva o ciclo anterior (ver proposta de status, abaixo).
+16. Nenhuma alteração apaga silenciosamente o valor anterior. 17. A Patrono MVP não calcula prazo
+processual automaticamente. 18. Nenhuma engine de cálculo jurídico será criada no Sprint 2.
+
+### Novo fato gerador × alteração do mesmo prazo
+
+- **Novo fato gerador** (nova intimação, nova publicação, nova decisão, novo despacho, nova audiência,
+  novo ato jurídico relevante) → cria **novo** Legal Deadline (novo `id`, mesmo `processId`).
+- **Alteração do mesmo fato gerador** (correção de data, suspensão, cancelamento, reabertura, mudança
+  formal daquele mesmo prazo) → mantém o **mesmo** Legal Deadline (mesmo `id`) e registra a alteração
+  via o mecanismo de auditoria já existente (`before`/`after`, nunca sobrescrita silenciosa).
+- A distinção entre os dois casos, para um fato concreto, é uma decisão jurídica de quem registra —
+  não uma regra que o sistema infere automaticamente.
+
+### Responsabilidade
+
+A definição jurídica da origem e natureza de um prazo (o que conta como fato gerador, o que distingue
+prazo processual de prazo interno) pertence ao Jurídico. TI implementa, integra e futuramente automatiza
+as regras homologadas — TI não decide sozinho se uma data representa prazo jurídico. Registro de Legal
+Deadline continua sujeito integralmente ao RBAC e ao escopo já vigentes na v1.3 (nenhuma regra de
+autorização é enfraquecida por esta decisão).
+
+### Risco identificado e ação obrigatória para o Sprint 2
+
+O levantamento técnico prévio identificou que `dashboard-service.js` (widgets `legal-deadlines` e
+`legal-risk`/"Prazos críticos" do dashboard `legal`) calcula prazo diretamente de uma coluna bruta do
+Monday (`processDate()`, que lê `CITAÇÃO/PROTOCOLO`/`DATA` do board `processos`), não da coleção
+`legalDeadlines`. Isso viola a mesma regra que esta decisão formaliza — data bruta do Monday não é prazo
+jurídico. **Corrigir isso é tarefa obrigatória do Sprint 2** (não implementada agora — ver "Plano do
+Sprint 2"), com regra explícita: nenhuma view pode calcular ou apresentar "prazo jurídico" com lógica
+própria paralela; `legalDeadlines` é a única fonte canônica.
+
+### Impacto no Sprint 2
+
+Habilita o início do Sprint 2 (MASTER_HANDOFF §24) estritamente no escopo já previsto: Legal Process +
+Legal Deadline com listagem/filtros/detalhe/histórico, responsável, prazo com origem, leitura do Monday,
+slice mínimo de Agenda/Atenção. Não introduz cálculo automático de prazo, engine jurídica, IA,
+automações, nem escrita externa. Plano técnico detalhado em `docs/SPRINT2-PLANO.md` — **preparado, mas
+o Sprint 2 não foi iniciado**; implementação de qualquer fase exige nova autorização explícita.
+
+**Reversível.** Sim, mediante nova decisão de negócio homologada pela Cristiane/Jurídico — qualquer
+mudança de origem, escopo de boards, ou dispensa da exigência de `originType` exige o mesmo rito de
+homologação formal usado aqui, não uma alteração silenciosa de código.
 
 ---
 

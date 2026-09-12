@@ -360,10 +360,12 @@ retorna `false` (unitário, `tests/core.test.js`).
 `POST /api/projects/:id/internalizations` só verificava que `processId` **existia** em `processos`. Um
 processo manual/falso (sem `source:'monday'`) ou de outro departamento passava.
 
-**Correção:** enquanto o Monday for a fonte autorizada do piloto (D1 continua pendente — nenhum cálculo
-ou sincronização automática de prazo foi implementado), a criação de internalização passou a exigir que
-o processo relacionado exista, tenha `source === 'monday'` (senão `422`) e esteja no escopo do usuário
-via `scoped(user, relatedProcess)` (senão `403`) — mesmo padrão já usado por Legal Deadline.
+**Correção:** enquanto o Monday for a fonte autorizada do piloto para Legal Process (papel que a D1 não
+altera — ver `docs/DECISIONS.md`, seção 1.1, que trata exclusivamente da fonte/origem de Legal Deadline;
+nenhum cálculo ou sincronização automática de prazo foi implementado), a criação de internalização
+passou a exigir que o processo relacionado exista, tenha `source === 'monday'` (senão `422`) e esteja no
+escopo do usuário via `scoped(user, relatedProcess)` (senão `403`) — mesmo padrão já usado por Legal
+Deadline.
 
 Testado em runtime: internalização com `processId` de processo manual/não-Monday → `422`; com `processId`
 de processo do Monday mas de outro departamento → `403`; com `processId` válido e no escopo → `201`
