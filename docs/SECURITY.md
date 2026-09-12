@@ -18,8 +18,8 @@ módulo/ação.
 | `/api/auth/mfa` | POST | Nenhum (pré-autenticação) | N/A | Valida challenge + código; challenge nunca aceito como token |
 | `/api/auth/register` | POST | Nenhum (pré-autenticação) | N/A | Cria apenas uma solicitação pendente; nenhum acesso concedido sem aprovação humana |
 | `/api/health` | GET | Nenhum | N/A | Só booleans não sensíveis (persistência, migração, ambiente) — aceitável público (item 7 da rodada 3) |
-| `/api/monday/status` | GET | `juridico`/`read` | — | **Corrigido (rodada 3):** antes do gate de sessão; agora autenticado + módulo, payload reduzido (sem `boards`) |
-| `/api/monday/schedule` | GET | `juridico`/`read` | — | **Corrigido (rodada 3):** idem; `lastRuns` sem `requestedBy`/`error` |
+| `/api/monday/status` | GET | `allowedInDepartment(user,'juridico','read')` | Departamento (via `allowedInDepartment`, sem registro individual) | **Corrigido (rodada 3, depois rodada 5):** rodada 3 tirou de antes do gate de sessão; rodada 5 fechou o vazamento cross-departamento (TI podia operar rota jurídica, já que `lider`/`colaborador` têm o módulo `juridico` independentemente do departamento) |
+| `/api/monday/schedule` | GET | `allowedInDepartment(user,'juridico','read')` | Departamento (via `allowedInDepartment`) | **Corrigido (rodada 3, depois rodada 5):** idem acima |
 | `/api/me` | GET | Nenhum além de autenticado | Próprio usuário | Retorna apenas os dados do próprio usuário autenticado |
 | `/api/projects` | GET | `projetos`/`read` | `scoped()` por projeto (filtro) | Presente desde a rodada 1 |
 | `/api/projects/:id` | GET | `projetos`/`read` | `scoped()` por projeto | Presente |
@@ -27,17 +27,17 @@ módulo/ação.
 | `/api/projects/:id/target` | PUT | `allowed(user,'projetos','update')` + `projectPermissions().changeTarget` | `scoped()` por projeto | **Corrigido (rodada 3 item 5, rodada 4 item 8):** faltava `scoped()` (r3); `projectPermissions()` sozinha não é deny-by-default para papel fora de `ROLES` (r4) |
 | `/api/projects/:id/approval-rules` | PUT | `allowed(user,'projetos','update')` + `.changeApprovalRule` | `scoped()` por projeto | **Corrigido (rodada 3/4)** |
 | `/api/projects/:id/recovery-settings` | PUT | `allowed(user,'projetos','update')` + `.changeApprovalRule` | `scoped()` por projeto | **Corrigido (rodada 3/4):** rota nem buscava o projeto antes (r3) |
-| `/api/projects/:id/(actions\|milestones\|risks\|internalizations\|negotiations\|legal-treatments\|management-items)` | POST | `allowed(user,'projetos','create')` + `.edit` | `scoped()` por projeto | **Corrigido (rodada 4):** módulo adicionado; mass assignment de `id`/`projectId`/`createdBy`/`createdAt` corrigido via `sanitizeProjectItemInput()` |
+| `/api/projects/:id/(actions\|milestones\|risks\|internalizations\|negotiations\|legal-treatments\|management-items)` | POST | `allowed(user,'projetos','create')` + `.edit` | `scoped()` por projeto (+ `scoped()` no processo relacionado, para `internalizations`) | **Corrigido (rodada 4, depois rodada 5, item 4):** módulo/mass-assignment corrigidos na r4; r5 acrescentou validação de fonte (`source==='monday'`) e escopo do `processId` para `internalizations`, que antes só checava existência |
 | `.../:itemId` | PATCH | `allowed(user,'projetos','update')` + `.edit` (+ `.internalizeProcess` para internalizations) | `scoped()` por projeto + item | Campos protegidos e de escopo (`departmentId`/`scopeType`/`companyId`/`speId`) removidos do input via `sanitizeProjectItemInput()` (r4) |
 | `.../:itemId` | DELETE | `allowed(user,'projetos','archive')` + `.archive` | `scoped()` por projeto | **Corrigido (rodada 3/4):** faltava buscar/validar o projeto (r3); módulo adicionado (r4) |
 | `.../:itemId/restore` | POST | `allowed(user,'projetos','restore')` + `.restore` | `scoped()` por projeto | **Corrigido (rodada 3/4)** |
 | `management-items/:itemId/(approve\|reject\|escalate)` | POST | `allowed(user,'projetos','update')` + `.approveAgreement` (exceto escalate) | `scoped()` por projeto | **Corrigido (rodada 3/4):** `escalate` não checava nenhuma permissão de negócio antes do módulo (r4) |
-| `/api/dashboards` | GET | `allowed(user, definition.module)` por item | Filtro ad hoc por `departmentId` | Presente (lógica própria, não `scoped()`) |
-| `/api/dashboards/:id` | GET | `allowed(user, definition.module)` (+ `hasGlobalScope(user)` quando `requiresGlobalScope:true`, ex.: `executive`) | Filtro ad hoc por `departmentId`; alçada global para dashboards corporativos sensíveis | **Corrigido (rodada 4, item 1):** `executive` exigia só módulo `central` (compartilhado por todos os papéis) |
-| `/api/dashboard-preferences/:id` | GET/PUT | Nenhum além de autenticado | Chaveado por `userId` (preferência própria) | Presente — não há registro cross-user possível |
-| `/api/monday/test` | POST | `juridico`/`read` | — | Presente |
+| `/api/dashboards` | GET | `dashboardAuthorized()` (módulo + regra corporativa automática) por item | Filtro ad hoc por `departmentId` | **Corrigido (rodada 4, depois rodada 5):** `requiresGlobalScope:true` manual (r4) substituído por `dashboardRequiresGlobalScope()` automática para todo `scope:'corporate'` (r5) |
+| `/api/dashboards/:id` | GET | `dashboardAuthorized(user, definition)` | Filtro por `departmentId`; alçada global automática para qualquer `scope:'corporate'` | **Corrigido (rodada 4, item 1, depois rodada 5, item 2):** rodada 4 só cobria `executive` (flag manual); rodada 5 tornou automático para `budget`/`strategy`/`projects`/`risks` também |
+| `/api/dashboard-preferences/:id` | GET/PUT | `dashboardAuthorized(user, definition)` (mesma checagem de `/api/dashboards/:id`) | Chaveado por `userId` (preferência própria) + autorização do dashboard | **Corrigido (rodada 5, item 5):** antes não validava NENHUMA autorização de dashboard — só "estar autenticado"; um usuário sem acesso a um dashboard ainda lia/gravava sua preferência para ele |
+| `/api/monday/test` | POST | `allowedInDepartment(user,'juridico','read')` | Departamento | **Corrigido (rodada 5):** mesmo gap das demais rotas de Monday |
 | `/api/legal/:module` | GET | `juridico`/`read` | `LEGAL_MODULES` allowlist + `scoped()` por registro | **Corrigido (rodada 2):** allowlist fechada evita indexar `collection()` com valor cru da URL |
-| `/api/monday/sync` | POST | `juridico`/`create` | — | Presente; preserva último valor válido em falha |
+| `/api/monday/sync` | POST | `allowedInDepartment(user,'juridico','create')` | Departamento | **Corrigido (rodada 5):** preserva último valor válido em falha; mesmo gap das demais rotas de Monday |
 | `/api/auth/requests` | GET | `*`/`approve` | — | Presente (só diretoria/administrador) |
 | `/api/auth/requests/:id/approve` | POST | `*`/`approve` | — | Presente |
 | `/api/dashboard` | GET | `central`/`read` | Filtro departamental (`visibleDepartments`) + agenda `scoped()` | **Corrigido (rodada 3, item 6):** antes devolvia `store.departments`/`store.agenda` inteiros a qualquer papel com módulo `central` (todos) |
@@ -152,6 +152,25 @@ todos fecham lacunas de autorização/integridade na fundação já entregue. De
 | 27 | `GET /api/agenda` e `GET /api/departments` sem gate de módulo — só "estar autenticado" + escopo do registro | Endpoint sensível (departments carrega orçamento) protegido só por autenticação | Reaproveitados os módulos já existentes `agenda` e `orcamento` (nenhum módulo novo criado) |
 
 Todos os itens 19–27 cobertos por teste automatizado — unitário e de integração HTTP real.
+
+## P0 corrigidos — rodada 5 (fechamento de autorização/segregação)
+
+Rodada curta, sem Sprint 2/IA/VELKOR/Sienge/automações/escrita externa, focada em 5 lacunas de
+autorização/segregação apontadas após a rodada 4. Detalhe completo (comportamento antes/depois, trechos
+de código) em `docs/PERMISSIONS.md`, seção "P0 corrigidos — rodada 5".
+
+| # | Item | Antes | Depois |
+|---|---|---|---|
+| 28 | Rotas de Monday (`/status`, `/schedule`, `/test`, `/sync`) sem escopo por departamento | `lider`/`colaborador` têm os módulos `juridico` E `ti` simultaneamente em `ROLES`; sem registro individual para `scoped()`, um líder de TI passava no gate de módulo e operava função exclusivamente jurídica (e vice-versa) | Nova `allowedInDepartment(user, module, action)` — `allowed()` + checagem de `user.department` para módulos departamentais (`MODULE_DEPARTMENT`), com bypass só para alçada global ou para o papel técnico `administrador` |
+| 29 | Dashboards `scope:'corporate'` sem alçada global exigida por padrão | Só `executive` tinha `requiresGlobalScope:true` manual (r4); `budget`/`strategy`/`projects`/`risks` (também `scope:'corporate'`) ficavam acessíveis a qualquer papel com o módulo correspondente | `dashboardRequiresGlobalScope(definition)` — automático para qualquer `scope:'corporate'`, salvo `allowDepartmentScope:true` explícito (nenhum dashboard hoje declara essa exceção) |
+| 30 | `administrador` com `scopes:['*']` e bypass incondicional em `scoped()` | Papel técnico (MASTER_HANDOFF §11: "administrador técnico ≠ superusuário de conteúdo") herdava acesso irrestrito a conteúdo de qualquer departamento/empresa/SPE | `ROLES.administrador.scopes` mudou para `[]`; `scoped()` usa `hasGlobalScope(user)` como única fonte de verdade — `administrador` mantém `modules:['*']`/`actions:['*']` (funções técnicas legítimas), mas não bypassa mais `scoped()` |
+| 31 | `internalizations.processId` só verificava existência | Processo manual/falso (sem `source:'monday'`) ou de outro departamento podia ser relacionado a uma internalização | Exige `relatedProcess.source==='monday'` (senão `422`) e `scoped(user, relatedProcess)` (senão `403`) — mesmo padrão de Legal Deadline; nenhum cálculo/sincronização automática de prazo foi criado (D1 continua pendente) |
+| 32 | `GET`/`PUT /api/dashboard-preferences/:id` sem autorização de dashboard | Usuário sem acesso a um dashboard ainda lia/gravava sua própria preferência para ele | Nova `dashboardAuthorized(user, definition)`, reutilizando a mesma checagem de `GET /api/dashboards/:id` (módulo + regra corporativa/global do item 29 + departamento), aplicada antes de qualquer leitura/gravação |
+
+Todos os itens 28–32 cobertos por teste automatizado — unitário (`tests/core.test.js`: `hasGlobalScope()`,
+`scoped()` com `administrador`, `allowedInDepartment()`, `normalizeDeptSlug()`, `dashboardAuthorized()`) e
+de integração HTTP real (`tests/security-integration.test.js`, incluindo um usuário `administrador` de
+teste, novo nesta rodada).
 
 ## P0 conhecidos e ainda abertos — classificados por o que bloqueiam
 

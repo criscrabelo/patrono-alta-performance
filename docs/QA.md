@@ -29,12 +29,12 @@ própria v1.3 define o escopo por fase.
 Suíte: `npm test` (Node.js test runner nativo — cada arquivo `*.test.js` roda em processo próprio).
 
 ```
-tests 70
-pass 70
+tests 90
+pass 90
 fail 0
 ```
 
-**`tests/core.test.js` (34 testes)** — unitários e estruturais. Além dos 26 preexistentes e dos 6 da
+**`tests/core.test.js` (39 testes)** — unitários e estruturais. Além dos 26 preexistentes e dos 6 da
 rodada 2, dois testes foram **atualizados na rodada 3** porque a versão anterior validava exatamente o
 comportamento incorreto que a rodada 3 corrigiu:
 - `scoped()` — companyId/speId agora testados com deny-by-default real (ausência ou mismatch nega,
@@ -47,7 +47,13 @@ comportamento incorreto que a rodada 3 corrigiu:
 bissextos e meses/dias inexistentes) e `sanitizeProjectItemInput()` (protege campos de sub-recurso de
 projeto e campos de escopo, mesmo padrão de `sanitizeEntityInput`).
 
-**`tests/security-integration.test.js` (36 testes)** — HTTP real: sobe um servidor
+5 testes novos da **rodada 5**: `hasGlobalScope()` (só `diretoria` tem alçada global; `administrador`
+deixou de ter), `scoped()` com `administrador` (nega conteúdo departamental; aceita `scopeType:'global'`),
+`allowedInDepartment()` (nega módulo departamental de outro departamento; `administrador`/alçada global
+passam), `normalizeDeptSlug()` (normalização de acentos/caixa) e `dashboardAuthorized()` (módulo + regra
+corporativa automática + departamento).
+
+**`tests/security-integration.test.js` (51 testes)** — HTTP real: sobe um servidor
 `http.createServer(handler)` de verdade, isolado em diretório de dados temporário
 (`COEVO_DATA_DIR`), injeta usuários e dados de teste, e faz requisições HTTP reais, verificando status e
 corpo da resposta — não presença de texto no código-fonte.
@@ -96,6 +102,27 @@ Os 10 testes novos da **rodada 4** (fechamento, sem expansão de escopo) cobrem:
    quando diretoria tenta forjar valores diferentes; herança se atualiza ao trocar `processId` via PATCH.
 9. Papel desconhecido (fora de `ROLES`) com `department:'Jurídico'` não consegue listar, criar, alterar,
    arquivar, restaurar, aprovar nem escalar nada em Projetos.
+
+Os 15 testes novos da **rodada 5** cobrem:
+1. Líder de TI recebe `403` nas quatro rotas de Monday (`status`/`schedule`/`test`/`sync`), mesmo tendo
+   o módulo `juridico` em `ROLES`; líder Jurídico continua acessando-as normalmente.
+2. Líder Jurídico recebe `403` no dashboard departamental de TI (rota TI equivalente), mesmo tendo o
+   módulo `ti` em `ROLES`; líder de TI continua acessando o próprio.
+3. Diretoria (alçada global) continua acessando rotas de Monday e dashboard de TI.
+4. Dashboard corporativo `budget` bloqueado (`403`) para líder departamental e ausente da listagem
+   (`GET /api/dashboards`).
+5. Diretoria continua acessando `budget` e vendo-o na listagem.
+6. Dashboards departamentais (`legal`, `ti`) continuam funcionando normalmente para o departamento
+   correspondente.
+7. Administrador técnico recebe `200` em `/api/legal/processos` (passa no gate de módulo) mas com
+   `records: []` — não acessa conteúdo jurídico automaticamente; diretoria continua acessando.
+8. Internalization com `processId` de processo manual/não-Monday é rejeitada com `422`.
+9. Internalization com `processId` de processo do Monday fora do escopo do usuário é rejeitada com
+   `403`; internalization com `processId` válido continua funcionando (`201`).
+10. Dashboard preference de `executive`/`budget` negada (`403`, GET e PUT) a líder departamental;
+    diretoria consegue ler e gravar ambas.
+11. Preferência de dashboard departamental permitido (`legal`) continua funcionando para o líder do
+    departamento correspondente, e é negada para líder de outro departamento.
 
 ## Catálogo Global de Regressão (§30)
 

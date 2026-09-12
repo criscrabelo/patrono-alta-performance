@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, seed, parseCsv, hash, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, isValidCivilDate, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS } = require('../server');
+const { ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, seed, parseCsv, hash, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, isValidCivilDate, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, hasGlobalScope, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized } = require('../server');
 const { WIDGET_TYPES, DASHBOARD_DEFINITIONS } = require('../dashboard-model');
 const { dashboardPayload } = require('../dashboard-service');
 const { PROJECT_ID, ensureProjectStore, projectDetail, projectPermissions } = require('../project-service');
@@ -379,4 +379,56 @@ test('sanitizeProjectItemInput remove campos controlados pelo servidor de sub-re
   const sanitizedGlobal = sanitizeProjectItemInput(maliciousInput, diretoria);
   for (const field of PROTECTED_PROJECT_ITEM_FIELDS) assert.equal(sanitizedGlobal[field], undefined);
   assert.equal(sanitizedGlobal.departmentId, 'dep-forjado', 'papel com escopo global pode escolher o departamento do sub-recurso');
+});
+
+// --- Rodada 5: isolamento módulo x departamento, administrador ≠ superusuário de conteúdo ---
+
+test('hasGlobalScope() deixa de tratar administrador como alçada de negócio global (item 3)', () => {
+  assert.equal(hasGlobalScope({ role: 'diretoria' }), true, 'diretoria continua sendo a alçada de negócio global verdadeira');
+  assert.equal(hasGlobalScope({ role: 'administrador' }), false, 'administrador técnico não é mais alçada de negócio global — MASTER_HANDOFF: administrador ≠ superusuário de conteúdo');
+  assert.equal(hasGlobalScope({ role: 'lider' }), false);
+  assert.equal(hasGlobalScope({ role: 'colaborador' }), false);
+});
+
+test('scoped() nega administrador para conteúdo fora do próprio escopo (item 3)', () => {
+  const administrador = { role: 'administrador', department: null };
+  assert.equal(scoped(administrador, { department: 'Jurídico' }), false, 'administrador não é superusuário de conteúdo — precisa estar no escopo do registro como qualquer outro usuário');
+  assert.equal(scoped(administrador, { scopeType: 'global' }), true, 'registro explicitamente global continua acessível a qualquer um');
+  assert.equal(scoped({ role: 'diretoria' }, { department: 'TI' }), true, 'diretoria continua com bypass total (alçada de negócio verdadeiramente global)');
+});
+
+test('allowedInDepartment() nega módulo departamental (juridico/ti) para usuário de outro departamento (item 1)', () => {
+  const liderJuridico = { role: 'lider', department: 'Jurídico' };
+  const liderTi = { role: 'lider', department: 'TI' };
+  const diretoria = { role: 'diretoria', department: null };
+  const administrador = { role: 'administrador', department: null };
+  assert.equal(allowedInDepartment(liderJuridico, 'juridico', 'read'), true);
+  assert.equal(allowedInDepartment(liderTi, 'juridico', 'read'), false, 'lider de TI não pode operar módulo Jurídico, mesmo tendo o módulo em ROLES');
+  assert.equal(allowedInDepartment(liderJuridico, 'ti', 'read'), false, 'lider Jurídico não pode operar módulo TI');
+  assert.equal(allowedInDepartment(liderTi, 'ti', 'read'), true);
+  assert.equal(allowedInDepartment(diretoria, 'juridico', 'read'), true, 'alçada de negócio global acessa qualquer módulo departamental');
+  assert.equal(allowedInDepartment(diretoria, 'ti', 'read'), true);
+  assert.equal(allowedInDepartment(administrador, 'juridico', 'read'), true, 'administrador técnico gerencia integrações de qualquer departamento (ação de módulo, não acesso a conteúdo)');
+  assert.equal(allowedInDepartment(administrador, 'ti', 'read'), true);
+  assert.equal(allowedInDepartment(liderJuridico, 'central', 'read'), true, 'módulo sem departamento correspondente não é restringido por esta camada');
+});
+
+test('normalizeDeptSlug() remove acentos e caixa para comparação de departmentId', () => {
+  assert.equal(normalizeDeptSlug('Jurídico'), 'juridico');
+  assert.equal(normalizeDeptSlug('TI'), 'ti');
+  assert.equal(normalizeDeptSlug(''), '');
+  assert.equal(normalizeDeptSlug(null), '');
+});
+
+test('dashboardAuthorized() aplica módulo + alçada global corporativa + departamento (item 5)', () => {
+  const executive = { module: 'central', scope: 'corporate', departmentId: undefined };
+  const legal = { module: 'juridico', scope: 'department', departmentId: 'dep-juridico' };
+  const liderJuridico = { role: 'lider', department: 'Jurídico' };
+  const liderTi = { role: 'lider', department: 'TI' };
+  const diretoria = { role: 'diretoria', department: null };
+  assert.equal(dashboardAuthorized(liderJuridico, executive), false, 'dashboard corporate nega papel departamental');
+  assert.equal(dashboardAuthorized(diretoria, executive), true, 'dashboard corporate permite alçada global');
+  assert.equal(dashboardAuthorized(liderJuridico, legal), true, 'dashboard departamental permite o próprio departamento');
+  assert.equal(dashboardAuthorized(liderTi, legal), false, 'dashboard departamental nega outro departamento');
+  assert.equal(dashboardAuthorized(liderJuridico, null), false, 'dashboard inexistente nunca autoriza');
 });

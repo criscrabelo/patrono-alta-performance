@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { generatePresentation } = require('./presentation-export');
-const { WIDGET_TYPES, getDashboardDefinition, visibleDashboards } = require('./dashboard-model');
+const { WIDGET_TYPES, getDashboardDefinition, visibleDashboards, dashboardRequiresGlobalScope } = require('./dashboard-model');
 const { dashboardPayload } = require('./dashboard-service');
 const { PROJECT_ID, ensureProjectStore, projectSummary, projectDetail, projectPermissions, newId } = require('./project-service');
 
@@ -136,9 +136,19 @@ function sanitizeProjectItemInput(input, user) {
   if (!hasGlobalScope(user)) { delete clean.departmentId; delete clean.scopeType; delete clean.companyId; delete clean.speId; }
   return clean;
 }
+// P0 corrigido (rodada 5, item 3): MASTER_HANDOFF §11 — "Administrador técnico ≠ superusuário de
+// conteúdo". `administrador` mantém `modules:['*']`/`actions:['*']` para as funções técnicas que já
+// eram (e continuam sendo) legítimas: `allowed(user,'*',ação)` é o gate usado por rotas de sistema
+// (auditoria, aprovação de cadastro, backup) e por allowedInDepartment() para módulos operacionais de
+// integração (ver abaixo) — gerenciar sistema/usuários/integrações/segurança/configuração é exatamente
+// o papel de um administrador técnico. O que mudou é `scopes: []` (antes `['*']`): scoped() e
+// hasGlobalScope() deixam de tratar administrador como alçada global de CONTEÚDO — sem isso,
+// administrador herdava acesso irrestrito a registros de qualquer departamento/empresa/SPE só por ter
+// o papel técnico, o que o MASTER_HANDOFF proíbe explicitamente. `diretoria` continua sendo a única
+// alçada de negócio verdadeiramente global (`scopes:['*']`).
 const ROLES = {
   diretoria: { modules: ['*'], scopes: ['*'], actions: ['read','create','update','archive','restore','approve','export'] },
-  administrador: { modules: ['*'], scopes: ['*'], actions: ['*'] },
+  administrador: { modules: ['*'], scopes: [], actions: ['*'] },
   lider: { modules: ['central','estrategia','projetos','agenda','comites','orcamento','juridico','ti'], scopes: ['department'], actions: ['read','create','update','archive','export'] },
   colaborador: { modules: ['central','projetos','agenda','juridico','ti'], scopes: ['department'], actions: ['read','create','update'] }
 };
@@ -170,6 +180,39 @@ function audit(store, user, action, entity, entityId, before, after, reason = 'O
 function allowed(user, module, action = 'read') {
   const policy = ROLES[user.role];
   return !!policy && (policy.modules.includes('*') || policy.modules.includes(module)) && (policy.actions.includes('*') || policy.actions.includes(action));
+}
+// P0 corrigido (rodada 5, item 1): 'juridico' e 'ti' são módulos que representam um departamento
+// operacional específico do negócio — mas `lider`/`colaborador` têm os DOIS módulos simultaneamente em
+// ROLES, independentemente do próprio departamento (ver docs/PERMISSIONS.md, nota histórica). Isso é
+// inofensivo em rotas com escopo por registro (scoped() já nega por department — ver /api/legal/:module,
+// /api/entities/:type), mas era uma lacuna real nas rotas SEM registro individual para filtrar
+// (/api/monday/status, /schedule, /test, /sync): um usuário de TI passava no gate de módulo e operava
+// uma função exclusivamente jurídica, e vice-versa. `allowedInDepartment()` fecha isso: além de
+// `allowed()`, exige que o department do usuário corresponda ao do módulo — deny-by-default para quem
+// não é do departamento certo. Alçada de negócio global (`hasGlobalScope`) sempre passa; administrador
+// técnico também passa aqui (gerencia integrações/sistema de qualquer departamento — MASTER_HANDOFF
+// §11), mas isso NÃO reabre acesso a conteúdo: scoped() (acima) já nega administrador por registro.
+const MODULE_DEPARTMENT = Object.freeze({ juridico: 'Jurídico', ti: 'TI' });
+function allowedInDepartment(user, module, action = 'read') {
+  if (!allowed(user, module, action)) return false;
+  const requiredDepartment = MODULE_DEPARTMENT[module];
+  if (!requiredDepartment) return true;
+  if (hasGlobalScope(user) || user.role === 'administrador') return true;
+  return user.department === requiredDepartment;
+}
+// Normaliza um nome de departamento para o slug usado em departmentId ('dep-juridico', 'dep-ti', ...).
+// Extraído para evitar repetir a mesma expressão de normalização em múltiplos pontos do código.
+function normalizeDeptSlug(department) { return String(department || '').toLocaleLowerCase('pt-BR').normalize('NFD').replace(/[\u0300-\u036f]/g, ''); }
+// P0 corrigido (rodada 5, item 5): centraliza a MESMA autorização usada em GET /api/dashboards/:id
+// (módulo + alçada global para dashboards corporativos + departamento) para reaproveitar em
+// /api/dashboard-preferences/:id — que antes não verificava autorização nenhuma antes de ler/gravar
+// preferências de um dashboard.
+function dashboardAuthorized(user, definition) {
+  if (!definition) return false;
+  if (!allowed(user, definition.module)) return false;
+  if (dashboardRequiresGlobalScope(definition) && !hasGlobalScope(user)) return false;
+  if (user.department && definition.departmentId && !definition.departmentId.endsWith(normalizeDeptSlug(user.department))) return false;
+  return true;
 }
 function json(res, status, body) { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'x-content-type-options': 'nosniff' }); res.end(JSON.stringify(body)); }
 function getUser(req) {
@@ -213,7 +256,12 @@ function requireMfa(user) { return user.role === 'diretoria' || user.role === 'a
 // para speId. Continua inerte hoje (nenhum registro/usuário real carrega esses campos — ver
 // docs/PERMISSIONS.md), mas testado com dados sintéticos em tests/core.test.js.
 function scoped(user, item) {
-  if (user.role === 'diretoria' || user.role === 'administrador') return true;
+  // P0 corrigido (rodada 5, item 3): bypass agora usa hasGlobalScope() (ROLES[role].scopes) em vez de
+  // checar `user.role === 'administrador'` diretamente — uma única fonte de verdade para "alçada de
+  // negócio global". Com `administrador.scopes` mudado para `[]`, administrador deixa de bypassar
+  // scoped() automaticamente: precisa que o próprio registro esteja no seu escopo (ex.: department),
+  // exatamente como qualquer outro usuário sem alçada global — não é mais superusuário de conteúdo.
+  if (hasGlobalScope(user)) return true;
   if (item.scopeType === 'global') return true;
   if (item.companyId && (!user.companyId || user.companyId !== item.companyId)) return false;
   if (item.speId && (!user.speId || user.speId !== item.speId)) return false;
@@ -343,8 +391,11 @@ function handler(req, res) {
   // mensagens de erro. Agora exigem sessão válida e o mesmo módulo usado para o restante do Jurídico,
   // e o payload de /schedule deixou de incluir `requestedBy`/`error` (mínimo privilégio — quem precisa
   // apenas saber que uma sincronização falhou não precisa do texto interno do erro nem de quem a pediu).
-  if (req.method === 'GET' && url.pathname === '/api/monday/status') { if(!allowed(user,'juridico','read')) return json(res,403,{error:'Sem permissão'}); return json(res,200,{configured:Boolean(process.env.MONDAY_TOKEN), moduleCount:Object.keys(MONDAY_BOARDS).length}); }
-  if (req.method === 'GET' && url.pathname === '/api/monday/schedule') { if(!allowed(user,'juridico','read')) return json(res,403,{error:'Sem permissão'}); const lastRuns=(store.mondayRuns||[]).slice(-10).reverse().map(run=>({id:run.id,startedAt:run.startedAt,finishedAt:run.finishedAt||null,status:run.status,trigger:run.trigger||'manual',modules:(run.modules||[]).map(m=>({module:m.module,status:m.status,read:m.read,created:m.created,updated:m.updated}))})); return json(res,200,{enabled:Boolean(process.env.MONDAY_TOKEN),timezone:'America/Sao_Paulo',times:MONDAY_SYNC_TIMES,lastRuns}); }
+  // P0 corrigido (rodada 5, item 1): allowed() sozinho não nega um usuário de TI (que também tem o
+  // módulo 'juridico' em ROLES) — allowedInDepartment() fecha isso para as rotas de Monday, que não
+  // têm registro individual para scoped() filtrar.
+  if (req.method === 'GET' && url.pathname === '/api/monday/status') { if(!allowedInDepartment(user,'juridico','read')) return json(res,403,{error:'Sem permissão'}); return json(res,200,{configured:Boolean(process.env.MONDAY_TOKEN), moduleCount:Object.keys(MONDAY_BOARDS).length}); }
+  if (req.method === 'GET' && url.pathname === '/api/monday/schedule') { if(!allowedInDepartment(user,'juridico','read')) return json(res,403,{error:'Sem permissão'}); const lastRuns=(store.mondayRuns||[]).slice(-10).reverse().map(run=>({id:run.id,startedAt:run.startedAt,finishedAt:run.finishedAt||null,status:run.status,trigger:run.trigger||'manual',modules:(run.modules||[]).map(m=>({module:m.module,status:m.status,read:m.read,created:m.created,updated:m.updated}))})); return json(res,200,{enabled:Boolean(process.env.MONDAY_TOKEN),timezone:'America/Sao_Paulo',times:MONDAY_SYNC_TIMES,lastRuns}); }
   if (req.method === 'GET' && url.pathname === '/api/me') return json(res,200,{user,permissions:ROLES[user.role]});
   if (req.method === 'GET' && url.pathname === '/api/projects') {
     if(!allowed(user,'projetos'))return json(res,403,{error:'Sem permissão para Projetos'});
@@ -398,7 +449,20 @@ function handler(req, res) {
     if(!allowed(user,'projetos','create'))return json(res,403,{error:'Sem permissão para o módulo Projetos'});
     if(!permissions.edit)return json(res,403,{error:'Sem permissão para editar o projeto'});
     const [key,prefix]=PROJECT_RESOURCE_MAP[resource];
-    return body(req).then(input=>{const sanitized=sanitizeProjectItemInput(input,user);if(resource==='internalizations'&&sanitized.processId&&!collection(store,'processos').some(item=>item.id===sanitized.processId))return json(res,422,{error:'Processo relacionado não encontrado'});const item={...sanitized,id:newId(prefix),projectId:id,status:resource==='management-items'?'Pendente':(sanitized.status||'Não iniciado'),createdAt:new Date().toISOString(),createdBy:user.id};store[key].push(item);audit(store,user,'CREATE',key,item.id,null,item,input.reason||'Registro vinculado ao projeto');writeStore(store);return json(res,201,item)});
+    return body(req).then(input=>{
+      const sanitized=sanitizeProjectItemInput(input,user);
+      // P0 corrigido (rodada 5, item 4): antes só verificava se processId EXISTIA em 'processos' — um
+      // processo manual/falso (sem source:'monday') ou de outro escopo/departamento passava. Enquanto o
+      // Monday for a fonte autorizada do piloto (D1 continua pendente — não implementa cálculo/
+      // sincronização automática de prazo), a internalização precisa apontar para um processo real da
+      // fonte oficial e dentro do escopo do usuário — mesmo padrão já usado por Legal Deadline.
+      if(resource==='internalizations'&&sanitized.processId){
+        const relatedProcess=collection(store,'processos').find(item=>item.id===sanitized.processId&&!item.deletedAt);
+        if(!relatedProcess||relatedProcess.source!=='monday')return json(res,422,{error:'Processo relacionado não encontrado ou não pertence à fonte autorizada do piloto (Monday)'});
+        if(!scoped(user,relatedProcess))return json(res,403,{error:'Sem permissão para relacionar este processo'});
+      }
+      const item={...sanitized,id:newId(prefix),projectId:id,status:resource==='management-items'?'Pendente':(sanitized.status||'Não iniciado'),createdAt:new Date().toISOString(),createdBy:user.id};store[key].push(item);audit(store,user,'CREATE',key,item.id,null,item,input.reason||'Registro vinculado ao projeto');writeStore(store);return json(res,201,item);
+    });
   }
   if (req.method === 'PATCH' && /^\/api\/projects\/[^/]+\/(actions|milestones|risks|internalizations|negotiations|legal-treatments|management-items)\/[^/]+$/.test(url.pathname)) {
     const [, , , id, resource, itemId]=url.pathname.split('/'),project=store.projects.find(item=>item.id===id&&!item.deletedAt),permissions=projectPermissions(user),[key]=PROJECT_RESOURCE_MAP[resource],item=store[key].find(entry=>entry.id===itemId&&entry.projectId===id&&!entry.deletedAt);
@@ -427,31 +491,33 @@ function handler(req, res) {
     return body(req).then(input=>{const before=structuredClone(item);item.status=decision==='approve'?'Aprovado':decision==='reject'?'Rejeitado':'Escalonado';item.decidedAt=new Date().toISOString();item.decidedBy=user.id;item.justification=input.reason||null;audit(store,user,decision.toUpperCase(),'projectGovernance',id,before,item,input.reason||`${decision} de pendência gerencial`);writeStore(store);return json(res,200,item)});
   }
   if (req.method === 'GET' && url.pathname === '/api/dashboards') {
-    const dashboards=visibleDashboards(user,allowed,hasGlobalScope).filter(item=>!user.department||user.role==='diretoria'||user.role==='administrador'||!item.departmentId||item.departmentId===`dep-${user.department.toLocaleLowerCase('pt-BR').normalize('NFD').replace(/[\u0300-\u036f]/g,'')}`);
+    const dashboards=visibleDashboards(user,allowed,hasGlobalScope).filter(item=>!user.department||hasGlobalScope(user)||user.role==='administrador'||!item.departmentId||item.departmentId===`dep-${normalizeDeptSlug(user.department)}`);
     return json(res,200,{widgetTypes:WIDGET_TYPES,dashboards});
   }
   if (req.method === 'GET' && /^\/api\/dashboards\/[^/]+$/.test(url.pathname)) {
     const id=url.pathname.split('/')[3],definition=getDashboardDefinition(id);
     if(!definition)return json(res,404,{error:'Dashboard não encontrado'});
-    if(!allowed(user,definition.module))return json(res,403,{error:'Sem permissão para este dashboard'});
-    // P0 corrigido (rodada 4, item 1): dashboard com requiresGlobalScope:true (hoje só 'executive')
-    // exige alçada global — módulo sozinho não basta, pois 'central' também é módulo de lider/colaborador.
-    if(definition.requiresGlobalScope && !hasGlobalScope(user))return json(res,403,{error:'Sem permissão para este dashboard'});
-    if(user.department&&definition.departmentId&&!definition.departmentId.endsWith(user.department.toLocaleLowerCase('pt-BR').normalize('NFD').replace(/[\u0300-\u036f]/g,'')))return json(res,403,{error:'Sem permissão para este departamento'});
+    if(!dashboardAuthorized(user,definition))return json(res,403,{error:'Sem permissão para este dashboard'});
     return json(res,200,dashboardPayload(store,id,Object.fromEntries(url.searchParams)));
   }
+  // P0 corrigido (rodada 5, item 5): GET/PUT de preferências não validavam autorização alguma antes —
+  // um usuário sem acesso a um dashboard ainda conseguia ler/gravar a própria preferência dele.
+  // dashboardAuthorized() aplica a MESMA regra usada em GET /api/dashboards/:id (módulo + alçada
+  // global para dashboard corporativo + departamento).
   if (req.method === 'GET' && /^\/api\/dashboard-preferences\/[^/]+$/.test(url.pathname)) {
     const dashboardId=url.pathname.split('/')[3],definition=getDashboardDefinition(dashboardId);if(!definition)return json(res,404,{error:'Dashboard não encontrado'});
+    if(!dashboardAuthorized(user,definition))return json(res,403,{error:'Sem permissão para este dashboard'});
     const saved=(store.dashboardPreferences||[]).find(item=>item.userId===user.id&&item.dashboardId===dashboardId);
     return json(res,200,saved||{userId:user.id,dashboardId,hiddenWidgets:[],widgetOrder:definition.widgets.map(item=>item.id),density:'comfortable'});
   }
   if (req.method === 'PUT' && /^\/api\/dashboard-preferences\/[^/]+$/.test(url.pathname)) {
     const dashboardId=url.pathname.split('/')[3],definition=getDashboardDefinition(dashboardId);if(!definition)return json(res,404,{error:'Dashboard não encontrado'});
+    if(!dashboardAuthorized(user,definition))return json(res,403,{error:'Sem permissão para este dashboard'});
     return body(req).then(input=>{const validIds=new Set(definition.widgets.map(item=>item.id)),preference={userId:user.id,dashboardId,hiddenWidgets:[...new Set(input.hiddenWidgets||[])].filter(id=>validIds.has(id)),widgetOrder:[...new Set(input.widgetOrder||[])].filter(id=>validIds.has(id)),density:input.density==='compact'?'compact':'comfortable',updatedAt:new Date().toISOString()};for(const id of validIds)if(!preference.widgetOrder.includes(id))preference.widgetOrder.push(id);store.dashboardPreferences=store.dashboardPreferences||[];const index=store.dashboardPreferences.findIndex(item=>item.userId===user.id&&item.dashboardId===dashboardId);if(index>=0)store.dashboardPreferences[index]=preference;else store.dashboardPreferences.push(preference);audit(store,user,'UPDATE','dashboardPreference',dashboardId,null,preference,'Personalização de dashboard');writeStore(store);return json(res,200,preference)});
   }
-  if (req.method === 'POST' && url.pathname === '/api/monday/test') { if(!allowed(user,'juridico','read')) return json(res,403,{error:'Sem permissão'}); return mondayQuery('{me{id name email}}').then(data=>json(res,200,{connected:true,account:data.me})).catch(error=>json(res,503,{connected:false,error:error.message})); }
+  if (req.method === 'POST' && url.pathname === '/api/monday/test') { if(!allowedInDepartment(user,'juridico','read')) return json(res,403,{error:'Sem permissão'}); return mondayQuery('{me{id name email}}').then(data=>json(res,200,{connected:true,account:data.me})).catch(error=>json(res,503,{connected:false,error:error.message})); }
   if (req.method === 'GET' && url.pathname.startsWith('/api/legal/')) { const moduleName=url.pathname.split('/')[3]; if(!allowed(user,'juridico','read')) return json(res,403,{error:'Sem permissão para o módulo Jurídico'}); if(!LEGAL_MODULES.has(moduleName)) return json(res,404,{error:'Módulo jurídico não encontrado'}); if(moduleName==='honorariosJudiciais'){const processRows=collection(store,'processos').filter(x=>!x.deletedAt&&x.source==='monday'&&scoped(user,x));return json(res,200,{module:moduleName,...judicialHonorariumPayload(processRows)});}const rows=collection(store,moduleName).filter(x=>!x.deletedAt&&x.source==='monday'&&scoped(user,x)); if(moduleName==='processos'&&url.searchParams.get('paginated')==='1')return json(res,200,{module:moduleName,...filterProcesses(rows,url)});if(moduleName==='honorarios'&&url.searchParams.get('paginated')==='1')return json(res,200,{module:moduleName,...filterHonorariums(rows,url)});return json(res,200,{module:moduleName,count:rows.length,records:rows}); }
-  if (req.method === 'POST' && url.pathname === '/api/monday/sync') { if(!allowed(user,'juridico','create')) return json(res,403,{error:'Sem permissão para sincronizar'}); return body(req).then(async input=>{const modules=input.modules?.length?input.modules:Object.keys(MONDAY_BOARDS);store.mondayRuns=store.mondayRuns||[];const run={id:crypto.randomUUID(),startedAt:new Date().toISOString(),requestedBy:user.name,modules:[],status:'running'};store.mondayRuns.push(run);let failed=0;for(const moduleName of modules){const board=MONDAY_BOARDS[moduleName];if(!board)continue;try{const items=await fetchMondayBoard(board.id);const list=collection(store,moduleName);let created=0,updated=0;for(const raw of items){const normalized=normalizeMondayItem(raw,moduleName,board);const existing=list.find(x=>x.source==='monday'&&x.externalId===normalized.externalId);if(existing){const before=structuredClone(existing);Object.assign(existing,normalized,{id:existing.id,version:(existing.version||1)+1});updated++;}else{list.push({...normalized,version:1});created++;}}run.modules.push({module:moduleName,board:board.name,read:items.length,created,updated,status:'ok'});}catch(error){failed++;run.modules.push({module:moduleName,board:board.name,status:'error',error:error.message});}}run.status=failed?'partial':'completed';run.finishedAt=new Date().toISOString();audit(store,user,'SYNC','monday',run.id,null,run,'Sincronização somente leitura com preservação de dados anteriores');writeStore(store);return json(res,failed?207:200,run);}); }
+  if (req.method === 'POST' && url.pathname === '/api/monday/sync') { if(!allowedInDepartment(user,'juridico','create')) return json(res,403,{error:'Sem permissão para sincronizar'}); return body(req).then(async input=>{const modules=input.modules?.length?input.modules:Object.keys(MONDAY_BOARDS);store.mondayRuns=store.mondayRuns||[];const run={id:crypto.randomUUID(),startedAt:new Date().toISOString(),requestedBy:user.name,modules:[],status:'running'};store.mondayRuns.push(run);let failed=0;for(const moduleName of modules){const board=MONDAY_BOARDS[moduleName];if(!board)continue;try{const items=await fetchMondayBoard(board.id);const list=collection(store,moduleName);let created=0,updated=0;for(const raw of items){const normalized=normalizeMondayItem(raw,moduleName,board);const existing=list.find(x=>x.source==='monday'&&x.externalId===normalized.externalId);if(existing){const before=structuredClone(existing);Object.assign(existing,normalized,{id:existing.id,version:(existing.version||1)+1});updated++;}else{list.push({...normalized,version:1});created++;}}run.modules.push({module:moduleName,board:board.name,read:items.length,created,updated,status:'ok'});}catch(error){failed++;run.modules.push({module:moduleName,board:board.name,status:'error',error:error.message});}}run.status=failed?'partial':'completed';run.finishedAt=new Date().toISOString();audit(store,user,'SYNC','monday',run.id,null,run,'Sincronização somente leitura com preservação de dados anteriores');writeStore(store);return json(res,failed?207:200,run);}); }
   if (req.method === 'GET' && url.pathname === '/api/auth/requests') { if(!allowed(user,'*','approve')) return json(res,403,{error:'Somente aprovadores podem consultar solicitações'}); return json(res,200,store.registrationRequests); }
   if (req.method === 'POST' && url.pathname.match(/^\/api\/auth\/requests\/[^/]+\/approve$/)) { if(!allowed(user,'*','approve')) return json(res,403,{error:'Somente aprovadores podem aprovar'}); const id=url.pathname.split('/')[4]; const request=store.registrationRequests.find(r=>r.id===id&&r.status==='pending'); if(!request) return json(res,404,{error:'Solicitação não encontrada'}); request.status='approved';request.approvedAt=new Date().toISOString();request.approvedBy=user.name; const created={id:crypto.randomUUID(),name:request.name,email:request.email,role:request.requestedRole,department:request.department,mfa:false,temporaryPassword:true}; store.users.push(created); audit(store,user,'APPROVE','registration',id,{status:'pending'},{status:'approved',userId:created.id},'Aprovação de cadastro por responsável humano'); writeStore(store); return json(res,200,{approved:true,user:created}); }
   // P0 corrigido (rodada 3, item 6): a rota devolvia store.departments (com o objeto `budget` completo
@@ -552,5 +618,5 @@ function handler(req, res) {
   return json(res,404,{error:'Rota não encontrada'});
 }
 if (require.main === module) { ensureStore(); http.createServer((req,res)=>handler(req,res)).listen(PORT,()=>console.log(`COEVO Alta Performance disponível em http://localhost:${PORT}`)); setInterval(()=>scheduledMondayTick().catch(error=>console.error('Monday scheduler:',error.message)),60000); }
-module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS };
+module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized };
 

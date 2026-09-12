@@ -15,18 +15,20 @@ nunca substitui autorização. Todo o RBAC deste sistema é decidido e aplicado 
 
 ## Modelo de papéis (`ROLES`, `server.js`)
 
-| Papel | Módulos | Ações |
-|---|---|---|
-| `diretoria` | `*` | read, create, update, archive, restore, approve, export |
-| `administrador` | `*` | `*` |
-| `lider` | central, estratégia, projetos, agenda, comitês, orçamento, jurídico, TI | read, create, update, archive, export |
-| `colaborador` | central, projetos, agenda, jurídico, TI | read, create, update |
+| Papel | Módulos | Escopos (`scopes`) | Ações |
+|---|---|---|---|
+| `diretoria` | `*` | `*` (única alçada de negócio verdadeiramente global) | read, create, update, archive, restore, approve, export |
+| `administrador` | `*` (gestão técnica: sistema, usuários, integrações, segurança, configuração) | **`[]`** (rodada 5 — ver abaixo) | `*` |
+| `lider` | central, estratégia, projetos, agenda, comitês, orçamento, jurídico, TI | department | read, create, update, archive, export |
+| `colaborador` | central, projetos, agenda, jurídico, TI | department | read, create, update |
 
 **Nota sobre o desenho atual:** `lider` e `colaborador` incluem os módulos `juridico` e `ti`
 **independentemente do próprio departamento** — ou seja, o gate de módulo (`allowed()`) por si só não
-impede um líder de TI de *tentar* uma rota jurídica; quem impede é o gate de escopo por registro
-(`scoped()`), descrito abaixo. Isso é comportamento pré-existente do desenho de `ROLES`, não alterado
-nesta execução — documentado aqui para não ser confundido com uma falha do gate de módulo.
+impede um líder de TI de *tentar* uma rota jurídica. Para rotas com registro individual, quem impede é o
+gate de escopo por registro (`scoped()`), descrito abaixo. Para rotas **sem** registro individual (as de
+Monday: `/api/monday/status`, `/schedule`, `/test`, `/sync`), a rodada 5 (item 1, abaixo) introduziu
+`allowedInDepartment()`, que fecha esse gap adicionando a checagem de departamento diretamente no gate de
+módulo para os módulos `juridico`/`ti`.
 
 ## Autorização em camadas (o que existe hoje, nesta ordem, por rota)
 
@@ -115,11 +117,12 @@ inclusive um líder de TI, já que `lider` inclui `juridico` em seus módulos (v
    próprios registros (já que eles não carregavam `department` nenhum).
 
 ```js
-// Versão atual (rodada 3) — ver seção "P0 corrigidos — rodada 3" abaixo para o que mudou desde a
-// rodada 2 (a versão anterior deste bloco de código, mostrada aqui na rodada 2, tinha um bug de
-// deny-by-default em companyId/speId, corrigido a seguir).
+// Versão atual (rodada 5) — ver seção "P0 corrigidos — rodada 5", item 3, para o que mudou desde a
+// rodada 3 (a versão mostrada aqui então bypassava incondicionalmente para user.role === 'administrador';
+// a rodada 5 substituiu isso por hasGlobalScope(user), e ROLES.administrador.scopes passou a ser [],
+// não mais ['*'] — administrador deixou de ser superusuário de conteúdo).
 function scoped(user, item) {
-  if (user.role === 'diretoria' || user.role === 'administrador') return true;
+  if (hasGlobalScope(user)) return true;
   if (item.scopeType === 'global') return true;
   if (item.companyId && (!user.companyId || user.companyId !== item.companyId)) return false;
   if (item.speId && (!user.speId || user.speId !== item.speId)) return false;
@@ -284,6 +287,98 @@ Nenhuma das duas tinha gate de módulo — apenas sessão válida (+ escopo do r
 já existentes: `agenda` (mesmo módulo já usado no POST) e `orcamento` (mesmo módulo do dashboard e da
 importação de orçamento) — nenhum módulo novo foi criado em `ROLES`.
 
+## P0 corrigidos — rodada 5 (fechamento de autorização/segregação)
+
+### 1. Isolamento de módulo Jurídico x TI em rotas sem registro individual
+
+`lider`/`colaborador` têm simultaneamente os módulos `juridico` e `ti` em `ROLES` (ver nota acima).
+Rotas com `scoped(user, item)` por registro já negavam corretamente entre departamentos, mas as rotas
+de Monday (`GET /api/monday/status`, `GET /api/monday/schedule`, `POST /api/monday/test`,
+`POST /api/monday/sync`) não têm registro individual para aplicar `scoped()` — um líder de TI passava
+livremente no gate de módulo (`allowed(user,'juridico','read')`) e operava uma função exclusivamente
+jurídica, e vice-versa.
+
+**Correção:** nova função `allowedInDepartment(user, module, action)`, que aplica `allowed()` e, para
+módulos departamentais (`MODULE_DEPARTMENT = { juridico: 'Jurídico', ti: 'TI' }`), exige adicionalmente
+`user.department === MODULE_DEPARTMENT[module]` — com bypass apenas para alçada global
+(`hasGlobalScope(user)`) ou para o papel técnico `administrador` (que precisa operar integrações de
+qualquer departamento, mas não ganha acesso a **conteúdo** por isso — ver item 3). Deny-by-default:
+qualquer papel departamental do departamento errado é negado. As quatro rotas de Monday passaram a usar
+`allowedInDepartment()` em vez de `allowed()`.
+
+Testado em runtime (`tests/security-integration.test.js`): líder de TI recebe `403` nas quatro rotas de
+Monday; líder Jurídico continua acessando-as normalmente; líder Jurídico recebe `403` no dashboard
+departamental de TI (rota TI equivalente, protegida por `dashboardAuthorized()` — item 5); diretoria
+(alçada global) continua acessando ambos.
+
+### 2. Dashboards corporativos (`scope:'corporate'`) devem exigir alçada global por padrão
+
+Na rodada 4, apenas `executive` declarava `requiresGlobalScope:true` manualmente. Outros dashboards com
+`scope:'corporate'` (`budget`, `strategy`, `projects`, `risks`) não tinham a flag e ficavam acessíveis a
+qualquer papel com o módulo correspondente, mesmo sem alçada global.
+
+**Correção:** `dashboardRequiresGlobalScope(definition)` (`dashboard-model.js`) torna a regra automática:
+`definition.scope === 'corporate' && definition.allowDepartmentScope !== true` — **qualquer** dashboard
+corporativo exige alçada global, salvo exceção explícita e documentada
+(`allowDepartmentScope:true`, que nenhum dashboard atual declara). A flag manual
+`requiresGlobalScope:true` foi removida de `executive` (agora coberto pela regra automática, como os
+demais). `visibleDashboards()` e o handler de `GET /api/dashboards/:id` passaram a usar essa função.
+
+Testado em runtime: líder departamental recebe `403` em `GET /api/dashboards/budget` e o dashboard não
+aparece em `GET /api/dashboards`; diretoria continua acessando e vendo-o na listagem; dashboards
+departamentais (`legal`, `ti`) continuam funcionando normalmente para o departamento correspondente.
+
+### 3. Administrador técnico não pode ser superusuário de conteúdo (MASTER_HANDOFF §11)
+
+`administrador` tinha `scopes:['*']`, e `scoped()` tratava `user.role === 'administrador'` como bypass
+incondicional — ou seja, o papel técnico (destinado a gerenciar sistema/usuários/integrações/
+segurança/configuração) herdava acesso irrestrito a **conteúdo** de qualquer departamento/empresa/SPE,
+o que o MASTER_HANDOFF proíbe explicitamente ("Administrador técnico ≠ superusuário de conteúdo").
+
+**Correção (mínima, sem reorganização):** `ROLES.administrador.scopes` mudou de `['*']` para `[]`.
+`scoped()` passou a usar `hasGlobalScope(user)` (que lê `ROLES[user.role].scopes.includes('*')`) como
+única fonte de verdade para o bypass, em vez de checar o papel diretamente — com isso, `administrador`
+deixa de bypassar `scoped()`: precisa que o próprio registro esteja no seu escopo, como qualquer outro
+usuário sem alçada global. `administrador` mantém `modules:['*']`/`actions:['*']`, que continuam
+legítimos para as funções técnicas já existentes (rotas de sistema como auditoria, aprovação de
+cadastro, backup, e — via `allowedInDepartment()` — operação de integrações/Monday de qualquer
+departamento, sem que isso implique acesso ao conteúdo sincronizado). `diretoria` continua sendo a única
+alçada de negócio verdadeiramente global.
+
+Testado em runtime e unitariamente: `administrador` autenticado recebe `200` em `GET /api/legal/processos`
+(passa no gate de módulo) mas com `records: []` (nenhum processo departamental é retornado, porque
+`scoped()` nega por ausência de escopo global); diretoria continua vendo os processos normalmente.
+`hasGlobalScope({role:'administrador'})` agora retorna `false`; `scoped(administrador, {department:'X'})`
+retorna `false` (unitário, `tests/core.test.js`).
+
+### 4. `internalizations.processId` deve validar fonte e escopo
+
+`POST /api/projects/:id/internalizations` só verificava que `processId` **existia** em `processos`. Um
+processo manual/falso (sem `source:'monday'`) ou de outro departamento passava.
+
+**Correção:** enquanto o Monday for a fonte autorizada do piloto (D1 continua pendente — nenhum cálculo
+ou sincronização automática de prazo foi implementado), a criação de internalização passou a exigir que
+o processo relacionado exista, tenha `source === 'monday'` (senão `422`) e esteja no escopo do usuário
+via `scoped(user, relatedProcess)` (senão `403`) — mesmo padrão já usado por Legal Deadline.
+
+Testado em runtime: internalização com `processId` de processo manual/não-Monday → `422`; com `processId`
+de processo do Monday mas de outro departamento → `403`; com `processId` válido e no escopo → `201`
+(continua funcionando).
+
+### 5. Dashboard preferences devem herdar a autorização do dashboard
+
+`GET`/`PUT /api/dashboard-preferences/:id` não validavam autorização alguma antes de ler/gravar a
+preferência do usuário para aquele dashboard — um usuário sem acesso a um dashboard ainda conseguia
+configurar suas próprias preferências para ele.
+
+**Correção:** nova função `dashboardAuthorized(user, definition)` unifica exatamente a mesma checagem já
+usada em `GET /api/dashboards/:id` (módulo + regra corporativa/alçada global do item 2 + departamento),
+aplicada agora também nas duas rotas de preferências, antes de qualquer leitura ou gravação.
+
+Testado em runtime: líder recebe `403` em `GET`/`PUT /api/dashboard-preferences/executive` e
+`/budget`; diretoria consegue ler e gravar ambos; preferência de dashboard departamental permitido
+(`legal`) continua funcionando para o líder Jurídico, e é negada (`403`) para o líder de TI.
+
 ## P0 corrigido — MFA por papel, não por flag do cadastro (item D, rodada 1)
 
 `requireMfa(user)` depende exclusivamente do papel (`diretoria`, `administrador`, `lider`), nunca da
@@ -309,13 +404,16 @@ flag `user.mfa` do cadastro. Testado em runtime: login como papel privilegiado s
 
 ## Catálogo de testes de permissão
 
-- **Unitários** (`tests/core.test.js`): `scoped()` (incluindo os casos sintéticos de companyId/speId),
-  `sanitizeEntityInput()` (incluindo scopeType/companyId/speId), `entityModule()`, `LEGAL_MODULES`,
-  `requireMfa()` — chamadas diretas às funções exportadas, sem passar por HTTP.
+- **Unitários** (`tests/core.test.js`): `scoped()` (incluindo os casos sintéticos de companyId/speId, e o
+  caso `administrador` da rodada 5), `sanitizeEntityInput()` (incluindo scopeType/companyId/speId),
+  `entityModule()`, `LEGAL_MODULES`, `requireMfa()`, `hasGlobalScope()`, `allowedInDepartment()`,
+  `normalizeDeptSlug()`, `dashboardAuthorized()` (rodada 5) — chamadas diretas às funções exportadas,
+  sem passar por HTTP.
 - **Integração HTTP real** (`tests/security-integration.test.js`): sobe um servidor HTTP real com o
   `handler` exportado, injeta usuários e dados de teste (incluindo um segundo projeto sintético em
-  outro departamento e registros com companyId/speId sintéticos), e faz requisições reais, verificando
-  status HTTP e corpo da resposta — não apenas presença de texto no código-fonte.
+  outro departamento, registros com companyId/speId sintéticos, e um usuário `administrador` — rodada
+  5), e faz requisições reais, verificando status HTTP e corpo da resposta — não apenas presença de
+  texto no código-fonte.
 
 Ver `docs/QA.md` para o mapeamento completo contra os 10 casos obrigatórios do MVP/Piloto Jurídico
 (§30) e o resultado da execução mais recente.

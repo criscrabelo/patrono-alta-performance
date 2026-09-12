@@ -34,7 +34,10 @@ const EMAILS = {
   liderTi: 'lider.ti.teste@coevo.local',
   semAcesso: 'sem.acesso.teste@coevo.local',
   // Usuário seed já existente (não criado por este teste) com papel diretoria — alçada global.
-  diretoria: 'juridico@coevoconstrutora.com.br'
+  diretoria: 'juridico@coevoconstrutora.com.br',
+  // Rodada 5, item 3: administrador técnico — modules:['*']/actions:['*'] (gestão de sistema/
+  // integrações), mas scopes:[] (não é alçada de negócio global; não pode ser superusuário de conteúdo).
+  administrador: 'administrador.teste@coevo.local'
 };
 
 test.before(async () => {
@@ -52,7 +55,9 @@ test.before(async () => {
     // department:'Jurídico' propositalmente (não null) — reproduz exatamente o cenário do P0 da
     // rodada 4 (item 8): projectPermissions() concedia edit/create a um papel desconhecido só por
     // coincidência de department, mesmo sem nenhum módulo reconhecido em ROLES.
-    { id: 'usr-teste-sem-acesso', name: 'Sem Acesso Teste', email: EMAILS.semAcesso, role: 'externo', department: 'Jurídico', mfa: false }
+    { id: 'usr-teste-sem-acesso', name: 'Sem Acesso Teste', email: EMAILS.semAcesso, role: 'externo', department: 'Jurídico', mfa: false },
+    // Rodada 5, item 3 — administrador técnico, sem department (papel de sistema, não de negócio).
+    { id: 'usr-teste-administrador', name: 'Administrador Técnico Teste', email: EMAILS.administrador, role: 'administrador', department: null, mfa: true }
   );
   if (!store.records) store.records = {};
   store.records.processos = [
@@ -726,4 +731,150 @@ test('[HTTP] papel desconhecido sem módulo Projetos não consegue criar/alterar
   assert.equal((await api('POST', `/api/projects/${PROJECT_ID}/actions/${syntheticArchivedActionId}/restore`, { token })).status, 403);
   assert.equal((await api('POST', `/api/projects/${PROJECT_ID}/management-items/${syntheticManagementItemId}/approve`, { token })).status, 403);
   assert.equal((await api('POST', `/api/projects/${PROJECT_ID}/management-items/${syntheticManagementItemId}/escalate`, { token })).status, 403, 'nem mesmo escalate (que não checava projectPermissions.approveAgreement) deve passar para papel sem módulo Projetos');
+});
+
+// ============================================================================================
+// Rodada 5 de correções de segurança — testes de integração HTTP real
+// ============================================================================================
+
+// --- Item 1: isolamento de módulo Jurídico x TI nas rotas de Monday (sem scoped() por registro) ---
+
+test('[HTTP] líder de TI recebe 403 nas rotas de Monday (módulo Jurídico), mesmo tendo o módulo "juridico" em ROLES', async () => {
+  const tokenTi = await loginAs(EMAILS.liderTi);
+  assert.equal((await api('GET', '/api/monday/status', { token: tokenTi })).status, 403, 'líder de TI não pode operar rota jurídica de Monday');
+  assert.equal((await api('GET', '/api/monday/schedule', { token: tokenTi })).status, 403);
+  assert.equal((await api('POST', '/api/monday/test', { token: tokenTi })).status, 403);
+  assert.equal((await api('POST', '/api/monday/sync', { token: tokenTi })).status, 403);
+});
+
+test('[HTTP] líder Jurídico continua acessando as rotas de Monday (fonte oficial do próprio módulo)', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  assert.equal((await api('GET', '/api/monday/status', { token: tokenJuridico })).status, 200);
+  assert.equal((await api('GET', '/api/monday/schedule', { token: tokenJuridico })).status, 200);
+});
+
+test('[HTTP] líder Jurídico recebe 403 em rota TI equivalente (dashboard departamental de TI)', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const asJuridico = await api('GET', '/api/dashboards/ti', { token: tokenJuridico });
+  assert.equal(asJuridico.status, 403, 'líder Jurídico não pode acessar o dashboard departamental de TI, mesmo tendo o módulo "ti" em ROLES');
+
+  const tokenTi = await loginAs(EMAILS.liderTi);
+  const asTi = await api('GET', '/api/dashboards/ti', { token: tokenTi });
+  assert.equal(asTi.status, 200, 'líder de TI continua acessando o próprio dashboard departamental');
+});
+
+test('[HTTP] diretoria (alçada global) continua acessando rotas de Monday e dashboard de TI', async () => {
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  assert.equal((await api('GET', '/api/monday/status', { token: tokenDiretoria })).status, 200);
+  assert.equal((await api('GET', '/api/monday/schedule', { token: tokenDiretoria })).status, 200);
+  assert.equal((await api('GET', '/api/dashboards/ti', { token: tokenDiretoria })).status, 200);
+});
+
+// --- Item 2: dashboards corporativos (scope:'corporate') exigem alçada global por padrão ---
+
+test('[HTTP] líder departamental não acessa dashboard corporativo "budget", e ele não aparece na listagem', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const res = await api('GET', '/api/dashboards/budget', { token: tokenJuridico });
+  assert.equal(res.status, 403, 'dashboard corporativo (scope:"corporate") exige alçada global, mesmo com o módulo "orcamento" concedido ao líder');
+
+  const list = await api('GET', '/api/dashboards', { token: tokenJuridico });
+  assert.equal(list.status, 200);
+  assert.ok(!list.body.dashboards.some(d => d.id === 'budget'), 'dashboard corporativo não deve nem ser listado para papel não-global');
+});
+
+test('[HTTP] diretoria (alçada global) continua acessando o dashboard corporativo "budget"', async () => {
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  const res = await api('GET', '/api/dashboards/budget', { token: tokenDiretoria });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.dashboard.id, 'budget');
+
+  const list = await api('GET', '/api/dashboards', { token: tokenDiretoria });
+  assert.ok(list.body.dashboards.some(d => d.id === 'budget'), 'diretoria continua vendo o dashboard corporativo na listagem');
+});
+
+test('[HTTP] dashboards departamentais (legal/ti) continuam funcionando normalmente para o departamento correspondente', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const legal = await api('GET', '/api/dashboards/legal', { token: tokenJuridico });
+  assert.equal(legal.status, 200, 'dashboard departamental (scope:"department") não exige alçada global');
+
+  const tokenTi = await loginAs(EMAILS.liderTi);
+  const ti = await api('GET', '/api/dashboards/ti', { token: tokenTi });
+  assert.equal(ti.status, 200);
+});
+
+// --- Item 3: administrador técnico não é superusuário de conteúdo ---
+
+test('[HTTP] administrador técnico não acessa conteúdo jurídico automaticamente, apesar de ter modules:[\'*\']', async () => {
+  const tokenAdministrador = await loginAs(EMAILS.administrador);
+  const res = await api('GET', '/api/legal/processos', { token: tokenAdministrador });
+  assert.equal(res.status, 200, 'administrador passa no gate de módulo (gestão técnica de integrações)');
+  assert.deepEqual(res.body.records, [], 'mas nenhum registro departamental é retornado — administrador não tem alçada de conteúdo (scoped() nega por ausência de escopo global)');
+});
+
+test('[HTTP] diretoria (alçada global) continua acessando conteúdo jurídico normalmente', async () => {
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  const res = await api('GET', '/api/legal/processos', { token: tokenDiretoria });
+  assert.equal(res.status, 200);
+  assert.ok(res.body.records.length > 0, 'diretoria continua vendo os processos do Jurídico normalmente');
+});
+
+// --- Item 4: internalizations.processId valida fonte (Monday) e escopo ---
+
+test('[HTTP] internalization com processId de processo manual/não-Monday é rejeitada com 422', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const res = await api('POST', `/api/projects/${PROJECT_ID}/internalizations`, {
+    token: tokenJuridico,
+    json: { processId: 'proc-falso-nao-monday', title: 'Internalização de teste' }
+  });
+  assert.equal(res.status, 422, 'processo sem source:"monday" não é uma fonte autorizada do piloto');
+});
+
+test('[HTTP] internalization com processId fora do escopo do usuário é rejeitada com 403', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const res = await api('POST', `/api/projects/${PROJECT_ID}/internalizations`, {
+    token: tokenJuridico,
+    json: { processId: 'proc-ti-teste', title: 'Internalização de teste fora de escopo' }
+  });
+  assert.equal(res.status, 403, 'processo do Monday, mas de outro departamento, não pode ser relacionado por usuário sem escopo sobre ele');
+});
+
+test('[HTTP] internalization com processId válido (Monday, no escopo do usuário) continua funcionando', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const res = await api('POST', `/api/projects/${PROJECT_ID}/internalizations`, {
+    token: tokenJuridico,
+    json: { processId: 'proc-juridico-teste', title: 'Internalização legítima de teste' }
+  });
+  assert.equal(res.status, 201);
+  assert.equal(res.body.processId, 'proc-juridico-teste');
+});
+
+// --- Item 5: dashboard-preferences herda a autorização do dashboard ---
+
+test('[HTTP] líder não configura preferência de dashboard executivo nem do corporativo "budget"', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  assert.equal((await api('GET', '/api/dashboard-preferences/executive', { token: tokenJuridico })).status, 403);
+  assert.equal((await api('PUT', '/api/dashboard-preferences/executive', { token: tokenJuridico, json: { density: 'compact' } })).status, 403);
+  assert.equal((await api('GET', '/api/dashboard-preferences/budget', { token: tokenJuridico })).status, 403);
+  assert.equal((await api('PUT', '/api/dashboard-preferences/budget', { token: tokenJuridico, json: { density: 'compact' } })).status, 403);
+});
+
+test('[HTTP] diretoria consegue ler e gravar preferência de dashboard executivo e do corporativo "budget"', async () => {
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  assert.equal((await api('GET', '/api/dashboard-preferences/executive', { token: tokenDiretoria })).status, 200);
+  const put = await api('PUT', '/api/dashboard-preferences/executive', { token: tokenDiretoria, json: { density: 'compact' } });
+  assert.equal(put.status, 200);
+  assert.equal(put.body.density, 'compact');
+  assert.equal((await api('GET', '/api/dashboard-preferences/budget', { token: tokenDiretoria })).status, 200);
+});
+
+test('[HTTP] preferência de dashboard departamental permitido continua funcionando para o departamento correspondente', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const get = await api('GET', '/api/dashboard-preferences/legal', { token: tokenJuridico });
+  assert.equal(get.status, 200);
+  const put = await api('PUT', '/api/dashboard-preferences/legal', { token: tokenJuridico, json: { density: 'compact' } });
+  assert.equal(put.status, 200);
+  assert.equal(put.body.density, 'compact');
+
+  const tokenTi = await loginAs(EMAILS.liderTi);
+  assert.equal((await api('GET', '/api/dashboard-preferences/legal', { token: tokenTi })).status, 403, 'TI não pode configurar preferência do dashboard departamental do Jurídico');
 });

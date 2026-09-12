@@ -8,14 +8,16 @@ const WIDGET_TYPES = Object.freeze([
 const widget = (id, type, title, options = {}) => ({ id, type, title, width: options.width || 'third', ...options });
 
 const DASHBOARD_DEFINITIONS = Object.freeze({
-  // P0 corrigido (rodada 4, item 1): 'central' também pertence a lider/colaborador (ver ROLES em
-  // server.js), então usar apenas `allowed(user, module)` deixava a Visão Executiva/Centro de Comando
-  // alcançável por qualquer papel departamental. `requiresGlobalScope:true` é a declaração explícita
-  // de autorização exigida para dashboards corporativos sensíveis — verificado em server.js além do
-  // gate de módulo, tanto na listagem (visibleDashboards) quanto no detalhe (GET /api/dashboards/:id).
-  // Dashboards futuros com `scope:'corporate'` devem declarar `requiresGlobalScope` explicitamente.
+  // P0 corrigido (rodada 4 → generalizado na rodada 5, item 2): 'central' também pertence a
+  // lider/colaborador (ver ROLES em server.js), então `allowed(user, module)` sozinho deixava a Visão
+  // Executiva/Centro de Comando alcançável por qualquer papel departamental. Na rodada 4 isso foi
+  // corrigido com uma flag manual (`requiresGlobalScope:true`) só em `executive` — mas isso dependia de
+  // lembrar de marcá-la em todo dashboard corporativo novo. Na rodada 5, a regra passou a ser
+  // AUTOMÁTICA: `dashboardRequiresGlobalScope()` (abaixo) exige alçada global para QUALQUER dashboard
+  // com `scope:'corporate'`, sem exceção manual — a única forma de abrir mão disso é declarar
+  // `allowDepartmentScope:true` explicitamente no próprio dashboard (nenhum declara essa exceção hoje).
   executive: {
-    id: 'executive', name: 'Painel Executivo COEVO', scope: 'corporate', module: 'central', requiresGlobalScope: true,
+    id: 'executive', name: 'Painel Executivo COEVO', scope: 'corporate', module: 'central',
     filters: ['competence', 'period', 'departments'],
     widgets: [
       widget('department-summary', 'DepartmentSummary', 'Resumo por departamento', { width: 'full' }),
@@ -66,8 +68,14 @@ const DASHBOARD_DEFINITIONS = Object.freeze({
 });
 
 function getDashboardDefinition(id) { return DASHBOARD_DEFINITIONS[id] || null; }
+// P0 corrigido (rodada 5, item 2): global-by-default para qualquer dashboard `scope:'corporate'` —
+// não depende mais de marcar manualmente cada dashboard sensível. `budget`, `strategy`, `projects` e
+// `risks` (todos `scope:'corporate'`) passam a exigir alçada global pela mesma regra que já protegia
+// `executive`. Só uma exceção explícita e documentada (`allowDepartmentScope:true` no próprio
+// dashboard) escaparia dessa exigência — nenhum dashboard atual declara essa exceção.
+function dashboardRequiresGlobalScope(definition) { return !!definition && definition.scope === 'corporate' && definition.allowDepartmentScope !== true; }
 // hasGlobalScope é opcional para não quebrar chamadores existentes que só verificam módulo, mas
-// server.js sempre o passa — sem ele, um dashboard `requiresGlobalScope` seria listado indevidamente.
-function visibleDashboards(user, allowed, hasGlobalScope) { return Object.values(DASHBOARD_DEFINITIONS).filter(item => allowed(user, item.module) && (!item.requiresGlobalScope || (typeof hasGlobalScope === 'function' && hasGlobalScope(user)))); }
+// server.js sempre o passa — sem ele, um dashboard corporativo seria listado indevidamente.
+function visibleDashboards(user, allowed, hasGlobalScope) { return Object.values(DASHBOARD_DEFINITIONS).filter(item => allowed(user, item.module) && (!dashboardRequiresGlobalScope(item) || (typeof hasGlobalScope === 'function' && hasGlobalScope(user)))); }
 
-module.exports = { WIDGET_TYPES, DASHBOARD_DEFINITIONS, getDashboardDefinition, visibleDashboards };
+module.exports = { WIDGET_TYPES, DASHBOARD_DEFINITIONS, getDashboardDefinition, visibleDashboards, dashboardRequiresGlobalScope };

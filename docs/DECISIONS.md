@@ -300,6 +300,76 @@ convenção que exige atenção humana ao adicionar um dashboard novo, documenta
 **Reversível.** Sim — remover a flag e as duas checagens em `server.js` restaura o comportamento
 anterior (módulo como único controle).
 
+**Superado em parte pela ADR-010 (rodada 5).** A rodada 5 substituiu a declaração manual
+`requiresGlobalScope` por uma regra automática (`dashboardRequiresGlobalScope()`) para qualquer
+dashboard `scope:'corporate'` — a suposição acima, de que só `executive` precisava da flag, revelou-se
+incorreta na revisão seguinte (`budget`/`strategy`/`projects`/`risks` também são `scope:'corporate'` e
+ficavam sem a proteção). Este ADR permanece como registro histórico da decisão original; ADR-010 é a
+decisão vigente.
+
+### ADR-010 — Dashboards `scope:'corporate'` exigem alçada global automaticamente, com exceção só por flag explícita
+
+**Contexto.** A rodada 5 apontou que a convenção da ADR-009 ("quem adicionar um dashboard corporativo
+sensível declara `requiresGlobalScope`") não é deny-by-default: `budget`, `strategy`, `projects` e
+`risks` já eram `scope:'corporate'` e não tinham a flag, ficando acessíveis a qualquer papel com o
+módulo correspondente (ex.: `lider`, que tem o módulo `orcamento`).
+
+**Decisão.** `dashboardRequiresGlobalScope(definition)` (`dashboard-model.js`) torna a exigência
+automática: `definition.scope === 'corporate' && definition.allowDepartmentScope !== true`. A flag
+manual `requiresGlobalScope` foi removida de `executive` (agora coberto pela regra automática, como os
+demais dashboards corporativos). A única forma de um dashboard `scope:'corporate'` **não** exigir
+alçada global é declarar `allowDepartmentScope:true` explicitamente — nenhum dashboard atual declara
+essa exceção.
+
+**Justificativa.** Depender de que cada pessoa lembre de marcar manualmente cada dashboard corporativo
+sensível (ADR-009) é frágil por construção — a própria rodada 5 é a prova de que a convenção falhou na
+prática. Inverter o padrão (exigir global por padrão para `scope:'corporate'`, com exceção só por
+declaração explícita) é deny-by-default e não depende de disciplina humana ao adicionar um dashboard
+novo.
+
+**Consequência.** Nenhum dashboard `scope:'corporate'` futuro fica implicitamente aberto a papel
+departamental só porque alguém esqueceu de marcar uma flag — o padrão seguro é o default. Se um
+dashboard corporativo realmente precisar ser departamental no futuro (caso hoje inexistente), a decisão
+de negócio correspondente deve declarar `allowDepartmentScope:true` no próprio objeto, documentando a
+exceção no mesmo lugar onde o dashboard é definido.
+
+**Reversível.** Sim — remover `dashboardRequiresGlobalScope()` e voltar à checagem manual de
+`requiresGlobalScope` restaura o comportamento da ADR-009.
+
+### ADR-011 — `administrador` deixa de ter alçada de negócio global (`scopes:['*']` → `scopes:[]`)
+
+**Contexto.** MASTER_HANDOFF §11 define explicitamente: "Administrador técnico ≠ superusuário de
+conteúdo". Antes da rodada 5, `ROLES.administrador` tinha `scopes:['*']`, e `scoped()` bypassava
+incondicionalmente para `user.role === 'administrador'` — o papel técnico (destinado a gerenciar
+sistema, usuários, integrações, segurança e configuração) herdava, na prática, acesso irrestrito a
+conteúdo de qualquer departamento/empresa/SPE, exatamente o que a v1.3 proíbe.
+
+**Decisão.** `ROLES.administrador.scopes` passou de `['*']` para `[]`. `scoped()` passou a usar
+`hasGlobalScope(user)` (que lê `ROLES[user.role].scopes.includes('*')`) como única fonte de verdade
+para o bypass de escopo, substituindo a checagem direta de `user.role`. `administrador` mantém
+`modules:['*']`/`actions:['*']` — legítimos para as funções técnicas já existentes (auditoria, aprovação
+de cadastro, backup) e para operar integrações (Monday) de qualquer departamento via
+`allowedInDepartment()`, sem que isso implique acesso ao **conteúdo** sincronizado. `diretoria` continua
+sendo a única alçada de negócio verdadeiramente global (`scopes:['*']`).
+
+**Justificativa.** A separação entre "gate de módulo/ação" (`allowed()`, que lê `.modules`/`.actions`) e
+"gate de escopo de conteúdo" (`scoped()`/`hasGlobalScope()`, que lê `.scopes`) já existia
+arquiteturalmente no código — a correção não exigiu reorganização, apenas alinhar o dado (`scopes` do
+papel `administrador`) e o bypass de `scoped()` à semântica que a v1.3 já define. Optou-se por manter o
+nome do papel `administrador` (em vez de renomeá-lo) porque `modules:['*']`/`actions:['*']` já
+correspondem exatamente ao conceito de "administrador técnico" do MASTER_HANDOFF — o problema estava
+apenas em `scopes`, não no nome.
+
+**Consequência.** Qualquer rota que dependia implicitamente de `administrador` ter acesso a conteúdo
+departamental (via `scoped()`) passou a negar para esse papel, a menos que o registro específico esteja
+no escopo dele (o que hoje nunca ocorre, já que `administrador` não tem `department` de negócio). Isso é
+o comportamento correto e esperado — nenhuma rota do sistema depende de `administrador` ler conteúdo
+jurídico/financeiro para suas funções técnicas legítimas.
+
+**Reversível.** Sim — restaurar `scopes:['*']` e a checagem direta de `user.role === 'administrador'` em
+`scoped()` reverte ao comportamento anterior (não recomendado, pois reabre a violação do MASTER_HANDOFF
+§11).
+
 ---
 
 ## 3. Conflitos entre código existente e MASTER_HANDOFF v1.3
