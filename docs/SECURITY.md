@@ -41,9 +41,9 @@ módulo/ação.
 | `/api/auth/requests` | GET | `*`/`approve` | — | Presente (só diretoria/administrador) |
 | `/api/auth/requests/:id/approve` | POST | `*`/`approve` | — | Presente |
 | `/api/dashboard` | GET | `central`/`read` | Filtro departamental (`visibleDepartments`) + agenda `scoped()` | **Corrigido (rodada 3, item 6):** antes devolvia `store.departments`/`store.agenda` inteiros a qualquer papel com módulo `central` (todos) |
-| `/api/audit` | GET | `*`/`read` | — | Presente (só diretoria/administrador) |
-| `/api/compliance` | GET | `*`/`read` | — | **Corrigido (rodada 3, item 5):** não tinha NENHUM gate antes |
-| `/api/compliance` | POST | `*`/`create` | — | **Corrigido (rodada 3):** sem gate antes; mass assignment de `id` corrigido |
+| `/api/audit` | GET | `*`/`read` | `sanitizeAuditEventForUser()` redige `before`/`after` para quem não tem `hasGlobalScope()` | Presente (só diretoria/administrador acessam a rota); **rodada 7, item 2:** conteúdo auditado (`before`/`after`) só vai para alçada de negócio global — `administrador` via só metadados técnicos |
+| `/api/compliance` | GET | `hasGlobalScope(user)` | — | **Corrigido (rodada 3, depois rodada 7, item 1):** não tinha NENHUM gate (r3); `allowed(user,'*',...)` incluía `administrador`, não só alçada de negócio — trocado por `hasGlobalScope()` (r7) |
+| `/api/compliance` | POST | `hasGlobalScope(user)` | — | **Corrigido (rodada 3/7):** sem gate antes (r3); mass assignment de `id` corrigido (r3); `hasGlobalScope()` nega `administrador` (r7) |
 | `/api/agenda` | GET | `agenda`/`read` | `scoped()` por registro | **Corrigido (rodada 3 e 4, item 9):** vazava agenda de todos os departamentos (r3); GET sem gate de módulo (r4) |
 | `/api/agenda` | POST | `allowedContent(user,'agenda','create')` | `department`/`scopeType`/`companyId`/`speId` protegidos via `sanitizeEntityInput()` | **Corrigido (rodada 3/4/6):** mass assignment (r3); `scopeType`/`companyId`/`speId` forjáveis (r4); `allowedContent()` nega `administrador` — conteúdo de negócio, não função técnica (r6, item 3) |
 | `/api/departments` | GET | `orcamento`/`read` | Filtro departamental (`visibleDepartments`) | **Corrigido (rodada 3 e 4, item 9):** vazava orçamento de todos os departamentos (r3); GET sem gate de módulo, mesmo carregando orçamento (r4) |
@@ -188,6 +188,21 @@ completo em `docs/PERMISSIONS.md`, seção "P0 corrigidos — rodada 6".
 Todos os itens 33–36 cobertos por teste automatizado — unitário (`tests/core.test.js`: `allowedContent()`,
 `BUSINESS_CONTENT_MODULES`, `dashboardAuthorized()` sem department, `validateInternalizationProcess()`) e
 de integração HTTP real (`tests/security-integration.test.js`).
+
+## P0 corrigidos — rodada 7 (fechamento dos 2 pontos residuais da revisão final)
+
+Rodada final sobre os 2 pontos residuais identificados na revisão da rodada 6 — os últimos acessos
+indiretos de conteúdo pelo `administrador` técnico. Detalhe completo em `docs/PERMISSIONS.md`, seção
+"P0 corrigidos — rodada 7"; ADR nova em `docs/DECISIONS.md` (ADR-013).
+
+| # | Item | Antes | Depois |
+|---|---|---|---|
+| 37 | Compliance usava `allowed(user,'*',...)` como autorização — inclui `administrador`, não só alçada de negócio | `administrador` (papel técnico) lia e criava conteúdo de Compliance, violando MASTER_HANDOFF §11 | `hasGlobalScope(user)` — hoje só `diretoria`; continua deny-by-default enquanto ADR-007 (módulo/dono definitivo) permanecer pendente, mas restrito à alçada de negócio, não a qualquer papel com módulo wildcard |
+| 38 | `GET /api/audit` devolvia o evento inteiro, incluindo `before`/`after` (snapshot completo do registro alterado) | `administrador` lia conteúdo jurídico/financeiro/pessoal indiretamente através do histórico de auditoria de qualquer registro alterado por outro usuário | `sanitizeAuditEventForUser()` separa metadados técnicos (sempre visíveis) de `before`/`after` (só para `hasGlobalScope()`) |
+
+Ambos os itens cobertos por teste automatizado — unitário (`tests/core.test.js`:
+`sanitizeAuditEventForUser()`, `AUDIT_TECHNICAL_FIELDS`) e de integração HTTP real
+(`tests/security-integration.test.js`).
 
 ## P0 conhecidos e ainda abertos — classificados por o que bloqueiam
 

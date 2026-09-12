@@ -190,6 +190,19 @@ function writeStore(store) { fs.writeFileSync(DB_FILE, JSON.stringify(store, nul
 function audit(store, user, action, entity, entityId, before, after, reason = 'Operação solicitada pelo usuário') {
   store.audit.push({ id: crypto.randomUUID(), action, entity, entityId, responsible: user.name, date: new Date().toISOString(), reason, before, after, correlationId: crypto.randomUUID() });
 }
+// P0 corrigido (rodada 7, item 2): separa AUDITORIA TÉCNICA (metadados: quem fez o quê, quando, por
+// quê — sempre necessários para a função técnica legítima de auditoria) de CONTEÚDO AUDITADO
+// (`before`/`after`, o snapshot do registro em si, que pode conter dado jurídico/financeiro/pessoal
+// completo). Só alçada de negócio global (`hasGlobalScope`) recebe `before`/`after` — um papel sem
+// alçada global (hoje, na prática, só `administrador` chega a `/api/audit`, já que é a única rota de
+// auditoria e exige `allowed(user,'*')`) vê apenas os metadados técnicos, nunca o conteúdo do registro
+// auditado. Função única, reaproveitada onde eventos de auditoria são devolvidos ao cliente — evita
+// duplicar a lógica de redação em múltiplos pontos.
+const AUDIT_TECHNICAL_FIELDS = ['id', 'action', 'entity', 'entityId', 'responsible', 'date', 'reason', 'correlationId'];
+function sanitizeAuditEventForUser(user, event) {
+  if (hasGlobalScope(user)) return event;
+  return Object.fromEntries(AUDIT_TECHNICAL_FIELDS.filter(field => Object.hasOwn(event, field)).map(field => [field, event[field]]));
+}
 function allowed(user, module, action = 'read') {
   const policy = ROLES[user.role];
   return !!policy && (policy.modules.includes('*') || policy.modules.includes(module)) && (policy.actions.includes('*') || policy.actions.includes(action));
@@ -586,16 +599,27 @@ function handler(req, res) {
   // departamento. Não cria módulo financeiro novo — apenas aplica o mesmo escopo departamental já
   // usado em toda a plataforma.
   if (req.method === 'GET' && url.pathname === '/api/dashboard') { if (!allowed(user,'central')) return json(res,403,{error:'Sem permissão'}); const departments=visibleDepartments(store,user); const agenda=(store.agenda||[]).filter(item=>scoped(user,item)); const scopedStore={...store,departments,agenda}; return json(res,200,{metrics:metrics(scopedStore), departments, finance:departmentFinancials(scopedStore), upcoming:agenda}); }
-  if (req.method === 'GET' && url.pathname === '/api/audit') { if (!allowed(user,'*')) return json(res,403,{error:'Sem permissão'}); return json(res,200,store.audit.slice(-100).reverse()); }
-  // P0 corrigido (rodada 3, item 5): GET e POST não tinham NENHUMA verificação de permissão — qualquer
-  // usuário autenticado lia e criava entradas de compliance. Não existe módulo `compliance` em ROLES
-  // (nem um dono de negócio definido para essa central de governança ainda — ver docs/DECISIONS.md),
-  // então a política deny-by-default adotada é restringir a quem já tem alçada global (`allowed(user,
-  // '*', ...)`, hoje diretoria/administrador), no mesmo padrão já usado para /api/audit e
-  // /api/auth/requests. Mass assignment também corrigido: `id` deixou de poder ser sobrescrito pelo
-  // input (antes vinha antes do spread; um `id` no corpo da requisição vencia o gerado pelo servidor).
-  if (req.method === 'GET' && url.pathname === '/api/compliance') { if(!allowed(user,'*','read')) return json(res,403,{error:'Sem permissão'}); return json(res,200,store.compliance); }
-  if (req.method === 'POST' && url.pathname === '/api/compliance') { if(!allowed(user,'*','create')) return json(res,403,{error:'Sem permissão'}); return body(req).then(input => { const clean={...input}; delete clean.id; delete clean.responsible; delete clean.createdAt; const entry={...clean, id:crypto.randomUUID(), ruleVersion:input.ruleVersion || 'COEVO-COMP-1.0', result:input.result || 'Pendente', responsible:user.name, createdAt:new Date().toISOString()}; store.compliance.push(entry); audit(store,user,'CREATE','compliance',entry.id,null,entry); writeStore(store); return json(res,201,entry); }); }
+  // P0 corrigido (rodada 7, item 2): `administrador` (modules:['*']/actions:['*']) passava em
+  // `allowed(user,'*')` e recebia o evento de auditoria INTEIRO, incluindo `before`/`after` — que podem
+  // conter o snapshot completo de um registro jurídico/financeiro. Isso reabria, por um atalho indireto,
+  // exatamente o que a rodada 5/6 fechou diretamente (administrador não é superusuário de conteúdo).
+  // sanitizeAuditEventForUser() separa AUDITORIA TÉCNICA (metadados: quem fez o quê, quando, por quê —
+  // sempre visível a quem acessa /api/audit) de CONTEÚDO AUDITADO (before/after, o snapshot do registro
+  // em si): só alçada de negócio global (hasGlobalScope) recebe before/after; administrador continua
+  // vendo tudo o que precisa para auditoria técnica (ação, entidade, responsável, data, motivo,
+  // correlationId), só não o conteúdo do registro.
+  if (req.method === 'GET' && url.pathname === '/api/audit') { if (!allowed(user,'*')) return json(res,403,{error:'Sem permissão'}); return json(res,200,store.audit.slice(-100).reverse().map(event=>sanitizeAuditEventForUser(user,event))); }
+  // P0 corrigido (rodada 3, item 5, depois rodada 7, item 1): GET e POST não tinham NENHUMA verificação
+  // de permissão — qualquer usuário autenticado lia e criava entradas de compliance. Não existe módulo
+  // `compliance` em ROLES (nem um dono de negócio definido para essa central de governança ainda — ver
+  // ADR-007 em docs/DECISIONS.md); a rodada 3 restringiu a quem tivesse `allowed(user,'*',...)` — mas
+  // isso inclui `administrador`, que não deveria ser autoridade de CONTEÚDO de Compliance (MASTER_HANDOFF
+  // §11). Enquanto ADR-007 permanecer pendente, a política PROVISÓRIA e segura é: só alçada de negócio
+  // global (`hasGlobalScope`, hoje só `diretoria`) acessa Compliance — nem administrador técnico, nem
+  // papel departamental. Nenhum módulo/estrutura de Compliance foi criado ou alterado nesta rodada.
+  // Mass assignment continua bloqueado: `id` deixou de poder ser sobrescrito pelo input.
+  if (req.method === 'GET' && url.pathname === '/api/compliance') { if(!hasGlobalScope(user)) return json(res,403,{error:'Sem permissão'}); return json(res,200,store.compliance); }
+  if (req.method === 'POST' && url.pathname === '/api/compliance') { if(!hasGlobalScope(user)) return json(res,403,{error:'Sem permissão'}); return body(req).then(input => { const clean={...input}; delete clean.id; delete clean.responsible; delete clean.createdAt; const entry={...clean, id:crypto.randomUUID(), ruleVersion:input.ruleVersion || 'COEVO-COMP-1.0', result:input.result || 'Pendente', responsible:user.name, createdAt:new Date().toISOString()}; store.compliance.push(entry); audit(store,user,'CREATE','compliance',entry.id,null,entry); writeStore(store); return json(res,201,entry); }); }
   // P0 corrigido (rodada 3, item 5): GET não era filtrado por escopo departamental (agenda de outro
   // departamento vazava — mesma classe de problema do /api/dashboard, item 6). POST tinha mass
   // assignment: `{id:crypto.randomUUID(),...input}` permitia que `input.id` vencesse o id gerado pelo
@@ -693,5 +717,5 @@ function handler(req, res) {
   return json(res,404,{error:'Rota não encontrada'});
 }
 if (require.main === module) { ensureStore(); http.createServer((req,res)=>handler(req,res)).listen(PORT,()=>console.log(`COEVO Alta Performance disponível em http://localhost:${PORT}`)); setInterval(()=>scheduledMondayTick().catch(error=>console.error('Monday scheduler:',error.message)),60000); }
-module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess };
+module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser };
 

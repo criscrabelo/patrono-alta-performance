@@ -477,6 +477,49 @@ Testado em runtime: PATCH para processo manual (`source` diferente de `'monday'`
 processo inexistente → `422`; PATCH para processo do Monday mas fora do escopo do usuário → `403`; PATCH
 legítimo preservando o `processId` válido → `200`; nenhuma tentativa inválida altera o registro gravado.
 
+## P0 corrigidos — rodada 7 (fechamento dos 2 pontos residuais da revisão final)
+
+Rodada final, sobre os 2 pontos residuais identificados na revisão da rodada 6: os últimos acessos
+indiretos de conteúdo pelo `administrador` técnico.
+
+### 1. Compliance usava `allowed(user,'*',...)` — inclui `administrador`, não só `diretoria`
+
+Desde a rodada 3 (ADR-007), `GET`/`POST /api/compliance` eram restritos a `allowed(user,'*',...)` —
+correto como deny-by-default na ausência de módulo/dono definido, mas esse gate é verdadeiro para
+QUALQUER papel com `modules:['*']`, o que inclui `administrador` (além de `diretoria`).
+`administrador` continuava lendo e criando conteúdo de Compliance, violando o MASTER_HANDOFF §11.
+
+**Correção (política provisória, sem criar módulo/estrutura de Compliance):** `GET`/`POST
+/api/compliance` passaram a exigir `hasGlobalScope(user)` — hoje, só `diretoria` (já que
+`administrador.scopes` é `[]` desde a rodada 5). Continua sendo deny-by-default enquanto ADR-007
+permanecer pendente quanto ao módulo/dono definitivo — só que agora restrito à alçada de NEGÓCIO
+global, não a qualquer papel com módulo wildcard. Nenhum papel departamental (lider/colaborador) é
+afetado — já eram negados antes (não tinham `allowed(user,'*',...)`) e continuam negados agora (não têm
+`hasGlobalScope()`).
+
+Testado em runtime: `administrador` recebe `403` em `GET`/`POST /api/compliance`; líder e colaborador
+departamentais também recebem `403`; diretoria continua acessando (`GET` 200, `POST` 201) sem mass
+assignment de `id`/`responsible`/`createdAt`.
+
+### 2. `GET /api/audit` expunha o conteúdo auditado (`before`/`after`) a quem só precisa de auditoria técnica
+
+Cada evento de auditoria pode conter `before`/`after` — o snapshot completo do registro alterado, que
+pode incluir conteúdo jurídico/financeiro/pessoal. `administrador` (função técnica legítima de
+auditoria, via `allowed(user,'*')`) recebia o evento inteiro, criando um atalho indireto: mesmo sem
+acesso direto a um registro jurídico, `administrador` conseguia lê-lo através do histórico de auditoria
+de qualquer outro usuário que o tivesse alterado.
+
+**Correção:** nova `sanitizeAuditEventForUser(user, event)` separa AUDITORIA TÉCNICA (metadados —
+`id`, `action`, `entity`, `entityId`, `responsible`, `date`, `reason`, `correlationId`) de CONTEÚDO
+AUDITADO (`before`/`after`). Só `hasGlobalScope(user)` recebe `before`/`after`; os demais veem apenas os
+metadados técnicos — suficientes para a função técnica de auditoria (quem fez o quê, quando, por quê),
+mas não o conteúdo do registro em si. Aplicada uma única vez, no mapeamento de `GET /api/audit`.
+
+Testado em runtime: `administrador` recebe `200` em `GET /api/audit`, mas nenhum evento devolvido
+contém `before`/`after`; os demais campos técnicos continuam presentes; diretoria (alçada global)
+continua recebendo o evento completo, incluindo `before`/`after`; usuário sem `allowed(user,'*')`
+recebe `403` (comportamento pré-existente, não alterado).
+
 ## P0 corrigido — MFA por papel, não por flag do cadastro (item D, rodada 1)
 
 `requireMfa(user)` depende exclusivamente do papel (`diretoria`, `administrador`, `lider`), nunca da
@@ -507,7 +550,8 @@ flag `user.mfa` do cadastro. Testado em runtime: login como papel privilegiado s
   `entityModule()`, `LEGAL_MODULES`, `requireMfa()`, `hasGlobalScope()`, `allowedInDepartment()`,
   `normalizeDeptSlug()`, `dashboardAuthorized()` (rodada 5, e o caso departamento-sem-alçada-global da
   rodada 6), `allowedContent()`, `BUSINESS_CONTENT_MODULES`, `validateInternalizationProcess()` (rodada
-  6) — chamadas diretas às funções exportadas, sem passar por HTTP.
+  6), `sanitizeAuditEventForUser()` e `AUDIT_TECHNICAL_FIELDS` (rodada 7) — chamadas diretas às funções
+  exportadas, sem passar por HTTP.
 - **Integração HTTP real** (`tests/security-integration.test.js`): sobe um servidor HTTP real com o
   `handler` exportado, injeta usuários e dados de teste (incluindo um segundo projeto sintético em
   outro departamento, registros com companyId/speId sintéticos, e um usuário `administrador` — rodada

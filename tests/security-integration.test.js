@@ -991,3 +991,68 @@ test('[HTTP] PATCH de internalization para processo manual/não-Monday é rejeit
   assert.equal(patchValido.body.processId, 'proc-juridico-teste');
   assert.equal(patchValido.body.title, 'Internalização atualizada legitimamente');
 });
+
+// ============================================================================================
+// Rodada 7 de correções de segurança — testes de integração HTTP real
+// ============================================================================================
+
+// --- Item 1: Compliance deny-by-default enquanto ADR-007 estiver pendente (nem administrador acessa) ---
+
+test('[HTTP] administrador técnico recebe 403 em GET e POST /api/compliance', async () => {
+  const tokenAdministrador = await loginAs(EMAILS.administrador);
+  assert.equal((await api('GET', '/api/compliance', { token: tokenAdministrador })).status, 403, 'administrador não é autoridade de conteúdo de Compliance (política provisória até ADR-007)');
+  assert.equal((await api('POST', '/api/compliance', { token: tokenAdministrador, json: { title: 'Entrada de teste administrador' } })).status, 403);
+});
+
+test('[HTTP] líder e colaborador departamentais recebem 403 em GET e POST /api/compliance', async () => {
+  const tokenLider = await loginAs(EMAILS.liderJuridico);
+  assert.equal((await api('GET', '/api/compliance', { token: tokenLider })).status, 403);
+  assert.equal((await api('POST', '/api/compliance', { token: tokenLider, json: { title: 'Entrada de teste líder' } })).status, 403);
+
+  const tokenColaborador = await loginAs(EMAILS.colaboradorJuridico);
+  assert.equal((await api('GET', '/api/compliance', { token: tokenColaborador })).status, 403);
+  assert.equal((await api('POST', '/api/compliance', { token: tokenColaborador, json: { title: 'Entrada de teste colaborador' } })).status, 403);
+});
+
+test('[HTTP] diretoria (alçada de negócio global) continua acessando GET e POST /api/compliance, sem mass assignment de id/responsible/createdAt', async () => {
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  assert.equal((await api('GET', '/api/compliance', { token: tokenDiretoria })).status, 200);
+  const created = await api('POST', '/api/compliance', { token: tokenDiretoria, json: { id: 'id-forjado', responsible: 'Invasor', createdAt: '2000-01-01T00:00:00.000Z', title: 'Entrada legítima de diretoria' } });
+  assert.equal(created.status, 201);
+  assert.notEqual(created.body.id, 'id-forjado');
+  assert.notEqual(created.body.responsible, 'Invasor');
+  assert.notEqual(created.body.createdAt, '2000-01-01T00:00:00.000Z');
+});
+
+// --- Item 2: auditoria técnica não expõe before/after (conteúdo auditado) ao administrador ---
+
+test('[HTTP] administrador técnico recebe 200 em GET /api/audit, mas sem before/after; diretoria recebe o evento completo', async () => {
+  // Gera um evento de auditoria com before/after de conteúdo real (PATCH de Legal Deadline já audita).
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token: tokenJuridico, json: { processId: 'proc-juridico-teste', origin: 'Origem para auditoria rodada 7', date: '2026-12-20' } });
+  assert.equal(created.status, 201);
+  await api('PATCH', `/api/entities/legalDeadlines/${created.body.id}`, { token: tokenJuridico, json: { origin: 'Origem alterada para teste de auditoria' } });
+
+  const tokenAdministrador = await loginAs(EMAILS.administrador);
+  const asAdministrador = await api('GET', '/api/audit', { token: tokenAdministrador });
+  assert.equal(asAdministrador.status, 200, 'auditoria é função técnica legítima do administrador');
+  assert.ok(asAdministrador.body.length > 0);
+  for (const event of asAdministrador.body) {
+    assert.equal(event.before, undefined, 'administrador não pode ver o snapshot "before" do conteúdo auditado');
+    assert.equal(event.after, undefined, 'administrador não pode ver o snapshot "after" do conteúdo auditado');
+    assert.ok(event.action && event.entity && event.responsible && event.date, 'metadados técnicos continuam disponíveis para administrador');
+  }
+
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  const asDiretoria = await api('GET', '/api/audit', { token: tokenDiretoria });
+  assert.equal(asDiretoria.status, 200);
+  const patchEvent = asDiretoria.body.find(event => event.entityId === created.body.id && event.action === 'UPDATE');
+  assert.ok(patchEvent, 'diretoria deve encontrar o evento de PATCH gerado acima');
+  assert.ok(patchEvent.before, 'diretoria (alçada global) continua recebendo before do conteúdo auditado');
+  assert.ok(patchEvent.after, 'diretoria (alçada global) continua recebendo after do conteúdo auditado');
+});
+
+test('[HTTP] usuário sem autorização de auditoria recebe 403 em GET /api/audit', async () => {
+  const tokenLider = await loginAs(EMAILS.liderJuridico);
+  assert.equal((await api('GET', '/api/audit', { token: tokenLider })).status, 403, 'líder não tem allowed(user,"*") — sem alçada de auditoria');
+});

@@ -29,12 +29,12 @@ própria v1.3 define o escopo por fase.
 Suíte: `npm test` (Node.js test runner nativo — cada arquivo `*.test.js` roda em processo próprio).
 
 ```
-tests 104
-pass 104
+tests 111
+pass 111
 fail 0
 ```
 
-**`tests/core.test.js` (43 testes)** — unitários e estruturais. Além dos 26 preexistentes e dos 6 da
+**`tests/core.test.js` (45 testes)** — unitários e estruturais. Além dos 26 preexistentes e dos 6 da
 rodada 2, dois testes foram **atualizados na rodada 3** porque a versão anterior validava exatamente o
 comportamento incorreto que a rodada 3 corrigiu:
 - `scoped()` — companyId/speId agora testados com deny-by-default real (ausência ou mismatch nega,
@@ -60,7 +60,11 @@ departamentais esperados), `dashboardAuthorized()` sem `department` (nega dashbo
 `administrador`; diretoria continua acessando) e `validateInternalizationProcess()` (fonte Monday +
 processo não arquivado + escopo do usuário, chamada direta).
 
-**`tests/security-integration.test.js` (61 testes)** — HTTP real: sobe um servidor
+2 testes novos da **rodada 7**: `sanitizeAuditEventForUser()` (remove `before`/`after` para quem não
+tem `hasGlobalScope()`; diretoria recebe o evento completo; campos técnicos sempre presentes) e
+`AUDIT_TECHNICAL_FIELDS` (não inclui `before`/`after` nem qualquer campo de conteúdo de negócio).
+
+**`tests/security-integration.test.js` (66 testes)** — HTTP real: sobe um servidor
 `http.createServer(handler)` de verdade, isolado em diretório de dados temporário
 (`COEVO_DATA_DIR`), injeta usuários e dados de teste, e faz requisições HTTP reais, verificando status e
 corpo da resposta — não presença de texto no código-fonte.
@@ -151,6 +155,17 @@ Os 10 testes novos da **rodada 6** cobrem:
 9. PATCH de internalization para processo manual/não-Monday (`422`), processo inexistente (`422`) e
    processo do Monday fora do escopo (`403`) são rejeitados, sem alterar o registro.
 10. PATCH de internalization preservando o `processId` válido continua funcionando (`200`).
+
+Os 5 testes novos da **rodada 7** cobrem:
+1. Administrador técnico recebe `403` em `GET` e `POST /api/compliance`.
+2. Líder e colaborador departamentais recebem `403` em `GET` e `POST /api/compliance` (comportamento
+   pré-existente, reafirmado após a troca do mecanismo de autorização).
+3. Diretoria (alçada de negócio global) continua acessando `GET`/`POST /api/compliance`, sem mass
+   assignment de `id`/`responsible`/`createdAt`.
+4. Administrador técnico recebe `200` em `GET /api/audit`, mas nenhum evento devolvido contém
+   `before`/`after`; diretoria recebe o evento completo, incluindo `before`/`after` de um PATCH real de
+   Legal Deadline gerado no próprio teste.
+5. Usuário sem `allowed(user,'*')` recebe `403` em `GET /api/audit` (comportamento pré-existente).
 
 ## Catálogo Global de Regressão (§30)
 

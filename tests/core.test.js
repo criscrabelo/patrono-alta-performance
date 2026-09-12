@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, seed, parseCsv, hash, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, isValidCivilDate, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, hasGlobalScope, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess } = require('../server');
+const { ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, seed, parseCsv, hash, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, isValidCivilDate, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, hasGlobalScope, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser } = require('../server');
 const { WIDGET_TYPES, DASHBOARD_DEFINITIONS } = require('../dashboard-model');
 const { dashboardPayload } = require('../dashboard-service');
 const { PROJECT_ID, ensureProjectStore, projectDetail, projectPermissions } = require('../project-service');
@@ -484,4 +484,29 @@ test('validateInternalizationProcess() valida fonte Monday e escopo do processo 
   assert.equal(validateInternalizationProcess('proc-arquivado', liderJuridico, store)?.status, 422, 'processo arquivado (deletedAt) não deve ser considerado existente');
   assert.equal(validateInternalizationProcess('proc-inexistente', liderJuridico, store)?.status, 422, 'processo inexistente deve ser rejeitado');
   assert.equal(validateInternalizationProcess('proc-ok', liderTi, store)?.status, 403, 'processo Monday fora do escopo do usuário deve ser rejeitado');
+});
+
+// ============================================================================================
+// Rodada 7 de correções de segurança — testes unitários
+// ============================================================================================
+
+test('sanitizeAuditEventForUser() remove before/after para quem não tem alçada de negócio global (item 2)', () => {
+  const event = { id: 'aud-1', action: 'UPDATE', entity: 'processos', entityId: 'proc-1', responsible: 'Alguém', date: '2026-01-01T00:00:00.000Z', reason: 'Teste', before: { title: 'Antes (conteúdo sensível)' }, after: { title: 'Depois (conteúdo sensível)' }, correlationId: 'corr-1' };
+  const administrador = { role: 'administrador', department: null };
+  const diretoria = { role: 'diretoria', department: null };
+  const sanitized = sanitizeAuditEventForUser(administrador, event);
+  assert.equal(sanitized.before, undefined, 'administrador não pode ver o snapshot "before" do conteúdo auditado');
+  assert.equal(sanitized.after, undefined, 'administrador não pode ver o snapshot "after" do conteúdo auditado');
+  for (const field of AUDIT_TECHNICAL_FIELDS) assert.equal(sanitized[field], event[field], `campo técnico "${field}" deve continuar disponível para administrador`);
+
+  const full = sanitizeAuditEventForUser(diretoria, event);
+  assert.deepEqual(full, event, 'diretoria (alçada global) continua recebendo o evento completo, incluindo before/after');
+});
+
+test('AUDIT_TECHNICAL_FIELDS não inclui before/after nem qualquer campo de conteúdo de negócio', () => {
+  assert.ok(!AUDIT_TECHNICAL_FIELDS.includes('before'));
+  assert.ok(!AUDIT_TECHNICAL_FIELDS.includes('after'));
+  for (const field of ['id', 'action', 'entity', 'entityId', 'responsible', 'date', 'reason', 'correlationId']) {
+    assert.ok(AUDIT_TECHNICAL_FIELDS.includes(field), `"${field}" deveria estar em AUDIT_TECHNICAL_FIELDS`);
+  }
 });

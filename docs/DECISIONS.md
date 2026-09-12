@@ -238,6 +238,13 @@ para revisão quando essa decisão de negócio existir.
 **Reversível.** Sim — trocar `allowed(user,'*',...)` por `allowed(user,'compliance',...)` e adicionar o
 módulo a `ROLES` é a única mudança necessária.
 
+**Atualizado pela ADR-013 (rodada 7).** A revisão final apontou que `allowed(user,'*',...)` inclui
+`administrador` (que tem `modules:['*']`/`actions:['*']`), tornando o papel técnico uma autoridade de
+CONTEÚDO de Compliance por um atalho indireto — exatamente o que o MASTER_HANDOFF §11 proíbe. ADR-013
+substitui o mecanismo de autorização por `hasGlobalScope(user)` (deny-by-default: só `diretoria` hoje),
+mantendo esta decisão (deny-by-default até uma decisão de negócio existir) como política provisória —
+ADR-007 continua **pendente** quanto ao módulo/dono definitivo de Compliance; nada aqui a resolve.
+
 ---
 
 ### ADR-008 — Bloquear o motor genérico de entidades para tipos cuja fonte oficial é o Monday, reaproveitando `LEGAL_MODULES`
@@ -413,6 +420,49 @@ de cadastro, backup, operação de integrações via `allowedInDepartment()`). `
 **Reversível.** Sim — remover a checagem de `BUSINESS_CONTENT_MODULES` em `allowedContent()` (ou
 substituir os callsites de volta para `allowed()`/`allowedInDepartment()`) restaura o comportamento
 anterior (não recomendado, pois reabre a violação do MASTER_HANDOFF §11 para mutação).
+
+### ADR-013 — Compliance vira deny-by-default por `hasGlobalScope()`; auditoria técnica separa metadados de conteúdo auditado
+
+**Contexto.** A revisão final da rodada 6 apontou dois últimos atalhos indiretos pelos quais
+`administrador` (papel técnico, `modules:['*']`/`actions:['*']`) ainda alcançava conteúdo de negócio,
+apesar das ADRs 011/012 já terem fechado leitura e mutação diretas:
+
+1. `GET`/`POST /api/compliance` (ADR-007, rodada 3) usavam `allowed(user,'*',...)` como autorização —
+   esse gate é verdadeiro para qualquer papel com `modules:['*']`, o que inclui `administrador` além de
+   `diretoria`. `administrador` continuava lendo e criando conteúdo de Compliance.
+2. `GET /api/audit` devolvia o evento de auditoria inteiro, incluindo `before`/`after` — que podem
+   conter o snapshot completo de um registro jurídico/financeiro/pessoal. Um `administrador` sem acesso
+   direto ao conteúdo ainda conseguia lê-lo indiretamente através do histórico de auditoria de qualquer
+   outro usuário.
+
+**Decisão.**
+1. `GET`/`POST /api/compliance` trocaram `allowed(user,'*',...)` por `hasGlobalScope(user)` — que hoje
+   só `diretoria` satisfaz (`administrador.scopes` é `[]` desde a ADR-011). Nenhum módulo/estrutura de
+   Compliance foi criado; a política continua sendo deny-by-default enquanto ADR-007 (módulo/dono
+   definitivo) permanecer pendente — só que agora corretamente restrita à alçada de NEGÓCIO global, não
+   a qualquer papel com módulo wildcard.
+2. Nova `sanitizeAuditEventForUser(user, event)`: separa AUDITORIA TÉCNICA (metadados — `id`, `action`,
+   `entity`, `entityId`, `responsible`, `date`, `reason`, `correlationId`, sempre disponíveis a quem
+   acessa `/api/audit`) de CONTEÚDO AUDITADO (`before`/`after`, o snapshot do registro). Só
+   `hasGlobalScope(user)` recebe `before`/`after`; os demais (na prática, hoje, só `administrador` chega
+   a essa rota) veem apenas os metadados técnicos.
+
+**Justificativa.** Ambos os casos são a mesma classe de problema das ADRs 011/012 (papel técnico
+recebendo conteúdo por um mecanismo que não distingue "tem módulo/ação" de "tem alçada de negócio"),
+mas alcançados por rotas diferentes (`allowed(user,'*',...)` literal, e um campo de payload não
+filtrado) — por isso corrigidos aqui como uma ADR própria, em vez de reabrir as anteriores. Nenhuma das
+duas correções inventa estrutura nova: reaproveita `hasGlobalScope()` (já existente desde a ADR-011) e
+adiciona uma única função de redação de payload, sem duplicar a lógica em múltiplos pontos.
+
+**Consequência.** `administrador` perde acesso a `/api/compliance` (leitura e escrita) e deixa de ver
+`before`/`after` em `/api/audit` — mantém integralmente a função técnica de auditoria (ver quem fez o
+quê, quando, por quê) e as demais funções técnicas (backup, aprovação de cadastro, integrações). Nenhum
+papel departamental (lider/colaborador) ganha ou perde acesso a Compliance (já eram negados antes, por
+não terem `allowed(user,'*',...)`; continuam negados por não terem `hasGlobalScope()`).
+
+**Reversível.** Sim — reverter `hasGlobalScope(user)` para `allowed(user,'*',...)` em `/api/compliance`,
+e remover `sanitizeAuditEventForUser()` do mapeamento de `GET /api/audit`, restaura o comportamento
+anterior (não recomendado, pois reabre os dois atalhos indiretos).
 
 ---
 
