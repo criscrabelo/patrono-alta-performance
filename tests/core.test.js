@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, seed, parseCsv, hash, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, isValidCivilDate, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, hasGlobalScope, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, validateLegalDeadline, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue } = require('../server');
+const { ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, seed, parseCsv, hash, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, isValidCivilDate, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, hasGlobalScope, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, validateLegalDeadline, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines } = require('../server');
 const { WIDGET_TYPES, DASHBOARD_DEFINITIONS } = require('../dashboard-model');
 const { dashboardPayload } = require('../dashboard-service');
 const { PROJECT_ID, ensureProjectStore, projectDetail, projectPermissions } = require('../project-service');
@@ -561,4 +561,123 @@ test('isLegalDeadlineOverdue() não sofre deslocamento por timezone/UTC — comp
   assert.equal(isLegalDeadlineOverdue(null, '2026-03-10'), false, 'deadline ausente nunca é atrasado');
   assert.equal(isLegalDeadlineOverdue({ status: 'ativo', date: 'banana' }, '2026-03-10'), false, 'data inválida nunca é considerada atrasada');
   assert.equal(isLegalDeadlineOverdue({ status: 'ativo', date: '2026-99-99' }, '2026-03-10'), false, 'data civil inexistente nunca é considerada atrasada');
+});
+
+// ============================================================================================
+// Sprint 2, Fase 2 — testes unitários (views/consumo canônico de Legal Deadline)
+// ============================================================================================
+
+test('dashboard-service.js não contém mais processDate()/coluna bruta como fonte de prazo jurídico', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'dashboard-service.js'), 'utf8');
+  assert.ok(!/function processDate/.test(source), 'a função processDate() (DATA/CITAÇÃO como prazo) foi removida nesta Fase 2');
+  assert.ok(!/columnsByTitle\?\.\[.CITA/.test(source), 'nenhum widget deve mais ler CITAÇÃO/PROTOCOLO diretamente como prazo');
+});
+
+function buildLegalDashboardStore(deadlines, processOverrides = {}) {
+  return {
+    records: {
+      processos: [{ id: 'proc-1', source: 'monday', department: 'Jurídico', deletedAt: null, columnsByTitle: { DATA: '2026-09-01', 'CITAÇÃO/PROTOCOLO': '2026-09-02' }, ...processOverrides }],
+      legalDeadlines: deadlines
+    },
+    departments: []
+  };
+}
+const legalDashboardUser = { role: 'lider', department: 'Jurídico' };
+const legalDashboardDeps = { scoped, isLegalDeadlineOverdue, civilDateAfterDays };
+
+test('dashboard "legal": processo com DATA/CITAÇÃO mas sem nenhum Legal Deadline não gera prazo fictício (regressão obrigatória da Fase 2)', () => {
+  const store = buildLegalDashboardStore([]);
+  const payload = dashboardPayload(store, 'legal', {}, legalDashboardUser, legalDashboardDeps);
+  assert.equal(payload.widgets['legal-deadlines'].state, 'empty', 'sem Legal Deadline cadastrado, o widget de prazo fica vazio — nunca inventa prazo a partir de DATA/CITAÇÃO');
+  assert.deepEqual(payload.widgets['legal-risk'].data[0], { label: 'Prazos vencidos', value: 0 });
+  assert.deepEqual(payload.widgets['legal-risk'].data[1], { label: 'Prazos críticos (30 dias)', value: 0 });
+});
+
+test('dashboard "legal": widget de prazo consome legalDeadlines — ativo+data passada é vencido, ativo+data de hoje não é', () => {
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+  const store = buildLegalDashboardStore([
+    { id: 'ld-vencido', processId: 'proc-1', origin: 'Prazo vencido', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', department: 'Jurídico' },
+    { id: 'ld-hoje', processId: 'proc-1', origin: 'Prazo de hoje', date: today, originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', department: 'Jurídico' }
+  ]);
+  const payload = dashboardPayload(store, 'legal', {}, legalDashboardUser, legalDashboardDeps);
+  assert.equal(payload.widgets['legal-risk'].data[0].value, 1, 'apenas o prazo com data passada conta como vencido');
+  const titles = payload.widgets['legal-deadlines'].data.map(row => row.title);
+  assert.ok(titles.includes('Prazo vencido') && titles.includes('Prazo de hoje'), 'ambos os prazos ativos aparecem no widget, vindos de legalDeadlines');
+  const vencidoRow = payload.widgets['legal-deadlines'].data.find(row => row.title === 'Prazo vencido');
+  assert.equal(vencidoRow.overdue, true);
+  const hojeRow = payload.widgets['legal-deadlines'].data.find(row => row.title === 'Prazo de hoje');
+  assert.equal(hojeRow.overdue, false, 'prazo com data de hoje ainda não é atraso — só vence após o fim da data civil');
+});
+
+test('dashboard "legal": suspenso/cumprido/cancelado com data passada nunca aparecem como vencidos', () => {
+  const store = buildLegalDashboardStore([
+    { id: 'ld-suspenso', processId: 'proc-1', origin: 'Suspenso', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL', status: 'suspenso', department: 'Jurídico' },
+    { id: 'ld-cumprido', processId: 'proc-1', origin: 'Cumprido', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL', status: 'cumprido', department: 'Jurídico' },
+    { id: 'ld-cancelado', processId: 'proc-1', origin: 'Cancelado', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL', status: 'cancelado', department: 'Jurídico' }
+  ]);
+  const payload = dashboardPayload(store, 'legal', {}, legalDashboardUser, legalDashboardDeps);
+  assert.equal(payload.widgets['legal-risk'].data[0].value, 0, 'nenhum dos três status entra na contagem de vencidos');
+  assert.equal(payload.widgets['legal-deadlines'].state, 'empty', 'suspenso/cumprido/cancelado não aparecem como prazo ativo/crítico/vencido no widget');
+});
+
+test('dashboard "legal": INTERNAL_CONTROL nunca é rotulado como prazo processual (não entra em legal-risk/legal-deadlines)', () => {
+  const store = buildLegalDashboardStore([
+    { id: 'ld-interno', processId: 'proc-1', origin: 'Controle interno vencido', date: '2020-01-01', originType: 'INTERNAL_CONTROL', status: 'ativo', department: 'Jurídico' }
+  ]);
+  const payload = dashboardPayload(store, 'legal', {}, legalDashboardUser, legalDashboardDeps);
+  assert.equal(payload.widgets['legal-risk'].data[0].value, 0, 'INTERNAL_CONTROL não é somado a "Prazos vencidos" (rótulo de prazo processual)');
+  assert.equal(payload.widgets['legal-deadlines'].state, 'empty', 'INTERNAL_CONTROL não aparece no widget de "Próximos prazos" jurídico-processual');
+});
+
+test('dashboard "legal": JUDICIAL_PROCESSUAL aparece corretamente e múltiplos Legal Deadlines do mesmo processo coexistem sem se substituir', () => {
+  const store = buildLegalDashboardStore([
+    { id: 'ld-1', processId: 'proc-1', origin: 'Primeira intimação', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', department: 'Jurídico' },
+    { id: 'ld-2', processId: 'proc-1', origin: 'Segunda intimação (fato gerador distinto)', date: '2020-02-01', originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', department: 'Jurídico' }
+  ]);
+  const payload = dashboardPayload(store, 'legal', {}, legalDashboardUser, legalDashboardDeps);
+  assert.equal(payload.widgets['legal-risk'].data[0].value, 2, 'os dois prazos do mesmo processo contam separadamente — um novo prazo não substitui o anterior');
+  const titles = payload.widgets['legal-deadlines'].data.map(row => row.title);
+  assert.ok(titles.includes('Primeira intimação') && titles.includes('Segunda intimação (fato gerador distinto)'));
+});
+
+test('legalDeadlineIntegrityFlag() sinaliza registros legados sem originType/status para revisão, sem inferir nada', () => {
+  assert.equal(legalDeadlineIntegrityFlag({ originType: 'JUDICIAL_PROCESSUAL', status: 'ativo' }), 'ok');
+  assert.equal(legalDeadlineIntegrityFlag({ originType: 'JUDICIAL_PROCESSUAL' }), 'requires_review', 'status ausente (registro legado pré-D1) exige revisão manual');
+  assert.equal(legalDeadlineIntegrityFlag({ status: 'ativo' }), 'requires_review', 'originType ausente (registro legado pré-D1) exige revisão manual');
+  assert.equal(legalDeadlineIntegrityFlag({}), 'requires_review');
+  assert.equal(legalDeadlineIntegrityFlag(null), 'requires_review');
+});
+
+test('civilDateAfterDays() retorna uma data civil futura no formato YYYY-MM-DD, sem depender de UTC', () => {
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+  const in30 = civilDateAfterDays(30);
+  assert.match(in30, /^\d{4}-\d{2}-\d{2}$/);
+  assert.ok(in30 > today, 'a data 30 dias à frente deve ser posterior à data civil de hoje');
+});
+
+test('filterLegalDeadlines() filtra por processId/originType/status/overdue/dateFrom/dateTo e pagina com o mesmo padrão de filterProcesses/filterHonorariums', () => {
+  const rows = [
+    { id: 'ld-1', processId: 'proc-1', originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', date: '2020-01-01' },
+    { id: 'ld-2', processId: 'proc-1', originType: 'INTERNAL_CONTROL', status: 'ativo', date: '2027-01-01' },
+    { id: 'ld-3', processId: 'proc-2', originType: 'JUDICIAL_PROCESSUAL', status: 'suspenso', date: '2020-06-01' }
+  ];
+  const byProcess = filterLegalDeadlines(rows, new URL('http://x/?processId=proc-1'));
+  assert.equal(byProcess.count, 2);
+  const byOriginType = filterLegalDeadlines(rows, new URL('http://x/?originType=INTERNAL_CONTROL'));
+  assert.equal(byOriginType.count, 1);
+  assert.equal(byOriginType.records[0].id, 'ld-2');
+  const byStatus = filterLegalDeadlines(rows, new URL('http://x/?status=suspenso'));
+  assert.equal(byStatus.count, 1);
+  assert.equal(byStatus.records[0].id, 'ld-3');
+  const overdueTrue = filterLegalDeadlines(rows, new URL('http://x/?overdue=true'));
+  assert.equal(overdueTrue.count, 1, 'apenas ld-1 (ativo + data passada) é vencido — ld-3 é suspenso, nunca conta como vencido');
+  assert.equal(overdueTrue.records[0].id, 'ld-1');
+  const byDateRange = filterLegalDeadlines(rows, new URL('http://x/?dateFrom=2020-01-01&dateTo=2020-12-31'));
+  assert.equal(byDateRange.count, 2);
+  const paginated = filterLegalDeadlines(rows, new URL('http://x/?pageSize=25&page=1'));
+  assert.equal(paginated.pagination.pageSize, 25, 'apenas 25/50/100 são pageSize válidos, mesmo padrão de filterProcesses/filterHonorariums');
+  assert.equal(paginated.pagination.totalPages, 1);
+  assert.equal(paginated.records.length, 3);
+  assert.equal(paginated.totalAvailable, 3);
+  assert.ok('dataIntegrity' in paginated.records[0], 'cada registro paginado inclui o campo de integridade calculado (dataIntegrity)');
 });

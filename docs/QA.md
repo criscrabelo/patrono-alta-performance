@@ -29,12 +29,12 @@ própria v1.3 define o escopo por fase.
 Suíte: `npm test` (Node.js test runner nativo — cada arquivo `*.test.js` roda em processo próprio).
 
 ```
-tests 140
-pass 140
+tests 163
+pass 163
 fail 0
 ```
 
-**`tests/core.test.js` (49 testes)** — unitários e estruturais. Além dos 26 preexistentes e dos 6 da
+**`tests/core.test.js` (58 testes)** — unitários e estruturais. Além dos 26 preexistentes e dos 6 da
 rodada 2, dois testes foram **atualizados na rodada 3** porque a versão anterior validava exatamente o
 comportamento incorreto que a rodada 3 corrigiu:
 - `scoped()` — companyId/speId agora testados com deny-by-default real (ausência ou mismatch nega,
@@ -71,7 +71,7 @@ rejeitados) e `status` do enum fechado (`ativo`/`suspenso`/`cumprido`/`cancelado
 quando `status==='ativo'` e `date` anterior a hoje; `suspenso`/`cumprido`/`cancelado` nunca atrasados) e
 sua imunidade a deslocamento de timezone/UTC (comparação lexicográfica pura de datas civis).
 
-**`tests/security-integration.test.js` (91 testes)** — HTTP real: sobe um servidor
+**`tests/security-integration.test.js` (105 testes)** — HTTP real: sobe um servidor
 `http.createServer(handler)` de verdade, isolado em diretório de dados temporário
 (`COEVO_DATA_DIR`), injeta usuários e dados de teste, e faz requisições HTTP reais, verificando status e
 corpo da resposta — não presença de texto no código-fonte.
@@ -273,8 +273,9 @@ o modelo de dados correspondente** — os casos abaixo marcados ✅ têm teste r
 14. ✅ Reabertura (`suspenso` → `ativo`) → mesmo `id`, `version` incrementada, histórico preserva o
     ciclo suspenso anterior (não apenas o estado final).
 15. ✅ Cumprimento/cancelamento são valores válidos do enum (mesmo mecanismo do caso 3/21 abaixo).
-16. ⏳ Dashboard jurídico usa `legalDeadlines`, nunca a coluna bruta `DATA`/`CITAÇÃO/PROTOCOLO` do Monday
-    — **Fase 2, não implementado ainda** (risco registrado em `docs/DATA_MODEL.md`).
+16. ✅ Dashboard jurídico usa `legalDeadlines`, nunca a coluna bruta `DATA`/`CITAÇÃO/PROTOCOLO` do Monday
+    — **Fase 2 implementada**: `processDate()` removida de `dashboard-service.js`; teste de regressão
+    dedicado confirma que um processo com `DATA`/`CITAÇÃO` mas sem Legal Deadline não gera prazo.
 17. ✅ Falha do Monday não apaga o último Legal Deadline válido conhecido (comportamento pré-existente,
     reafirmado — `legalDeadlines` não é escrita pelo pipeline de sync).
 18. ✅ Nenhuma rota de Legal Deadline gera cálculo automático de prazo — confirmado por inspeção de
@@ -287,7 +288,8 @@ o modelo de dados correspondente** — os casos abaixo marcados ✅ têm teste r
 21. ✅ `status` fora do enum homologado (`ativo`/`suspenso`/`cumprido`/`cancelado`) → rejeitado com
     `422`, em POST e em PATCH.
 22. ✅ `isLegalDeadlineOverdue()`: `ativo` + `date` anterior a hoje → `true` (testado com `today`
-    explícito, determinístico). **Nenhuma view ainda consome essa função** (Fase 2).
+    explícito, determinístico). **Consumida na Fase 2** pelo dashboard `legal` e pela listagem/detalhe
+    (`overdue` em cada registro), sempre a mesma função — nunca recalculada em paralelo.
 23. ✅ `isLegalDeadlineOverdue()`: `suspenso` + `date` anterior a hoje → `false`.
 24. ✅ `isLegalDeadlineOverdue()`: `cumprido` + `date` anterior a hoje → `false`.
 25. ✅ `isLegalDeadlineOverdue()`: `cancelado` + `date` anterior a hoje → `false`.
@@ -296,6 +298,48 @@ o modelo de dados correspondente** — os casos abaixo marcados ✅ têm teste r
 27. ✅ Nenhuma API aceita `status:'reaberto'` (nem `vencido`/`atrasado`/`em_atraso`/`pendente`) como
     valor persistido — sempre rejeitado por estar fora do enum fechado (POST e PATCH, unitário e HTTP).
 
-**Resumo:** 24 de 27 casos implementados e testados nesta Fase 1 (unitário e/ou HTTP real); os 3
-restantes (16, 19, e a integração de `isLegalDeadlineOverdue()` a uma view em 22) dependem de Fases 2–3,
-não iniciadas nesta rodada.
+**Resumo:** 26 de 27 casos implementados e testados entre a Fase 1 e a Fase 2 (unitário e/ou HTTP real); o
+único restante (19, Google Calendar) depende da Fase 3, não iniciada.
+
+## QA do Sprint 2 — Fase 2 (views e consumo canônico de Legal Deadline)
+
+Testes adicionados nesta rodada (8 unitários em `tests/core.test.js`, 15 HTTP em
+`tests/security-integration.test.js`) — nenhum teste anterior foi removido; 163 no total, todos
+passando.
+
+**Unitários (8):**
+1. `dashboard-service.js` não contém mais `processDate()` nem lê `CITAÇÃO/PROTOCOLO` diretamente como
+   prazo (teste estrutural sobre o código-fonte).
+2. Processo com `DATA`/`CITAÇÃO` mas sem nenhum Legal Deadline não gera prazo fictício no dashboard
+   `legal` (regressão obrigatória).
+3. Widget de prazo consome `legalDeadlines`: `ativo` + data passada é vencido; `ativo` + data de hoje
+   não é.
+4. `suspenso`/`cumprido`/`cancelado` com data passada nunca aparecem como vencidos no dashboard.
+5. `INTERNAL_CONTROL` nunca é rotulado como prazo processual (não entra em `legal-risk`/`legal-deadlines`).
+6. `JUDICIAL_PROCESSUAL` aparece corretamente; múltiplos Legal Deadlines do mesmo processo coexistem sem
+   se substituir.
+7. `legalDeadlineIntegrityFlag()` sinaliza registros legados sem `originType`/`status` para revisão
+   (`'requires_review'`), sem inferir nada.
+8. `civilDateAfterDays()` (janela de dias) e `filterLegalDeadlines()` (filtros por `processId`/
+   `originType`/`status`/`overdue`/`dateFrom`/`dateTo` + paginação no mesmo padrão de
+   `filterProcesses()`/`filterHonorariums()`).
+
+**HTTP (15):**
+1. Regressão obrigatória: processo com `DATA`/`CITAÇÃO` mas sem Legal Deadline não aparece como prazo em
+   `GET /api/dashboards/legal`.
+2. `GET /api/dashboards/legal` calcula "Prazos vencidos"/"Prazos críticos" exclusivamente a partir de
+   `legalDeadlines`.
+3. Líder de TI não acessa dashboard/prazos jurídicos.
+4. Administrador técnico não recebe conteúdo jurídico em dashboard, listagem nem detalhe.
+5. Diretoria acessa dashboard, listagem e detalhe conforme alçada global.
+6. Listagem paginada: filtro por `processId`.
+7. Listagem paginada: filtro por `originType`.
+8. Listagem paginada: filtro por `status`.
+9. Listagem paginada: filtro por `overdue` (suspenso/cumprido/cancelado nunca entram em `overdue=true`).
+10. Listagem paginada: filtros combinados (`processId` + `status` + `originType`).
+11. Detalhe retorna processo relacionado, atraso derivado e histórico; histórico respeita permissão
+    (sem `before`/`after` para quem não tem alçada global, via `sanitizeAuditEventForUser()`).
+12. Detalhe por ID fora do escopo é negado, sem revelar existência/conteúdo.
+13. Detalhe de Legal Deadline inexistente retorna `404`.
+14. Processo com zero Legal Deadlines não aparece como tendo prazo na listagem filtrada por `processId`.
+15. (Coberto nos testes acima) suspenso/cumprido/cancelado nunca entram em `overdue=true` na listagem.

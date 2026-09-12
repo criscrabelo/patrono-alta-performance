@@ -1383,3 +1383,185 @@ test('[HTTP] entidade genérica não-legalDeadlines não sofre extração/remoç
   assert.ok(updateEvent, 'evento de auditoria de documentReferences deve existir');
   assert.equal(updateEvent.reason, 'Operação solicitada pelo usuário', 'auditoria de entidade genérica usa o default de audit(), sem o tratamento especial de reason da Fase 1 (restrito a legalDeadlines)');
 });
+
+// ============================================================================================
+// Sprint 2, Fase 2 — testes HTTP (views/consumo canônico de Legal Deadline: dashboard, listagem/
+// filtro, detalhe/histórico). Nenhum teste da Fase 1 foi removido — os 140 anteriores continuam.
+// ============================================================================================
+
+test('[HTTP] regressão obrigatória da Fase 2: processo com DATA/CITAÇÃO mas sem nenhum Legal Deadline não aparece como prazo no dashboard jurídico', async () => {
+  // Semeia diretamente um processo Monday com colunas de data brutas (DATA/CITAÇÃO/PROTOCOLO), mas
+  // sem nenhum Legal Deadline correspondente — exatamente o cenário que a D1 proíbe de virar "prazo".
+  const store = readStore();
+  store.records.processos.push({
+    id: 'proc-juridico-data-bruta-sem-prazo', source: 'monday', externalId: 'ext-data-bruta', module: 'processos',
+    department: 'Jurídico', title: 'Processo com DATA/CITAÇÃO mas sem Legal Deadline', deletedAt: null,
+    columnsByTitle: { DATA: '2026-09-01', 'CITAÇÃO/PROTOCOLO': '2026-09-02' }
+  });
+  writeStore(store);
+
+  const token = await loginAs(EMAILS.liderJuridico);
+  const dashboard = await api('GET', '/api/dashboards/legal', { token });
+  assert.equal(dashboard.status, 200);
+  const deadlinesWidget = dashboard.body.widgets['legal-deadlines'];
+  const flatten = JSON.stringify(deadlinesWidget.data || null);
+  assert.ok(!flatten.includes('2026-09-01') && !flatten.includes('2026-09-02'), 'DATA/CITAÇÃO do processo nunca podem aparecer como prazo no widget, mesmo sem nenhum Legal Deadline cadastrado');
+});
+
+test('[HTTP] GET /api/dashboards/legal calcula "Prazos vencidos"/"Prazos críticos" exclusivamente a partir de legalDeadlines', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Prazo vencido do dashboard', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(created.status, 201);
+
+  const dashboard = await api('GET', '/api/dashboards/legal', { token });
+  assert.equal(dashboard.status, 200);
+  const risk = dashboard.body.widgets['legal-risk'].data;
+  const vencidos = risk.find(row => row.label === 'Prazos vencidos');
+  assert.ok(vencidos && vencidos.value >= 1, 'o prazo vencido criado neste teste deve ser contado em "Prazos vencidos"');
+  const deadlinesWidget = dashboard.body.widgets['legal-deadlines'];
+  assert.equal(deadlinesWidget.state, 'ready');
+  assert.ok(deadlinesWidget.data.some(row => row.title === 'Prazo vencido do dashboard'), 'o prazo aparece no widget "Próximos prazos" vindo de legalDeadlines');
+});
+
+test('[HTTP] líder de TI não vê os dashboards/prazos jurídicos', async () => {
+  const tokenTi = await loginAs(EMAILS.liderTi);
+  const dashboard = await api('GET', '/api/dashboards/legal', { token: tokenTi });
+  assert.equal(dashboard.status, 403, 'líder de TI não acessa o dashboard jurídico — isolamento departamental preservado');
+});
+
+test('[HTTP] administrador técnico não recebe conteúdo jurídico no dashboard/listagem/detalhe de Legal Deadline', async () => {
+  const tokenAdministrador = await loginAs(EMAILS.administrador);
+  assert.equal((await api('GET', '/api/dashboards/legal', { token: tokenAdministrador })).status, 403, 'administrador não tem department — dashboard departamental Jurídico nega no gate de dashboardAuthorized()');
+
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token: tokenJuridico, json: { processId: 'proc-juridico-teste', origin: 'Prazo para teste de administrador', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(created.status, 201);
+
+  const listAsAdmin = await api('GET', '/api/entities/legalDeadlines', { token: tokenAdministrador });
+  assert.equal(listAsAdmin.status, 200, 'administrador passa no gate de módulo (gestão técnica), mas...');
+  assert.equal(listAsAdmin.body.length, 0, '...nenhum Legal Deadline é retornado — scoped() nega por ausência de escopo global/departamental');
+
+  const detailAsAdmin = await api('GET', `/api/entities/legalDeadlines/${created.body.id}/detail`, { token: tokenAdministrador });
+  assert.equal(detailAsAdmin.status, 404, 'detalhe de Legal Deadline nega por escopo, sem revelar existência do registro ao administrador técnico');
+});
+
+test('[HTTP] diretoria acessa dashboard, listagem e detalhe de Legal Deadline conforme alçada global', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token: tokenJuridico, json: { processId: 'proc-juridico-teste', origin: 'Prazo visível à diretoria', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(created.status, 201);
+
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  assert.equal((await api('GET', '/api/dashboards/legal', { token: tokenDiretoria })).status, 200);
+  const list = await api('GET', '/api/entities/legalDeadlines', { token: tokenDiretoria });
+  assert.equal(list.status, 200);
+  assert.ok(list.body.some(item => item.id === created.body.id), 'diretoria (alçada global) enxerga o Legal Deadline do Jurídico normalmente');
+
+  const detail = await api('GET', `/api/entities/legalDeadlines/${created.body.id}/detail`, { token: tokenDiretoria });
+  assert.equal(detail.status, 200);
+  assert.equal(detail.body.id, created.body.id);
+});
+
+test('[HTTP] listagem paginada de Legal Deadline: filtro por processId funciona', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Filtro processId', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  const list = await api('GET', `/api/entities/legalDeadlines?paginated=1&processId=proc-juridico-teste`, { token });
+  assert.equal(list.status, 200);
+  assert.ok(Array.isArray(list.body.records));
+  assert.ok(list.body.records.every(row => row.processId === 'proc-juridico-teste'));
+  assert.ok('pagination' in list.body);
+});
+
+test('[HTTP] listagem paginada de Legal Deadline: filtro por originType funciona', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Filtro originType interno', date: '2026-12-01', originType: 'INTERNAL_CONTROL' } });
+  const list = await api('GET', `/api/entities/legalDeadlines?paginated=1&originType=INTERNAL_CONTROL`, { token });
+  assert.equal(list.status, 200);
+  assert.ok(list.body.records.length >= 1);
+  assert.ok(list.body.records.every(row => row.originType === 'INTERNAL_CONTROL'));
+});
+
+test('[HTTP] listagem paginada de Legal Deadline: filtro por status funciona', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Filtro status', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  await api('PATCH', `/api/entities/legalDeadlines/${created.body.id}`, { token, json: { status: 'cumprido' } });
+  const list = await api('GET', `/api/entities/legalDeadlines?paginated=1&status=cumprido`, { token });
+  assert.equal(list.status, 200);
+  assert.ok(list.body.records.some(row => row.id === created.body.id));
+  assert.ok(list.body.records.every(row => row.status === 'cumprido'));
+});
+
+test('[HTTP] listagem paginada de Legal Deadline: filtro por overdue funciona e suspenso/cumprido/cancelado nunca entram em overdue=true', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const vencido = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Overdue vencido', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  const suspensoVencido = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Overdue suspenso (não deve contar)', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  await api('PATCH', `/api/entities/legalDeadlines/${suspensoVencido.body.id}`, { token, json: { status: 'suspenso' } });
+
+  const overdueList = await api('GET', `/api/entities/legalDeadlines?paginated=1&overdue=true`, { token });
+  assert.equal(overdueList.status, 200);
+  assert.ok(overdueList.body.records.some(row => row.id === vencido.body.id), 'prazo ativo com data passada aparece em overdue=true');
+  assert.ok(!overdueList.body.records.some(row => row.id === suspensoVencido.body.id), 'prazo suspenso com data passada NUNCA aparece em overdue=true');
+  assert.ok(overdueList.body.records.every(row => row.overdue === true));
+
+  const notOverdueList = await api('GET', `/api/entities/legalDeadlines?paginated=1&overdue=false`, { token });
+  assert.ok(notOverdueList.body.records.some(row => row.id === suspensoVencido.body.id), 'prazo suspenso aparece em overdue=false (nunca é atraso, independentemente da data)');
+  assert.ok(notOverdueList.body.records.every(row => row.overdue === false));
+});
+
+test('[HTTP] listagem paginada de Legal Deadline: filtros combinados (processId + status + originType) funcionam', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Combinado', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  const list = await api('GET', `/api/entities/legalDeadlines?paginated=1&processId=proc-juridico-teste&status=ativo&originType=JUDICIAL_PROCESSUAL`, { token });
+  assert.equal(list.status, 200);
+  assert.ok(list.body.records.every(row => row.processId === 'proc-juridico-teste' && row.status === 'ativo' && row.originType === 'JUDICIAL_PROCESSUAL'));
+});
+
+test('[HTTP] detalhe de Legal Deadline retorna processo relacionado, atraso derivado e histórico; histórico respeita permissão (sem before/after para quem não tem alçada global)', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token: tokenJuridico, json: { processId: 'proc-juridico-teste', origin: 'Prazo para detalhe', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(created.status, 201);
+  const id = created.body.id;
+  await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token: tokenJuridico, json: { status: 'suspenso', reason: 'Suspensão para o teste de detalhe' } });
+
+  const detailAsJuridico = await api('GET', `/api/entities/legalDeadlines/${id}/detail`, { token: tokenJuridico });
+  assert.equal(detailAsJuridico.status, 200);
+  assert.equal(detailAsJuridico.body.id, id);
+  assert.equal(detailAsJuridico.body.process.id, 'proc-juridico-teste', 'detalhe inclui o processo relacionado');
+  assert.equal(detailAsJuridico.body.overdue, false, 'status suspenso nunca é atraso, mesmo com data passada');
+  assert.ok(Array.isArray(detailAsJuridico.body.history) && detailAsJuridico.body.history.length >= 2, 'histórico inclui os eventos de criação e da suspensão');
+  assert.ok(detailAsJuridico.body.history.every(event => !('before' in event) && !('after' in event)), 'líder Jurídico (sem alçada global) não recebe before/after no histórico — mesma regra de sanitizeAuditEventForUser()');
+  assert.ok(detailAsJuridico.body.history.some(event => event.reason === 'Suspensão para o teste de detalhe'), 'o motivo da alteração continua visível no histórico, mesmo sem before/after');
+
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  const detailAsDiretoria = await api('GET', `/api/entities/legalDeadlines/${id}/detail`, { token: tokenDiretoria });
+  assert.equal(detailAsDiretoria.status, 200);
+  assert.ok(detailAsDiretoria.body.history.some(event => event.after?.status === 'suspenso'), 'diretoria (alçada global) recebe before/after completo no histórico');
+});
+
+test('[HTTP] detalhe de Legal Deadline por ID fora do escopo é negado, sem revelar existência/conteúdo', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token: tokenJuridico, json: { processId: 'proc-juridico-teste', origin: 'Prazo restrito ao Jurídico', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(created.status, 201);
+
+  // Mesma negação transversal já usada em GET/PATCH /api/entities/legalDeadlines (allowedInDepartment
+  // nega TI no próprio gate de módulo departamental, antes mesmo de chegar a scoped() — 403, não 404).
+  const tokenTi = await loginAs(EMAILS.liderTi);
+  const detailAsTi = await api('GET', `/api/entities/legalDeadlines/${created.body.id}/detail`, { token: tokenTi });
+  assert.equal(detailAsTi.status, 403, 'líder de TI é negado no gate de módulo departamental para o detalhe de Legal Deadline do Jurídico');
+});
+
+test('[HTTP] detalhe de Legal Deadline inexistente retorna 404', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const detail = await api('GET', '/api/entities/legalDeadlines/id-que-nao-existe/detail', { token });
+  assert.equal(detail.status, 404);
+});
+
+test('[HTTP] processo com zero Legal Deadlines não aparece como tendo prazo na listagem/dashboard', async () => {
+  const store = readStore();
+  store.records.processos.push({ id: 'proc-juridico-sem-prazo-nenhum', source: 'monday', externalId: 'ext-sem-prazo', module: 'processos', department: 'Jurídico', title: 'Processo sem nenhum Legal Deadline', deletedAt: null });
+  writeStore(store);
+
+  const token = await loginAs(EMAILS.liderJuridico);
+  const list = await api('GET', `/api/entities/legalDeadlines?paginated=1&processId=proc-juridico-sem-prazo-nenhum`, { token });
+  assert.equal(list.status, 200);
+  assert.equal(list.body.count, 0, 'processo sem nenhum Legal Deadline cadastrado não aparece na listagem filtrada por processId');
+});

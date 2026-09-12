@@ -1,11 +1,14 @@
 # SPRINT2-PLANO.md — Plano Técnico do Sprint 2 (Piloto Jurídico)
 
 > **Status deste documento:** plano preparado após a homologação da D1 (`docs/DECISIONS.md`, seção 1.1).
-> **FASE 1 IMPLEMENTADA** (`originType`, enum de `status`, regra de reabertura, atraso derivado — ver
-> tabela abaixo). **FASES 2, 3 e 4 CONTINUAM NÃO INICIADAS** — nenhuma delas foi implementada nesta
-> rodada; nenhuma autorização adicional foi dada além da Fase 1. Escopo estritamente limitado ao que já
-> está previsto em `docs/MASTER_HANDOFF.md` §24 (Sprint 2 — piloto). Nenhuma alteração foi feita no
-> MASTER_HANDOFF.
+> **FASE 1 IMPLEMENTADA** (`originType`, enum de `status`, regra de reabertura, atraso derivado).
+> **FASE 2 IMPLEMENTADA NESTA RODADA** — correção de `dashboard-service.js` (widgets jurídicos de prazo
+> passam a consumir exclusivamente `legalDeadlines`/`isLegalDeadlineOverdue()`, nunca mais DATA/CITAÇÃO/
+> PROTOCOLO/`processDate()` do Monday), listagem/filtro (`GET /api/entities/legalDeadlines?paginated=1`)
+> e detalhe/histórico (`GET /api/entities/legalDeadlines/:id/detail`) — ver seção "Fase 2" abaixo.
+> **FASES 3 e 4 CONTINUAM NÃO INICIADAS** — Agenda/Atenção e Google Calendar não foram tocados; nenhuma
+> autorização adicional foi dada além da Fase 2. Escopo estritamente limitado ao que já está previsto em
+> `docs/MASTER_HANDOFF.md` §24 (Sprint 2 — piloto). Nenhuma alteração foi feita no MASTER_HANDOFF.
 
 ## Escopo autorizado (MASTER_HANDOFF §24, §23)
 
@@ -31,14 +34,14 @@ além do já previsto acima.
 | 1 | Adicionar `originType` (enum `JUDICIAL_PROCESSUAL` \| `INTERNAL_CONTROL`) como campo obrigatório de `legalDeadlines`, validado na criação e revalidado no PATCH (mesmo padrão de `processId`/`origin`/`date`) | Engenharia | D1.3 homologada (`docs/DECISIONS.md`) | `POST`/`PATCH` sem `originType` ou com valor fora do enum → `422`; PATCH que remove `originType` do estado candidato também rejeitado | ✅ **Implementado** — `validateLegalDeadline()` em `server.js`; testes unitários e HTTP |
 | 1 | Implementar o enum **já homologado** de `status` de Legal Deadline (`ativo`/`suspenso`/`cumprido`/`cancelado`) | Engenharia | D1 homologada; enum/reabertura/atraso derivado aprovados em 12/09/2026 | `POST`/`PATCH` com `status` fora do enum → `422`; nenhum valor livre aceito; transições auditadas (`before`/`after`) | ✅ **Implementado** — enum `LEGAL_DEADLINE_STATUSES`; default server-side `ativo` na criação quando ausente |
 | 1 | Implementar a regra de reabertura homologada: mesmo `id`, `status` volta para `ativo`, ciclo anterior preservado no histórico — nunca criar `status:'reaberto'` | Engenharia | Enum de status implementado (tarefa acima) | Reabertura preserva `id`; histórico mostra o ciclo suspenso/cancelado anterior; nenhuma API aceita `reaberto` como valor de `status`; reabertura sem `reason` explícito é rejeitada (`422`), sem alterar nada | ✅ **Implementado** — é um `PATCH` comum, restrito a `legalDeadlines`; `reason` do input alimenta `audit()` em `/api/entities/:type` (extraído antes de sanitizar, nunca persistido no registro); reabertura (status não-`ativo` → `ativo`) exige `reason` textual não vazio, senão `422` sem gravação |
-| 1 | Implementar a regra de atraso derivado homologada: função central calcula "vencido/em atraso" apenas quando `status = ativo` **e** `date` anterior à data atual — nunca gravar isso como `status` | Engenharia | Enum de status implementado (tarefa acima) | `suspenso`/`cumprido`/`cancelado` nunca exibidos como atraso, independentemente de `date`; testes unitários dedicados | ✅ **Implementado** — `isLegalDeadlineOverdue()` em `server.js`, pura e testada; **ainda não consumida por nenhuma view** (isso é Fase 2) |
-| 2 | Corrigir `dashboard-service.js`: widgets de prazo do dashboard `legal` (`legal-deadlines`, `legal-risk`) devem consultar `legalDeadlines`, não `processDate()`/coluna bruta do board `processos` | Engenharia | Nenhuma (correção de integridade, independente de `originType`) | Teste de integração confirmando que o widget não usa `processDate()`; nenhuma lógica paralela de cálculo de prazo em `dashboard-service.js` | ⏳ Não iniciada |
-| 2 | Endpoint de listagem/filtro de Legal Deadline por processo, com filtro por `originType` e por `status` | Engenharia | Fase 1 concluída | Listagem filtra corretamente por `originType`/`status`; respeita `scoped()`/RBAC já vigentes | ⏳ Não iniciada |
-| 2 | Tela de detalhe de Legal Deadline (histórico via auditoria existente — `store.audit` por `entityId`/`correlationId`) | Engenharia + UX | Fase 1 concluída | Histórico exibido em ordem cronológica, sem sobrescrever estado anterior; nenhuma entidade nova de histórico criada (reaproveita auditoria existente, conforme instruído) | ⏳ Não iniciada |
-| 2 | Semântica de tela/copy: "Confirmado pelo Jurídico" onde hoje poderia haver ambiguidade; garantir que nenhuma tela sugira "comprovação documental validada" sem `evidenceReference` (D1.4) | UX + Jurídico (revisão de copy) | D1.4 homologada | Revisão de copy aprovada pelo Jurídico; nenhuma string de UI viola a regra de linguagem da D1.4 | ⏳ Não iniciada |
+| 1 | Implementar a regra de atraso derivado homologada: função central calcula "vencido/em atraso" apenas quando `status = ativo` **e** `date` anterior à data atual — nunca gravar isso como `status` | Engenharia | Enum de status implementado (tarefa acima) | `suspenso`/`cumprido`/`cancelado` nunca exibidos como atraso, independentemente de `date`; testes unitários dedicados | ✅ **Implementado** — `isLegalDeadlineOverdue()` em `server.js`, pura e testada; agora consumida por `dashboard-service.js` e pela listagem/detalhe (Fase 2) |
+| 2 | Corrigir `dashboard-service.js`: widgets de prazo do dashboard `legal` (`legal-deadlines`, `legal-risk`) devem consultar `legalDeadlines`, não `processDate()`/coluna bruta do board `processos` | Engenharia | Nenhuma (correção de integridade, independente de `originType`) | Teste de integração confirmando que o widget não usa `processDate()`; nenhuma lógica paralela de cálculo de prazo em `dashboard-service.js` | ✅ **Implementado** — `processDate()` removida; `legal-risk`/`legal-deadlines` consomem `legalDeadlines` + `isLegalDeadlineOverdue()` (injetados por `server.js`, não duplicados) |
+| 2 | Endpoint de listagem/filtro de Legal Deadline por processo, com filtro por `originType` e por `status` | Engenharia | Fase 1 concluída | Listagem filtra corretamente por `originType`/`status`; respeita `scoped()`/RBAC já vigentes | ✅ **Implementado** — `GET /api/entities/legalDeadlines?paginated=1` (`filterLegalDeadlines()`): `processId`/`originType`/`status`/`overdue`/`dateFrom`/`dateTo`, paginação no mesmo padrão de `filterProcesses()`/`filterHonorariums()` |
+| 2 | Tela de detalhe de Legal Deadline (histórico via auditoria existente — `store.audit` por `entityId`/`correlationId`) | Engenharia + UX | Fase 1 concluída | Histórico exibido em ordem cronológica, sem sobrescrever estado anterior; nenhuma entidade nova de histórico criada (reaproveita auditoria existente, conforme instruído) | ✅ **Implementado (API)** — `GET /api/entities/legalDeadlines/:id/detail`: processo relacionado, atraso derivado, histórico via `store.audit` + `sanitizeAuditEventForUser()`. Sem tela nova de UI nesta rodada — o piloto consome via API/widgets genéricos existentes |
+| 2 | Semântica de tela/copy: "Confirmado pelo Jurídico" onde hoje poderia haver ambiguidade; garantir que nenhuma tela sugira "comprovação documental validada" sem `evidenceReference` (D1.4) | UX + Jurídico (revisão de copy) | D1.4 homologada | Revisão de copy aprovada pelo Jurídico; nenhuma string de UI viola a regra de linguagem da D1.4 | ⏳ Não iniciada — nenhuma tela nova foi criada nesta rodada; segue pendente quando houver UI dedicada |
 | 3 | Slice mínimo de Agenda/Atenção consumindo o mesmo registro de `legalDeadlines` (sem criar cópia) | Engenharia | Fases 1–2 concluídas | Agenda/Atenção exibem o mesmo `id` de Legal Deadline, nunca uma cópia; QA §30 casos 2 e 6 tornam-se exercitáveis | ⏳ Não iniciada |
 | 3 | Google Calendar (se ativado no piloto) como visualização de leitura apenas | Engenharia + TI | Fase 3 (Agenda/Atenção) | Nenhuma escrita no Calendar; nenhuma leitura do Calendar cria/altera Legal Deadline | ⏳ Não iniciada |
-| 4 | Testes de permissão específicos de Legal Deadline com `originType` (TI vs. Jurídico; administrador técnico vs. conteúdo) | Engenharia (QA) | Fases 1–2 concluídas | Casos 8 e 9 da seção QA (abaixo) passam via HTTP real, reaproveitando `allowedInDepartment()`/`allowedContent()` já existentes — nenhum mecanismo de autorização novo | ⚠️ Parcialmente antecipado — a Fase 1 já cobre TI/administrador para Legal Deadline (ver testes desta rodada); listagem/filtro fica para a Fase 2 |
+| 4 | Testes de permissão específicos de Legal Deadline com `originType` (TI vs. Jurídico; administrador técnico vs. conteúdo) | Engenharia (QA) | Fases 1–2 concluídas | Casos 8 e 9 da seção QA (abaixo) passam via HTTP real, reaproveitando `allowedInDepartment()`/`allowedContent()` já existentes — nenhum mecanismo de autorização novo | ✅ **Implementado** — Fase 1 já cobria TI/administrador para CRUD; Fase 2 estende a mesma cobertura para dashboard/listagem/detalhe |
 | 4 | Homologação formal com Gestora + Jurídico (MASTER_HANDOFF §32) | Negócio + Jurídico | Fases 1–3 concluídas, CI verde | Checklist de homologação do piloto jurídico aprovado | ⏳ Não iniciada |
 
 ## Status do Legal Deadline — HOMOLOGADO e IMPLEMENTADO (Fase 1)
@@ -60,34 +63,37 @@ além do já previsto acima.
 
 Detalhe completo do que foi implementado em `docs/DATA_MODEL.md`, seção "Sprint 2, Fase 1 — implementada".
 
-## QA — Fase 1 implementada; Fases 2–4 seguem planejadas
+## QA — Fases 1 e 2 implementadas; Fases 3–4 seguem planejadas
 
-Ver `docs/QA.md`, seção "QA planejado para o Sprint 2 — Legal Deadline com D1 homologada": os casos que
-dependiam apenas do modelo de dados (originType/status/reabertura/atraso, isolamento Jurídico×TI,
-administrador técnico, múltiplos prazos, novo fato gerador, mass assignment, processo manual/fora de
-escopo) foram implementados como testes reais nesta Fase 1 (`tests/core.test.js`,
-`tests/security-integration.test.js`). Os casos que dependem de UI/listagem/dashboard/Agenda-Atenção
-(correção dos widgets, tela de detalhe, slice de Agenda/Atenção, Google Calendar) continuam apenas
-planejados, para as Fases 2–4.
+Ver `docs/QA.md`, seção "QA do Sprint 2 — Legal Deadline com D1 homologada": os casos que dependiam
+apenas do modelo de dados (originType/status/reabertura/atraso, isolamento Jurídico×TI, administrador
+técnico, múltiplos prazos, novo fato gerador, mass assignment, processo manual/fora de escopo) foram
+implementados como testes reais na Fase 1. Nesta Fase 2, os casos de dashboard/listagem/detalhe/histórico
+(correção dos widgets, filtros, detalhe com histórico, regressão DATA/CITAÇÃO sem Legal Deadline) também
+passaram a ser testes reais (`tests/core.test.js`, `tests/security-integration.test.js`). Os casos que
+dependem de Agenda/Atenção e Google Calendar continuam apenas planejados, para as Fases 3–4.
 
 ## Dependências entre fases
 
-Fase 1 (modelo de dados: `originType` + `status`) — **concluída** — desbloqueia Fase 2 (endpoints/telas)
-e Fase 4 (testes de permissão específicos). Fase 2 (correção do dashboard) é independente das demais e
-pode ser feita em paralelo. Fase 3 (Agenda/Atenção) depende de Fase 1 e 2 estarem concluídas, pois
-consome o mesmo `legalDeadlines` já filtrável/exibível. Fase 4 (homologação formal) é sempre a última.
+Fase 1 (modelo de dados: `originType` + `status`) — **concluída** — desbloqueou a Fase 2. Fase 2
+(dashboard, listagem/filtro, detalhe/histórico) — **concluída nesta rodada**. Fase 3 (Agenda/Atenção)
+depende de Fases 1 e 2 estarem concluídas, pois consome o mesmo `legalDeadlines` já filtrável/exibível —
+**ainda não iniciada**. Fase 4 (homologação formal) é sempre a última — **ainda não iniciada**.
 
-## Riscos e bloqueios conhecidos antes de iniciar as Fases 2–4
+## Riscos e bloqueios conhecidos antes de iniciar a Fase 3
 
-- Nenhum bloqueio técnico identificado para a Fase 2 — o modelo de dados que ela depende (Fase 1) está
-  implementado e testado (132 testes, 111 herdados + 21 novos, todos passando).
+- Nenhum bloqueio técnico identificado para a Fase 3 — o modelo de dados (Fase 1) e o consumo canônico
+  via dashboard/listagem/detalhe (Fase 2) estão implementados e testados (163 testes, todos passando).
 - O levantamento de código não conseguiu confirmar, para os boards além de `processos`, se existe
   qualquer coluna de data relevante — isso não bloqueia o Sprint 2 (D1.2 já restringe o piloto a
   `processos`), mas deve ser revisitado se o Jurídico identificar necessidade de expandir o escopo de
   boards no futuro (rito descrito em `docs/DECISIONS.md`, seção 1.1, D1.2).
-- `evidenceReference` permanece fora de escopo (D1.4) — nenhuma Fase do Sprint 2 depende dela.
+- `evidenceReference` permanece fora de escopo (D1.4) — nenhuma Fase do Sprint 2 depende dela; nenhuma
+  tela desta Fase 2 usa linguagem de "comprovação documental" sem esse campo.
+- Nenhuma tela nova de UI foi criada na Fase 2 (listagem/detalhe ficaram como API); a semântica de copy
+  "Confirmado pelo Jurídico" (D1.4) segue pendente para quando houver UI dedicada.
 
 ---
 
-**Fase 1 implementada.** Fases 2, 3 e 4 continuam não iniciadas — implementação de qualquer uma delas
+**Fases 1 e 2 implementadas.** Fases 3 e 4 continuam não iniciadas — implementação de qualquer uma delas
 requer nova autorização explícita.
