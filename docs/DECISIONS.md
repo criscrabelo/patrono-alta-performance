@@ -212,6 +212,66 @@ comportamento anterior exatamente.
 
 ---
 
+### ADR-007 — `/api/compliance` restrito a alçada global (`allowed(user,'*',...)`) até existir módulo/dono de negócio próprio
+
+**Contexto.** A revisão de segurança (rodada 3) encontrou `GET`/`POST /api/compliance` sem NENHUMA
+verificação de permissão — qualquer usuário autenticado lia e criava entradas de compliance. Não existe
+um módulo `compliance` em `ROLES`, nem um dono de negócio definido para essa central de governança
+(MASTER_HANDOFF trata compliance como parte da "Governança transversal", §3, ainda não implementada como
+módulo próprio no MVP).
+
+**Decisão.** Restringir `/api/compliance` (GET e POST) a `allowed(user,'*',...)` — hoje, apenas
+`diretoria`/`administrador` — no mesmo padrão já usado para `/api/audit` e `/api/auth/requests`, em vez
+de inventar um módulo de negócio (`ROLES.*.modules` incluindo `'compliance'`) sem que essa decisão de
+escopo tenha sido pedida ou definida pelo negócio.
+
+**Justificativa.** Deny-by-default: na ausência de uma decisão de negócio sobre quem deve acessar
+compliance, a opção mais segura é restringir a quem já tem alçada plena, não inventar uma política
+intermediária. Reaproveita um padrão de autorização já existente no código (`allowed(user,'*',...)`),
+em vez de criar um mecanismo novo.
+
+**Consequência.** Nenhum papel departamental (lider/colaborador) acessa `/api/compliance` até que uma
+decisão de negócio defina o módulo/escopo correto — o que pode ser mais restritivo do que o desenho
+final pretendido pela v1.3 quando o domínio de Compliance for implementado como módulo. Registrado aqui
+para revisão quando essa decisão de negócio existir.
+
+**Reversível.** Sim — trocar `allowed(user,'*',...)` por `allowed(user,'compliance',...)` e adicionar o
+módulo a `ROLES` é a única mudança necessária.
+
+---
+
+### ADR-008 — Bloquear o motor genérico de entidades para tipos cuja fonte oficial é o Monday, reaproveitando `LEGAL_MODULES`
+
+**Contexto.** A revisão de segurança (rodada 3, item 4) apontou que `POST`/`PATCH`/`DELETE`/`restore`
+em `/api/entities/:type` permitiam criar, alterar, arquivar ou restaurar registros de tipos como
+`processos`, `notificacoes`, `distratos` etc. — cuja fonte oficial durante o MVP é o Monday (§9 da
+v1.3: "Monday é System of Record operacional/transitório para os boards integrados"). Isso permitiria
+fabricar um "processo" local falso e depois relacioná-lo a um Legal Deadline, contornando a fonte
+oficial.
+
+**Decisão.** `rejectIfMondaySourced(type)` bloqueia POST/PATCH/DELETE/restore genéricos para qualquer
+tipo presente em `LEGAL_MODULES` — o mesmo `Set` já usado como allowlist de `/api/legal/:module` (rodada
+2), que por definição já é exatamente "os boards cuja fonte é o Monday". Apenas GET (leitura) permanece
+liberado para esses tipos via o motor genérico. Nenhuma modelagem de "overlay" (campos próprios da
+Patrono sobre o snapshot da fonte) foi criada nesta rodada — não há hoje nenhum caso de uso que exija
+guardar dado próprio sobre um registro Monday-sourced fora do que a sincronização já grava.
+
+**Justificativa.** Reaproveita uma estrutura de dados já correta (`LEGAL_MODULES`) em vez de duplicar a
+lista de tipos Monday-sourced em um novo `Set`, reduzindo o risco de as duas listas divergirem no
+futuro. Bloquear por completo (em vez de permitir PATCH parcial em "campos não protegidos") é a opção
+mais simples e segura dado que, hoje, não existe nenhum campo desses tipos que a Patrono precise editar
+independentemente do Monday.
+
+**Consequência.** Se um caso de uso futuro exigir que a Patrono grave um campo próprio sobre um
+registro Monday-sourced (por exemplo, uma observação interna sobre um processo), será necessário
+desenhar um modelo de overlay (registro próprio relacionado por `externalId`/`id`, nunca sobrescrevendo
+o snapshot da fonte) — não implementado nesta rodada, pois nenhum caso de uso concreto o exige ainda.
+
+**Reversível.** Sim — é uma checagem isolada (`rejectIfMondaySourced`) nas quatro rotas; removê-la
+restaura o comportamento anterior.
+
+---
+
 ## 3. Conflitos entre código existente e MASTER_HANDOFF v1.3
 
 | Conflito | Onde | Resolução aplicada |

@@ -282,10 +282,28 @@ test('scoped() nega registro sem department nem classificação global (deny-by-
   assert.equal(scoped({ role: 'diretoria' }, {}), true, 'diretoria/administrador continuam com acesso total');
 });
 
-test('scoped() prepara o gate de empresa/SPE sem inventar cadastro (inerte até existir companyId/speId real)', () => {
-  const user = { role: 'colaborador', department: 'Jurídico' };
-  assert.equal(scoped(user, { department: 'Jurídico', companyId: 'empresa-x' }), true, 'sem companyId no usuário, o gate de empresa não se aplica ainda');
-  assert.equal(scoped({ ...user, companyId: 'empresa-y' }, { department: 'Jurídico', companyId: 'empresa-x' }), false, 'quando ambos os lados carregam companyId, precisam coincidir');
+// P0 corrigido (rodada 3, item 2): a versão anterior deste teste validava exatamente o bug relatado no
+// review — "sem companyId no usuário, o gate de empresa não se aplica" era a ausência de
+// deny-by-default. Registro com companyId agora exige que o usuário tenha o MESMO companyId; ausência
+// ou valor diferente nega. Continua inerte em produção (nenhum registro/usuário real carrega esses
+// campos hoje — docs/PERMISSIONS.md), testado aqui apenas com dados sintéticos.
+test('scoped() aplica deny-by-default em companyId/speId — corrigido (rodada 3, item 2)', () => {
+  const semEmpresa = { role: 'colaborador', department: 'Jurídico' };
+  const empresaX = { role: 'colaborador', department: 'Jurídico', companyId: 'empresa-x' };
+  const empresaY = { role: 'colaborador', department: 'Jurídico', companyId: 'empresa-y' };
+  const registroDaEmpresaX = { department: 'Jurídico', companyId: 'empresa-x' };
+  assert.equal(scoped(semEmpresa, registroDaEmpresaX), false, 'usuário SEM companyId deve ser negado quando o registro tem companyId (deny-by-default)');
+  assert.equal(scoped(empresaY, registroDaEmpresaX), false, 'usuário com companyId DIFERENTE deve ser negado');
+  assert.equal(scoped(empresaX, registroDaEmpresaX), true, 'usuário com o MESMO companyId é permitido');
+  assert.equal(scoped({ role: 'diretoria' }, registroDaEmpresaX), true, 'papel global ignora companyId, como qualquer outro escopo');
+
+  const semSpe = { role: 'colaborador', department: 'Jurídico' };
+  const speA = { role: 'colaborador', department: 'Jurídico', speId: 'spe-a' };
+  const speB = { role: 'colaborador', department: 'Jurídico', speId: 'spe-b' };
+  const registroDaSpeA = { department: 'Jurídico', speId: 'spe-a' };
+  assert.equal(scoped(semSpe, registroDaSpeA), false, 'mesma lógica de deny-by-default para speId: ausência nega');
+  assert.equal(scoped(speB, registroDaSpeA), false, 'speId diferente nega');
+  assert.equal(scoped(speA, registroDaSpeA), true, 'speId igual permite');
 });
 
 test('sanitizeEntityInput remove campos controlados pelo servidor e o escopo departamental do input do cliente', () => {
@@ -293,18 +311,28 @@ test('sanitizeEntityInput remove campos controlados pelo servidor e o escopo dep
     id: 'id-forjado', version: 999, createdAt: '2000-01-01', createdBy: 'Invasor',
     updatedAt: '2000-01-01', updatedBy: 'Invasor', deletedAt: '2000-01-01', deletedBy: 'Invasor',
     source: 'monday', externalId: 'ext-forjado', boardId: 'board-x', boardName: 'Board X', syncedAt: '2000-01-01',
-    department: 'TI', title: 'Registro legítimo'
+    department: 'TI', scopeType: 'global', companyId: 'empresa-forjada', speId: 'spe-forjada', title: 'Registro legítimo'
   };
   const colaborador = { role: 'colaborador', department: 'Jurídico' };
   const sanitizedForColaborador = sanitizeEntityInput(maliciousInput, colaborador);
   for (const field of PROTECTED_ENTITY_FIELDS) assert.equal(sanitizedForColaborador[field], undefined, `campo protegido "${field}" não pode sobreviver à sanitização`);
   assert.equal(sanitizedForColaborador.department, undefined, 'papel com escopo departamental não escolhe o department do próprio registro');
+  // P0 corrigido (rodada 3, item 1): scopeType/companyId/speId também precisam ser removidos do input
+  // de um papel departamental — do contrário, um colaborador poderia enviar scopeType:'global' e
+  // tornar o próprio registro visível a qualquer departamento (scoped() libera scopeType:'global'
+  // incondicionalmente), ou atribuir a si mesmo um companyId/speId sem ter essa alçada.
+  assert.equal(sanitizedForColaborador.scopeType, undefined, 'papel departamental não pode se autodeclarar scopeType:global');
+  assert.equal(sanitizedForColaborador.companyId, undefined, 'papel departamental não escolhe companyId');
+  assert.equal(sanitizedForColaborador.speId, undefined, 'papel departamental não escolhe speId');
   assert.equal(sanitizedForColaborador.title, 'Registro legítimo', 'campos de negócio legítimos permanecem intactos');
 
   const diretoria = { role: 'diretoria', department: null };
   const sanitizedForDiretoria = sanitizeEntityInput(maliciousInput, diretoria);
   for (const field of PROTECTED_ENTITY_FIELDS) assert.equal(sanitizedForDiretoria[field], undefined);
   assert.equal(sanitizedForDiretoria.department, 'TI', 'papel com escopo global (*) pode escolher o department do registro que está criando/gerindo');
+  assert.equal(sanitizedForDiretoria.scopeType, 'global', 'papel com escopo global é o único expressamente autorizado a tornar um registro global');
+  assert.equal(sanitizedForDiretoria.companyId, 'empresa-forjada');
+  assert.equal(sanitizedForDiretoria.speId, 'spe-forjada');
 });
 
 test('LEGAL_MODULES é uma allowlist fechada — nenhum tipo de entidade genérica vaza por /api/legal/:module', () => {

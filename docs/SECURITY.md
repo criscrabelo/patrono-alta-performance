@@ -4,6 +4,68 @@
 > Histórico detalhado de correções anteriores a esta execução: `docs/SEGURANCA-CORRECOES.md` (mantido
 > como registro histórico, não reescrito).
 
+## Auditoria completa de rotas do `handler` (rodada 3, item 5)
+
+Toda rota de `server.js` foi revisada individualmente. "Autenticado" significa que passou por
+`getUser(req)` (sessão válida, não expirada, sem challenge pendente); rotas antes desse gate estão
+marcadas explicitamente. "Escopo" descreve a granularidade de acesso ao **registro**, além do
+módulo/ação.
+
+| Rota | Método | Módulo/ação exigido | Escopo necessário | Controle implementado |
+|---|---|---|---|---|
+| `/`, `/status`, `/app.js` e demais estáticos, `/logo-coevo*.png`, `/assets/*` | GET | Nenhum | N/A — arquivo estático público | Sem dado de negócio; conteúdo idêntico para qualquer visitante |
+| `/api/auth/login` | POST | Nenhum (pré-autenticação) | N/A | Senha comparada por hash; emite challenge ou token conforme `requireMfa()` |
+| `/api/auth/mfa` | POST | Nenhum (pré-autenticação) | N/A | Valida challenge + código; challenge nunca aceito como token |
+| `/api/auth/register` | POST | Nenhum (pré-autenticação) | N/A | Cria apenas uma solicitação pendente; nenhum acesso concedido sem aprovação humana |
+| `/api/health` | GET | Nenhum | N/A | Só booleans não sensíveis (persistência, migração, ambiente) — aceitável público (item 7 da rodada 3) |
+| `/api/monday/status` | GET | `juridico`/`read` | — | **Corrigido (rodada 3):** antes do gate de sessão; agora autenticado + módulo, payload reduzido (sem `boards`) |
+| `/api/monday/schedule` | GET | `juridico`/`read` | — | **Corrigido (rodada 3):** idem; `lastRuns` sem `requestedBy`/`error` |
+| `/api/me` | GET | Nenhum além de autenticado | Próprio usuário | Retorna apenas os dados do próprio usuário autenticado |
+| `/api/projects` | GET | `projetos`/`read` | `scoped()` por projeto (filtro) | Presente desde a rodada 1 |
+| `/api/projects/:id` | GET | `projetos`/`read` | `scoped()` por projeto | Presente |
+| `/api/projects/:id/governance` | PATCH | `projetos`/`update` | `scoped()` por projeto | Presente; campos de governança validados contra `store.users` |
+| `/api/projects/:id/target` | PUT | `projectPermissions().changeTarget` | `scoped()` por projeto | **Corrigido (rodada 3, item 5):** faltava `scoped()` — só existência do projeto era checada |
+| `/api/projects/:id/approval-rules` | PUT | `projectPermissions().changeApprovalRule` | `scoped()` por projeto | **Corrigido (rodada 3)** |
+| `/api/projects/:id/recovery-settings` | PUT | `projectPermissions().changeApprovalRule` | `scoped()` por projeto | **Corrigido (rodada 3):** rota nem buscava o projeto antes, só a configuração por `projectId` |
+| `/api/projects/:id/(actions\|milestones\|risks\|internalizations\|negotiations\|legal-treatments\|management-items)` | POST | `projectPermissions().edit` | `scoped()` por projeto | Presente |
+| `.../:itemId` | PATCH | `.edit` (+ `.internalizeProcess` para internalizations) | `scoped()` por projeto + item | Presente; campos protegidos (`id`,`projectId`,`createdAt`,`createdBy`,`deletedAt`,`deletedBy`) removidos do input |
+| `.../:itemId` | DELETE | `.archive` | `scoped()` por projeto | **Corrigido (rodada 3):** faltava buscar/validar o projeto — só o item era checado |
+| `.../:itemId/restore` | POST | `.restore` | `scoped()` por projeto | **Corrigido (rodada 3)** |
+| `management-items/:itemId/(approve\|reject\|escalate)` | POST | `.approveAgreement` (exceto escalate) | `scoped()` por projeto | **Corrigido (rodada 3)** |
+| `/api/dashboards` | GET | `allowed(user, definition.module)` por item | Filtro ad hoc por `departmentId` | Presente (lógica própria, não `scoped()`) |
+| `/api/dashboards/:id` | GET | `allowed(user, definition.module)` | Filtro ad hoc por `departmentId` | Presente |
+| `/api/dashboard-preferences/:id` | GET/PUT | Nenhum além de autenticado | Chaveado por `userId` (preferência própria) | Presente — não há registro cross-user possível |
+| `/api/monday/test` | POST | `juridico`/`read` | — | Presente |
+| `/api/legal/:module` | GET | `juridico`/`read` | `LEGAL_MODULES` allowlist + `scoped()` por registro | **Corrigido (rodada 2):** allowlist fechada evita indexar `collection()` com valor cru da URL |
+| `/api/monday/sync` | POST | `juridico`/`create` | — | Presente; preserva último valor válido em falha |
+| `/api/auth/requests` | GET | `*`/`approve` | — | Presente (só diretoria/administrador) |
+| `/api/auth/requests/:id/approve` | POST | `*`/`approve` | — | Presente |
+| `/api/dashboard` | GET | `central`/`read` | Filtro departamental (`visibleDepartments`) + agenda `scoped()` | **Corrigido (rodada 3, item 6):** antes devolvia `store.departments`/`store.agenda` inteiros a qualquer papel com módulo `central` (todos) |
+| `/api/audit` | GET | `*`/`read` | — | Presente (só diretoria/administrador) |
+| `/api/compliance` | GET | `*`/`read` | — | **Corrigido (rodada 3, item 5):** não tinha NENHUM gate antes |
+| `/api/compliance` | POST | `*`/`create` | — | **Corrigido (rodada 3):** sem gate antes; mass assignment de `id` corrigido |
+| `/api/agenda` | GET | Nenhum módulo específico | `scoped()` por registro | **Corrigido (rodada 3, item 5):** vazava agenda de todos os departamentos |
+| `/api/agenda` | POST | `agenda`/`create` | `department` forçado ao do usuário (não-global) | **Corrigido (rodada 3):** mass assignment de `id`/`department` corrigido |
+| `/api/departments` | GET | Nenhum módulo específico | Filtro departamental (`visibleDepartments`) | **Corrigido (rodada 3, item 5):** vazava orçamento de todos os departamentos |
+| `/api/committees` | GET | `comites`/`read` | — | **Corrigido (rodada 3, item 5):** sem gate antes — colaborador (sem módulo `comites`) conseguia ler |
+| `/api/committees` | POST | `comites`/`create` | — | Mass assignment de `id`/`createdBy`/`createdAt` corrigido (rodada 3) |
+| `/api/presentations/validate` \| `/export` | POST | `comites`/`export` | — | Presente; export audita e bloqueia combinação Diretoria+Compartilhável |
+| `/api/entities/:type` | GET | `entityModule(type)` + `allowed(...,'read')` | `scoped()` por registro | Presente (rodada 1) |
+| `/api/entities/:type` | POST | idem (`'create'`) | `scoped()` no processo relacionado (Legal Deadline) | **Corrigido (rodada 2/3):** sanitização de campos protegidos e de escopo; bloqueado para tipos Monday-sourced (`rejectIfMondaySourced`); Legal Deadline valida processo (existência + fonte `monday` + escopo) |
+| `/api/entities/:type/:id` | PATCH | idem (`'update'`) | `scoped()` por registro | **Corrigido (rodada 3):** revalida invariantes de Legal Deadline sobre o estado candidato; bloqueado para tipos Monday-sourced |
+| `/api/entities/:type/:id` | DELETE | idem (`'archive'`) | `scoped()` por registro | Bloqueado para tipos Monday-sourced (rodada 3) |
+| `/api/entities/:type/:id/restore` | POST | idem (`'restore'`) | `scoped()` por registro | Bloqueado para tipos Monday-sourced (rodada 3) |
+| `/api/budgets/import/preview` | POST | Nenhum | N/A | Só faz parsing/validação do CSV enviado pelo próprio requisitante; não persiste nem lê dado de terceiros |
+| `/api/budgets/import/commit` | POST | `orcamento`/`create` | — | Presente; checksum + deduplicação |
+| `/api/backup` \| `/backup/restore` | POST | `*`/`approve` | — | Presente (só diretoria/administrador) |
+
+**Mass assignment fora de `/api/entities`** (item 5) — revisado em toda a superfície da API. Os três
+pontos onde um objeto era construído com `{id: crypto.randomUUID(), ...input}` ou
+`{...input, id: ...}` na ordem errada (permitindo que `input.id` vencesse) foram corrigidos:
+`/api/agenda` (POST), `/api/committees` (POST) e `/api/compliance` (POST). Em todos os três, os campos
+controlados pelo servidor agora são removidos explicitamente do input (`delete clean.id` etc.) **e**
+atribuídos depois do spread, como defesa em profundidade.
+
 ## P0 — Segredos fora do frontend (verificado nesta execução)
 
 Requisito não negociável da v1.3: "nenhum token, API key, client secret ou credencial pode residir no
@@ -47,6 +109,29 @@ completo em `docs/PERMISSIONS.md`; resumo:
 Todos os itens 1–8 cobertos por teste automatizado — unitário (`tests/core.test.js`) e/ou de integração
 HTTP real (`tests/security-integration.test.js`, servidor real, requisições reais, status HTTP
 verificado — não apenas presença de texto no código-fonte).
+
+## P0 corrigidos — rodada 3 (segunda revisão de segurança pós-review, antes do merge)
+
+Uma segunda revisão apontou que a rodada 2 ainda deixava lacunas — inclusive uma na própria correção da
+rodada 2 (item 9 abaixo). Detalhe completo em `docs/PERMISSIONS.md`; resumo:
+
+| # | Item | Antes | Depois |
+|---|---|---|---|
+| 9 | `sanitizeEntityInput()` protegia `department`, mas não `scopeType`/`companyId`/`speId` | Um papel departamental podia enviar `scopeType:'global'` no corpo da requisição e tornar o próprio registro globalmente visível (`scoped()` libera qualquer registro com `scopeType:'global'`) | Os quatro campos de escopo (`department`, `scopeType`, `companyId`, `speId`) só são preservados do input para papéis com escopo global (`scopes:['*']`) |
+| 10 | `scoped()` só negava companyId/speId quando **ambos os lados** carregavam o campo | Um usuário SEM `companyId` conseguia acessar um registro COM `companyId`, porque a condição de negação nunca era avaliada quando o usuário não tinha o campo — isso não é deny-by-default | Registro com `companyId` exige que o usuário tenha o MESMO valor; ausência ou mismatch nega. Mesma regra para `speId` |
+| 11 | Legal Deadline não era revalidado no PATCH | Um PATCH podia esvaziar `origin`/`date`, ou trocar `processId` para um processo inexistente/fora de escopo, sem nenhuma checagem | PATCH revalida as mesmas invariantes da criação sobre o estado candidato (item atual + input sanitizado) antes de gravar |
+| 12 | Motor genérico de entidades permitia criar/alterar/arquivar/restaurar tipos cuja fonte oficial é o Monday (`processos`, `notificacoes`, `distratos`, `honorarios`, `unidades`, `compraVenda`, `transferenciaIntermediaria`, `honorariosJudiciais`) | Um usuário podia fabricar um "processo" local falso (sem `source:'monday'`) e depois relacioná-lo a um Legal Deadline, contornando a fonte oficial | `rejectIfMondaySourced()` bloqueia POST/PATCH/DELETE/restore para esses tipos (só GET permanece); Legal Deadline também passou a exigir `relatedProcess.source === 'monday'`, como defesa em profundidade |
+| 13 | `/api/monday/status` e `/api/monday/schedule` ficavam ANTES do gate de sessão | Qualquer visitante sem autenticação lia IDs/nomes internos de boards e, em `/schedule`, histórico de sincronização com nomes de solicitantes e mensagens de erro | Movidas para depois do gate de sessão, com `allowed(user,'juridico','read')`; payload reduzido (sem `boards`; `lastRuns` sem `requestedBy`/`error`) |
+| 14 | `/api/dashboard` devolvia `store.departments` (com orçamento completo) e `store.agenda` inteiros para qualquer papel com módulo `central` (todos os papéis) | Colaborador do Jurídico lia orçamento e agenda da TI, e vice-versa | Filtra por `visibleDepartments()`/`scoped()` antes de montar a resposta; papel global continua vendo o consolidado |
+| 15 | `/api/departments` e `/api/agenda` (GET) sem nenhum filtro de escopo | Mesma classe de vazamento do item 14, em rotas próprias | Ambas agora filtram por escopo departamental |
+| 16 | `/api/committees` (GET) e `/api/compliance` (GET/POST) sem nenhum gate de permissão | Colaborador (sem módulo `comites`) lia comitês; qualquer usuário autenticado lia e criava entradas de compliance | `/committees` exige `allowed(user,'comites',...)`; `/compliance` restrito a `allowed(user,'*',...)` (diretoria/administrador) até existir um módulo/dono de negócio próprio — decisão registrada em `docs/DECISIONS.md` |
+| 17 | Mass assignment em `/api/agenda`, `/api/committees`, `/api/compliance` (POST) | `{id: crypto.randomUUID(), ...input}` ou `{...input, id: ...}` na ordem que permitia ao cliente sobrescrever `id` (e, em compliance, indiretamente `responsible`/`createdAt` embora esses já viessem depois) | Campos protegidos removidos explicitamente do input e reatribuídos depois do spread, nas três rotas |
+| 18 | Rotas críticas de projeto (`target`, `approval-rules`, `recovery-settings`, `DELETE`/`restore` de sub-recurso, decisão de `management-items`) não verificavam `scoped(user,project)` | `projectPermissions(user)` concede `edit`/`changeTarget`/etc. por **usuário**, não por projeto — com mais de um projeto, um papel departamental de um projeto podia alterar/arquivar sub-recursos de um projeto de outro departamento | Todas as seis rotas passaram a buscar o projeto pai e checar `scoped(user,project)` antes de qualquer ação |
+
+Todos os itens 9–18 cobertos por teste automatizado — unitário (`tests/core.test.js`) e de integração
+HTTP real (`tests/security-integration.test.js`), incluindo dados sintéticos para os cenários de
+companyId/speId e um segundo projeto sintético em departamento diferente para os testes de escopo de
+projeto.
 
 ## P0 conhecidos e ainda abertos — classificados por o que bloqueiam
 

@@ -29,25 +29,26 @@ própria v1.3 define o escopo por fase.
 Suíte: `npm test` (Node.js test runner nativo — cada arquivo `*.test.js` roda em processo próprio).
 
 ```
-tests 48
-pass 48
+tests 58
+pass 58
 fail 0
 ```
 
-**`tests/core.test.js` (32 testes)** — unitários e estruturais:
-- 26 testes preexistentes, preservados sem alteração de comportamento.
-- 6 novos: `entityModule()` allowlist/deny-by-default (incluindo `__proto__`); MFA por papel
-  independente da flag do cadastro; `scoped()` deny-by-default (sem `department` → negado, exceto
-  `scopeType:'global'`); `scoped()` como fundação inerte de empresa/SPE; `sanitizeEntityInput()` remove
-  campos protegidos e restringe `department` por escopo do papel; `LEGAL_MODULES` como allowlist
-  fechada.
+**`tests/core.test.js` (32 testes)** — unitários e estruturais. Além dos 26 preexistentes e dos 6 da
+rodada 2, dois testes foram **atualizados na rodada 3** porque a versão anterior validava exatamente o
+comportamento incorreto que a rodada 3 corrigiu:
+- `scoped()` — companyId/speId agora testados com deny-by-default real (ausência ou mismatch nega,
+  mesmo com dados sintéticos), substituindo a asserção anterior que esperava o bug ("sem companyId no
+  usuário, o gate não se aplica").
+- `sanitizeEntityInput()` — passou a cobrir também `scopeType`/`companyId`/`speId`, confirmando que só
+  papel com escopo global pode defini-los.
 
-**`tests/security-integration.test.js` (16 testes, novo nesta rodada)** — HTTP real: sobe um servidor
+**`tests/security-integration.test.js` (26 testes)** — HTTP real: sobe um servidor
 `http.createServer(handler)` de verdade, isolado em diretório de dados temporário
-(`COEVO_DATA_DIR`), injeta usuários de teste com e-mails próprios, e faz requisições HTTP reais,
-verificando status e corpo da resposta — não presença de texto no código-fonte. Cobre exatamente os 10
-cenários mínimos pedidos na revisão de segurança:
+(`COEVO_DATA_DIR`), injeta usuários e dados de teste, e faz requisições HTTP reais, verificando status e
+corpo da resposta — não presença de texto no código-fonte.
 
+Os 16 testes da rodada 2 cobrem:
 1. Usuário sem nenhum módulo autorizado → `403` em rota jurídica.
 2. `GET /api/legal/:module` com módulo fora da allowlist → `404`, sem criar a coleção incidentalmente.
 3. Tipo desconhecido em `/api/entities/:type` → `403` em todos os verbos (GET/POST/PATCH/DELETE/restore).
@@ -58,6 +59,22 @@ cenários mínimos pedidos na revisão de segurança:
 8. Legal Deadline com `processId` inexistente ou fora do escopo do usuário → `422`/`403`, nunca criado.
 9. Papel privilegiado sempre passa por desafio de MFA (nunca recebe token direto no login).
 10. Challenge de MFA não funciona como token; `__proto__`/`constructor` permanecem bloqueados em todos os verbos.
+
+Os 10 testes novos da **rodada 3** cobrem:
+1. Papel departamental não consegue definir `scopeType:'global'` via POST nem PATCH.
+2. `companyId` nega por ausência mesmo com `department` correspondente (deny-by-default sintético).
+3. PATCH de Legal Deadline não quebra invariantes (processo inexistente, fora de escopo, `origin`/`date`
+   vazios, PATCH válido preservando integridade — 5 sub-casos em um teste).
+4. Processo do Monday não pode ser criado/alterado/arquivado/restaurado pela API genérica; Legal
+   Deadline rejeita processo sem `source:'monday'`.
+5. Agenda não vaza entre departamentos; mass assignment de `id`/`department` bloqueado.
+6. Comitês (`GET`) exigem módulo `comites`; Compliance (`GET`/`POST`) restrito a alçada global; mass
+   assignment de `id` bloqueado em ambos.
+7. `/api/dashboard` filtra departamentos/agenda por escopo; papel global continua vendo o consolidado.
+8. Rotas críticas de projeto (`target`/`approval-rules`/`recovery-settings`/`DELETE`/`restore`/decisão
+   de gestão) negam por escopo de projeto, com um segundo projeto sintético em outro departamento.
+9. `/api/monday/status` e `/api/monday/schedule` exigem autenticação; payload não expõe
+   `boards`/`requestedBy`/mensagens de erro.
 
 ## Catálogo Global de Regressão (§30)
 
@@ -83,6 +100,9 @@ seção "CI", para o detalhamento.
 
 1. Slice mínimo de Agenda/Atenção consumindo `legalDeadlines` (Sprint 2), habilitando os casos 2 e 6.
 2. Granularidade de status de frescor por registro individual (não apenas por execução de sincronização).
-3. Quando `restore` for concedido a algum papel departamental (hoje só diretoria/administrador têm essa
-   ação), adicionar teste HTTP real do caminho "restore fora do escopo → 404" — ver nota em
-   `tests/security-integration.test.js`.
+3. Quando `restore`/`archive`/`approveAgreement` de projeto forem concedidos a algum papel
+   departamental (hoje só diretoria/administrador têm essas ações, e ambos têm escopo global), revisar
+   os testes de integração para incluir um cenário real de "permissão concedida, mas escopo nega" — ver
+   nota em `tests/security-integration.test.js`.
+4. Decisão de negócio sobre o módulo/escopo definitivo de Compliance (ADR-007, `docs/DECISIONS.md`) —
+   hoje restrito a alçada global por deny-by-default, não por desenho final pretendido.

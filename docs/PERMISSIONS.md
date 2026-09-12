@@ -1,10 +1,11 @@
 # PERMISSIONS.md — Autorização e Escopo
 
 > Regras oficiais: `docs/MASTER_HANDOFF.md` §11 (Permissões e Segurança), §26 (P0), Anexo A (regra 13).
-> **Revisão da rodada 2** (correções de segurança pós-review): este documento foi reescrito para
+> **Revisão da rodada 2 e 3** (correções de segurança pós-review): este documento é mantido para
 > refletir exatamente o que está implementado hoje — nada aqui é declarado "protegido" sem verificação
 > funcional correspondente em `tests/security-integration.test.js` (HTTP real) ou `tests/core.test.js`
-> (unitário).
+> (unitário). Ver `docs/SECURITY.md`, "Auditoria completa de rotas", para a tabela rota-a-rota exigida
+> pela rodada 3.
 
 ## Princípio inegociável
 
@@ -36,10 +37,17 @@ nesta execução — documentado aqui para não ser confundido com uma falha do 
    módulo aceitos nessa rota específica. Corrigido na rodada 2 (ver abaixo).
 4. **Tipo de entidade genérica** (`/api/entities/:type` apenas) — `entityModule(type)`, com
    **deny-by-default**: qualquer `type` fora de `ENTITY_MODULE_MAP` é negado.
-5. **Escopo do registro** — `scoped(user, item)`, reescrito na rodada 2 para deny-by-default (ver
-   abaixo).
-6. **Campos do corpo da requisição** — `sanitizeEntityInput(input, user)`, adicionado na rodada 2, para
-   que o cliente não possa controlar campos estruturais/de auditoria/de escopo do próprio registro.
+5. **Fonte Monday-sourced** (`/api/entities/:type` em POST/PATCH/DELETE/restore) — `rejectIfMondaySourced(type)`,
+   adicionado na rodada 3: bloqueia qualquer mutação genérica sobre tipos cuja fonte oficial é o Monday
+   (mesmo conjunto de `LEGAL_MODULES`). Só GET permanece liberado para esses tipos.
+6. **Escopo do registro** — `scoped(user, item)`, reescrito na rodada 2 (deny-by-default por
+   department) e novamente na rodada 3 (deny-by-default por companyId/speId) — ver abaixo.
+7. **Campos do corpo da requisição** — `sanitizeEntityInput(input, user)`, adicionado na rodada 2 e
+   estendido na rodada 3, para que o cliente não possa controlar campos estruturais, de auditoria ou de
+   **escopo** (`department`, `scopeType`, `companyId`, `speId`) do próprio registro.
+8. **Revalidação de invariantes de domínio no PATCH** (Legal Deadline) — adicionado na rodada 3:
+   `validateLegalDeadline()` roda também no PATCH, sobre o estado candidato (registro atual + input),
+   não apenas na criação.
 
 ## P0 corrigidos — rodada 1 (auditoria inicial)
 
@@ -107,11 +115,14 @@ inclusive um líder de TI, já que `lider` inclui `juridico` em seus módulos (v
    próprios registros (já que eles não carregavam `department` nenhum).
 
 ```js
+// Versão atual (rodada 3) — ver seção "P0 corrigidos — rodada 3" abaixo para o que mudou desde a
+// rodada 2 (a versão anterior deste bloco de código, mostrada aqui na rodada 2, tinha um bug de
+// deny-by-default em companyId/speId, corrigido a seguir).
 function scoped(user, item) {
   if (user.role === 'diretoria' || user.role === 'administrador') return true;
   if (item.scopeType === 'global') return true;
-  if (item.companyId && user.companyId && item.companyId !== user.companyId) return false;
-  if (item.speId && user.speId && item.speId !== user.speId) return false;
+  if (item.companyId && (!user.companyId || user.companyId !== item.companyId)) return false;
+  if (item.speId && (!user.speId || user.speId !== item.speId)) return false;
   if (!item.department) return false;
   return item.department === user.department;
 }
@@ -123,21 +134,85 @@ direto contra um registro do Jurídico retorna `404` para um usuário de TI — 
 Catálogo Global de Regressão (§30): "TI tenta acessar Jurídico → bloqueado no backend". Testado em
 `tests/security-integration.test.js`.
 
-### 4. Empresa/SPE — fundação preparada, **não implementada**
+### 4. Empresa/SPE — fundação preparada, **não implementada** (lógica corrigida na rodada 3)
 
 A v1.3 exige autorização por ambiente/empresa/SPE/módulo/registro. **Nenhum cadastro de empresa ou SPE
-existe neste repositório** — não foram inventados IDs. O que existe, e é **inerte** até que esse
-cadastro seja criado:
+existe neste repositório** — não foram inventados IDs. O que existe, e é **inerte em produção** até que
+esse cadastro seja criado (nenhum registro real ou usuário carrega `companyId`/`speId` hoje):
 
-- `scoped()` verifica `item.companyId`/`user.companyId` e `item.speId`/`user.speId` **somente quando
-  ambos os lados carregam esses campos** — hoje nenhum registro nem usuário os carrega, então essas
-  linhas nunca são exercitadas em produção. É a fundação do gate, não o gate em operação.
+- `scoped()` verifica `item.companyId` contra `user.companyId`, e `item.speId` contra `user.speId`, com
+  **deny-by-default**: se o registro tem `companyId`, o usuário PRECISA ter o mesmo valor — ausência do
+  campo no usuário ou valor diferente nega o acesso. Mesma regra para `speId`. (**Corrigido na rodada
+  3** — a versão da rodada 2 só negava quando AMBOS os lados carregavam o campo, o que não é
+  deny-by-default: um usuário sem `companyId` conseguia acessar um registro COM `companyId`, porque a
+  condição de negação nunca chegava a ser avaliada. Ver `docs/DECISIONS.md`, seção de conflitos, e
+  `docs/SECURITY.md`, item 10 da rodada 3.)
+- Apenas papel com escopo global (`diretoria`/`administrador`) pode **definir** `companyId`/`speId`/
+  `scopeType` em um registro — `sanitizeEntityInput()` remove esses três campos do input de qualquer
+  outro papel (rodada 3, item 1 — ver abaixo).
 - Não existe endpoint, tela ou cadastro para criar/gerenciar empresas ou SPEs.
 - Não existe conceito de "Ambiente" (Visão Executiva / Jurídico / TI / VELKOR) como filtro de
   autorização de primeira classe — hoje a segregação real em produção é por `department` (Jurídico, TI).
 
 **Isto NÃO deve ser lido como "empresa/SPE já está protegido"** — está preparado para não exigir nova
-revisão de `scoped()` quando o cadastro existir, e nada além disso.
+revisão de `scoped()` quando o cadastro existir, e nada além disso. Testado com dados sintéticos em
+`tests/core.test.js` e `tests/security-integration.test.js` (nenhuma empresa/SPE real foi inventada).
+
+## P0 corrigidos — rodada 3 (segunda revisão de segurança pós-review)
+
+### 1. `scopeType`/`companyId`/`speId` podiam ser forjados por papel departamental
+
+`sanitizeEntityInput()` já protegia `department`, mas não os outros três campos de escopo. Como
+`scoped()` libera incondicionalmente qualquer registro com `scopeType:'global'`, um papel departamental
+podia se autodeclarar globalmente visível apenas enviando esse campo no `POST`/`PATCH`. Corrigido:
+`sanitizeEntityInput()` remove `department`, `scopeType`, `companyId` e `speId` do input de qualquer
+papel sem escopo global (`scopes:['*']`). Testado em runtime (`tests/security-integration.test.js`):
+um colaborador tenta `scopeType:'global'` na criação e no PATCH; nenhuma das duas tentativas altera o
+registro, confirmado consultando-o com um token de outro departamento.
+
+### 2. `scoped()` não era deny-by-default para `companyId`/`speId`
+
+Ver código corrigido na seção "4. Empresa/SPE" acima e item 10 de `docs/SECURITY.md`.
+
+### 3. Legal Deadline não era revalidado no PATCH
+
+A criação já exigia `processId`/`origin`/`date` e validava o processo relacionado; o PATCH não repetia
+nenhuma dessas checagens — um `PATCH` podia esvaziar `origin`, esvaziar `date`, ou trocar `processId`
+para um processo inexistente ou fora de escopo, sem ser barrado. Corrigido: `validateLegalDeadline()`
+roda também no PATCH, sobre o **estado candidato** (`{...item, ...sanitized}`), garantindo que a
+invariante vale para o registro como ficaria após a atualização, não apenas para os campos enviados
+nesta requisição específica. Testado em runtime: 4 tentativas inválidas (processo inexistente, processo
+fora de escopo, `origin` vazio, `date` vazio) são rejeitadas sem alterar o registro nem incrementar sua
+versão; um PATCH válido continua funcionando normalmente.
+
+### 4. Motor genérico de entidades permitia mutação de tipos Monday-sourced
+
+Ver ADR-008 em `docs/DECISIONS.md`. `rejectIfMondaySourced(type)` bloqueia POST/PATCH/DELETE/restore
+para qualquer tipo em `LEGAL_MODULES`; Legal Deadline passou também a exigir
+`relatedProcess.source === 'monday'` como defesa em profundidade. Testado em runtime: as quatro
+mutações retornam 403 contra `processos`; GET continua funcionando; um "processo" sintético sem
+`source:'monday'` (inserido diretamente na store de teste, simulando um caminho fora da API) é
+corretamente rejeitado por Legal Deadline.
+
+### 5–7. Rotas sem gate de módulo/escopo: `/api/monday/status`, `/api/monday/schedule`, `/api/dashboard`, `/api/departments`, `/api/agenda`, `/api/committees`, `/api/compliance`
+
+Ver a tabela completa "Auditoria completa de rotas" em `docs/SECURITY.md` — cobre todas as rotas
+revisadas nesta rodada, incluindo as sete acima (que passaram por gate de sessão/módulo/escopo
+adicionado ou corrigido) e confirma quais rotas já estavam corretas.
+
+### 8. Rotas críticas de projeto sem `scoped(user,project)`
+
+`projectPermissions(user)` concede `edit`/`changeTarget`/`changeApprovalRule`/`archive`/`restore`/
+`approveAgreement` por **usuário**, não por projeto — com mais de um projeto no sistema, um papel
+departamental de um projeto podia, em tese, alterar/arquivar sub-recursos de um projeto de **outro**
+departamento, pois seis rotas não verificavam `scoped(user,project)`: `PUT .../target`,
+`PUT .../approval-rules`, `PUT .../recovery-settings`, `DELETE .../:itemId`,
+`POST .../:itemId/restore` e `POST management-items/:itemId/(approve|reject|escalate)`. Todas as seis
+passaram a buscar o projeto pai e checar `scoped(user,project)` antes de qualquer leitura/gravação
+adicional. Testado em runtime com um segundo projeto sintético (departamento diferente do único projeto
+real do seed): as seis rotas negam contra o projeto de outro departamento (com 404, já que o gate de
+escopo vem antes do gate de ação — nunca revela se a ação seria permitida); o ciclo legítimo no projeto
+real do piloto continua funcionando.
 
 ## P0 corrigido — MFA por papel, não por flag do cadastro (item D, rodada 1)
 
@@ -153,18 +228,24 @@ flag `user.mfa` do cadastro. Testado em runtime: login como papel privilegiado s
   anteriormente pela gestão, `docs/SEGURANCA-CORRECOES.md` item J).
 - **Escopo por empreendimento/classificação/documento** — `scoped()` cobre departamento e (de forma
   inerte) empresa/SPE; escopo mais granular por empreendimento/documento/campo do §11 ainda não existe.
-- **`restore` só existe para `diretoria`/`administrador`** — não há papel departamental capaz de
-  restaurar, então o gate de escopo em `restore` (`scoped(user, item)`, presente no código) não é
-  exercitável via HTTP hoje; coberto apenas por teste unitário direto de `scoped()`.
+- **`restore`, `archive` e `approveAgreement` de projeto só existem para `diretoria`/`administrador`**
+  — não há papel departamental capaz dessas ações em nenhum projeto, e ambos os papéis elevados têm
+  escopo global (`scoped()` sempre `true`). Logo, o gate `scoped(user,project)` adicionado nessas rotas
+  na rodada 3 não é exercitável via HTTP como um "permissão concedida, mas escopo nega" — é coberto por
+  teste unitário direto de `scoped()`, e por teste de integração que confirma a negação por escopo
+  (antes mesmo de chegar ao gate de ação) para o papel departamental que tenta essas rotas.
+- **`/api/compliance` restrito a alçada global** (rodada 3, ADR-007) — nenhum papel departamental
+  acessa até existir uma decisão de negócio sobre o módulo/escopo correto de Compliance.
 
 ## Catálogo de testes de permissão
 
-- **Unitários** (`tests/core.test.js`): `scoped()`, `sanitizeEntityInput()`, `entityModule()`,
-  `LEGAL_MODULES`, `requireMfa()` — chamadas diretas às funções exportadas, sem passar por HTTP.
+- **Unitários** (`tests/core.test.js`): `scoped()` (incluindo os casos sintéticos de companyId/speId),
+  `sanitizeEntityInput()` (incluindo scopeType/companyId/speId), `entityModule()`, `LEGAL_MODULES`,
+  `requireMfa()` — chamadas diretas às funções exportadas, sem passar por HTTP.
 - **Integração HTTP real** (`tests/security-integration.test.js`): sobe um servidor HTTP real com o
-  `handler` exportado, injeta usuários de teste com e-mails próprios (contornando a limitação conhecida
-  de e-mail duplicado do seed), e faz requisições reais, verificando status HTTP e corpo da resposta —
-  não apenas presença de texto no código-fonte.
+  `handler` exportado, injeta usuários e dados de teste (incluindo um segundo projeto sintético em
+  outro departamento e registros com companyId/speId sintéticos), e faz requisições reais, verificando
+  status HTTP e corpo da resposta — não apenas presença de texto no código-fonte.
 
 Ver `docs/QA.md` para o mapeamento completo contra os 10 casos obrigatórios do MVP/Piloto Jurídico
 (§30) e o resultado da execução mais recente.

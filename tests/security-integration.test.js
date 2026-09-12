@@ -23,6 +23,7 @@ process.env.NODE_ENV = 'test';
 delete process.env.MONDAY_TOKEN; // garante que nenhuma chamada real ao Monday seja tentada nos testes
 
 const { handler, readStore, writeStore } = require('../server');
+const { PROJECT_ID } = require('../project-service');
 
 let server;
 let baseUrl;
@@ -31,7 +32,9 @@ const EMAILS = {
   liderJuridico: 'lider.juridico.teste@coevo.local',
   colaboradorJuridico: 'colaborador.juridico.teste@coevo.local',
   liderTi: 'lider.ti.teste@coevo.local',
-  semAcesso: 'sem.acesso.teste@coevo.local'
+  semAcesso: 'sem.acesso.teste@coevo.local',
+  // Usuário seed já existente (não criado por este teste) com papel diretoria — alçada global.
+  diretoria: 'juridico@coevoconstrutora.com.br'
 };
 
 test.before(async () => {
@@ -55,8 +58,24 @@ test.before(async () => {
     // board Monday sincronizado hoje é do Jurídico (normalizeMondayItem), mas a validação de
     // integridade relacional de Legal Deadline precisa negar corretamente mesmo que uma fonte futura
     // introduza processos de outro departamento.
-    { id: 'proc-ti-teste', source: 'monday', externalId: 'ext-2', module: 'processos', department: 'TI', title: 'Processo TI de Teste (sintético, apenas para o teste)', deletedAt: null }
+    { id: 'proc-ti-teste', source: 'monday', externalId: 'ext-2', module: 'processos', department: 'TI', title: 'Processo TI de Teste (sintético, apenas para o teste)', deletedAt: null },
+    // Registro SEM source:'monday' — simula um "processo local falso" que teria sido inserido por
+    // algum caminho fora do pipeline de sincronização (o generic CRUD já bloqueia isso via
+    // rejectIfMondaySourced, mas este registro sintético prova que, mesmo que existisse, Legal
+    // Deadline ainda o rejeitaria por não vir da fonte autorizada — defesa em profundidade, item 4).
+    { id: 'proc-falso-nao-monday', source: 'manual', module: 'processos', department: 'Jurídico', title: 'Processo forjado (sem fonte Monday)', deletedAt: null }
   ];
+  // Segundo projeto, em departamento diferente do único projeto real do seed (Jurídico) — usado
+  // apenas para provar que as rotas de sub-recurso de projeto (target/approval-rules/recovery-
+  // settings/DELETE/restore/management-items) respeitam scoped(user,project) e não apenas a
+  // existência do projectId (item 5/8 da rodada 3).
+  if (!Array.isArray(store.projects)) store.projects = [];
+  store.projects.push({ id: 'prj-ti-teste', slug: 'projeto-ti-teste', name: 'Projeto TI de Teste', departmentId: 'dep-ti', department: 'TI', category: 'Operacional', objectiveId: null, ownerUserId: null, coOwnerUserIds: [], managerUserId: null, sponsorUserId: null, status: 'Planejamento', progress: null, targetId: null, nextMilestoneId: null, version: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+  // Agenda de dois departamentos distintos, para provar que GET /api/agenda filtra por escopo.
+  store.agenda.push(
+    { id: 'evt-teste-juridico', title: 'Evento Jurídico de Teste', department: 'Jurídico', date: '2026-12-01', priority: 'Alta', status: 'Agendado', owner: 'Líder Jurídico Teste', classification: 'Interno' },
+    { id: 'evt-teste-ti', title: 'Evento TI de Teste', department: 'TI', date: '2026-12-02', priority: 'Média', status: 'Agendado', owner: 'Líder TI Teste', classification: 'Interno' }
+  );
   writeStore(store);
 
   server = http.createServer(handler);
@@ -294,5 +313,216 @@ test('[HTTP] __proto__ e outros tipos arbitrários são negados em todos os verb
     assert.equal((await api('PATCH', `/api/entities/${type}/qualquer-id`, { token, json: { title: 'x' } })).status, 403);
     assert.equal((await api('DELETE', `/api/entities/${type}/qualquer-id`, { token })).status, 403);
     assert.equal((await api('POST', `/api/entities/${type}/qualquer-id/restore`, { token })).status, 403);
+  }
+});
+
+// ============================================================================================
+// Rodada 3 de correções de segurança — testes de integração HTTP real
+// ============================================================================================
+
+// --- Item 1: scopeType/companyId/speId não podem ser forjados por papel departamental ---
+
+test('[HTTP] usuário departamental não consegue definir scopeType:"global" via POST nem PATCH', async () => {
+  const token = await loginAs(EMAILS.colaboradorJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Teste scopeType', date: '2026-12-15', scopeType: 'global' } });
+  assert.equal(created.status, 201);
+  assert.notEqual(created.body.scopeType, 'global', 'scopeType não pode ser definido por papel departamental na criação');
+
+  const patch = await api('PATCH', `/api/entities/legalDeadlines/${created.body.id}`, { token, json: { scopeType: 'global' } });
+  assert.equal(patch.status, 200);
+  assert.notEqual(patch.body.scopeType, 'global', 'scopeType não pode ser definido por papel departamental via PATCH');
+
+  // Prova que a tentativa de forjar scopeType:'global' realmente não teve efeito: TI continua sem
+  // enxergar o registro do Jurídico.
+  const tokenTi = await loginAs(EMAILS.liderTi);
+  const listAsTi = await api('GET', '/api/entities/legalDeadlines', { token: tokenTi });
+  assert.ok(!listAsTi.body.some(item => item.id === created.body.id), 'registro não pode ter se tornado global via forjamento de scopeType');
+});
+
+// --- Item 2: companyId/speId negam por ausência ou mismatch, mesmo com department correspondente ---
+
+test('[HTTP] companyId nega por ausência mesmo quando department coincide (deny-by-default)', async () => {
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  const created = await api('POST', '/api/entities/legalDeadlines', {
+    token: tokenDiretoria,
+    json: { processId: 'proc-juridico-teste', origin: 'Teste companyId', date: '2026-12-20', department: 'Jurídico', companyId: 'empresa-sintetica-x' }
+  });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.companyId, 'empresa-sintetica-x', 'papel global pode definir companyId — fundação para quando o cadastro de empresa existir');
+
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const listAsJuridico = await api('GET', '/api/entities/legalDeadlines', { token: tokenJuridico });
+  assert.ok(!listAsJuridico.body.some(item => item.id === created.body.id), 'usuário sem companyId deve ser negado quando o registro tem companyId, mesmo com department igual');
+});
+
+// --- Item 3: PATCH de Legal Deadline preserva as invariantes de criação ---
+
+test('[HTTP] PATCH de Legal Deadline não permite quebrar as invariantes de origem/processo/data', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem válida', date: '2026-12-25' } });
+  assert.equal(created.status, 201);
+  const id = created.body.id;
+
+  assert.equal((await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { processId: 'processo-que-nao-existe' } })).status, 422, 'PATCH com processId inexistente deve ser rejeitado');
+  assert.equal((await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { processId: 'proc-ti-teste' } })).status, 403, 'PATCH com processo fora do escopo deve ser rejeitado');
+  assert.equal((await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { origin: '' } })).status, 422, 'PATCH apagando origin deve ser rejeitado');
+  assert.equal((await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { date: '' } })).status, 422, 'PATCH apagando date deve ser rejeitado');
+
+  const afterInvalidAttempts = await api('GET', '/api/entities/legalDeadlines', { token });
+  const record = afterInvalidAttempts.body.find(item => item.id === id);
+  assert.equal(record.processId, 'proc-juridico-teste');
+  assert.equal(record.origin, 'Origem válida');
+  assert.equal(record.date, '2026-12-25');
+  assert.equal(record.version, 1, 'nenhuma tentativa inválida deve ter alterado o registro nem incrementado a versão');
+
+  const patchValido = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { origin: 'Origem atualizada legitimamente' } });
+  assert.equal(patchValido.status, 200, 'PATCH válido preservando a integridade continua funcionando');
+  assert.equal(patchValido.body.origin, 'Origem atualizada legitimamente');
+  assert.equal(patchValido.body.version, 2);
+});
+
+// --- Item 4: tipos mantidos pelo Monday não podem ser criados/alterados pela API genérica ---
+
+test('[HTTP] processo do Monday não pode ser criado/alterado/arquivado/restaurado pela API genérica; Legal Deadline rejeita processo não-Monday', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  assert.equal((await api('POST', '/api/entities/processos', { token, json: { title: 'Processo local falso' } })).status, 403, 'não pode criar uma cópia concorrente de processos pela API genérica');
+  assert.equal((await api('PATCH', '/api/entities/processos/proc-juridico-teste', { token, json: { title: 'Alterado indevidamente' } })).status, 403);
+  assert.equal((await api('DELETE', '/api/entities/processos/proc-juridico-teste', { token })).status, 403);
+  assert.equal((await api('POST', '/api/entities/processos/proc-juridico-teste/restore', { token })).status, 403);
+  assert.equal((await api('GET', '/api/entities/processos', { token })).status, 200, 'leitura via generic engine continua permitida');
+
+  // Mesmo que um "processo" sem source:'monday' existisse na store (defesa em profundidade — não deve
+  // ser alcançável na prática, já que o bloqueio acima impede sua criação pela API), Legal Deadline
+  // ainda o rejeita.
+  const deadlineFalso = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-falso-nao-monday', origin: 'Teste', date: '2026-12-01' } });
+  assert.equal(deadlineFalso.status, 422, 'Legal Deadline só pode apontar para processo da fonte autorizada (Monday)');
+});
+
+// --- Item 5: Agenda não vaza entre departamentos; mass assignment de id bloqueado ---
+
+test('[HTTP] agenda não vaza entre departamentos e ignora id/department forjados no corpo', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const listJuridico = await api('GET', '/api/agenda', { token: tokenJuridico });
+  assert.equal(listJuridico.status, 200);
+  assert.ok(listJuridico.body.some(item => item.id === 'evt-teste-juridico'));
+  assert.ok(!listJuridico.body.some(item => item.id === 'evt-teste-ti'), 'agenda de TI não pode vazar para o Jurídico');
+
+  const tokenTi = await loginAs(EMAILS.liderTi);
+  const listTi = await api('GET', '/api/agenda', { token: tokenTi });
+  assert.ok(listTi.body.some(item => item.id === 'evt-teste-ti'));
+  assert.ok(!listTi.body.some(item => item.id === 'evt-teste-juridico'), 'agenda do Jurídico não pode vazar para a TI');
+
+  const created = await api('POST', '/api/agenda', { token: tokenJuridico, json: { id: 'id-forjado', department: 'TI', title: 'Evento forjado' } });
+  assert.equal(created.status, 201);
+  assert.notEqual(created.body.id, 'id-forjado');
+  assert.equal(created.body.department, 'Jurídico', 'department é definido pelo servidor a partir do usuário, não pelo corpo da requisição');
+});
+
+// --- Item 6: Comitês e Compliance exigem a permissão correspondente ---
+
+test('[HTTP] comitês e compliance não ficam acessíveis sem a permissão correspondente', async () => {
+  const tokenColaborador = await loginAs(EMAILS.colaboradorJuridico); // colaborador não tem módulo 'comites'
+  assert.equal((await api('GET', '/api/committees', { token: tokenColaborador })).status, 403);
+
+  const tokenLider = await loginAs(EMAILS.liderJuridico); // lider TEM módulo 'comites'
+  assert.equal((await api('GET', '/api/committees', { token: tokenLider })).status, 200);
+
+  // compliance: nenhum papel departamental tem alçada hoje (deny-by-default até existir módulo próprio)
+  assert.equal((await api('GET', '/api/compliance', { token: tokenLider })).status, 403);
+  assert.equal((await api('POST', '/api/compliance', { token: tokenLider, json: { title: 'x' } })).status, 403);
+
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  assert.equal((await api('GET', '/api/compliance', { token: tokenDiretoria })).status, 200);
+  const createdCompliance = await api('POST', '/api/compliance', { token: tokenDiretoria, json: { id: 'id-forjado', title: 'Entrada legítima' } });
+  assert.equal(createdCompliance.status, 201);
+  assert.notEqual(createdCompliance.body.id, 'id-forjado', 'mass assignment de id continua bloqueado em /api/compliance');
+});
+
+test('[HTTP] mass assignment continua bloqueado em /api/committees', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/committees', { token, json: { id: 'id-forjado', createdBy: 'Invasor', createdAt: '2000-01-01T00:00:00.000Z', title: 'Comitê legítimo' } });
+  assert.equal(created.status, 201);
+  assert.notEqual(created.body.id, 'id-forjado');
+  assert.notEqual(created.body.createdBy, 'Invasor');
+  assert.notEqual(created.body.createdAt, '2000-01-01T00:00:00.000Z');
+});
+
+// --- Item 7: /api/dashboard não expõe departamento/agenda/orçamento fora de escopo ---
+
+test('[HTTP] /api/dashboard filtra departamentos/agenda por escopo; papel global continua vendo o consolidado', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const dashJuridico = await api('GET', '/api/dashboard', { token: tokenJuridico });
+  assert.equal(dashJuridico.status, 200);
+  assert.ok(dashJuridico.body.departments.length > 0 && dashJuridico.body.departments.every(d => d.name === 'Jurídico'), 'papel departamental só vê o próprio departamento em /api/dashboard');
+  assert.ok(!dashJuridico.body.upcoming.some(item => item.department === 'TI'), 'agenda de TI não pode aparecer no dashboard do Jurídico');
+
+  const tokenTi = await loginAs(EMAILS.liderTi);
+  const dashTi = await api('GET', '/api/dashboard', { token: tokenTi });
+  assert.ok(dashTi.body.departments.length > 0 && dashTi.body.departments.every(d => d.name === 'TI'));
+
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  const dashDiretoria = await api('GET', '/api/dashboard', { token: tokenDiretoria });
+  assert.ok(dashDiretoria.body.departments.some(d => d.name === 'Jurídico') && dashDiretoria.body.departments.some(d => d.name === 'TI'), 'papel global continua vendo o consolidado de todos os departamentos');
+});
+
+// --- Item 8: rotas críticas de projeto respeitam scoped(project) ---
+
+test('[HTTP] target/approval-rules/recovery-settings/DELETE/restore/management-items respeitam o escopo do projeto', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+
+  assert.equal((await api('PUT', '/api/projects/prj-ti-teste/target', { token: tokenJuridico, json: { indicatorId: 'qualquer' } })).status, 404, 'meta de projeto de outro departamento não pode ser alterada');
+  assert.equal((await api('PUT', '/api/projects/prj-ti-teste/approval-rules', { token: tokenJuridico, json: { levels: [] } })).status, 404, 'alçadas de projeto de outro departamento não podem ser alteradas');
+  assert.equal((await api('PUT', '/api/projects/prj-ti-teste/recovery-settings', { token: tokenJuridico, json: {} })).status, 404, 'parâmetros de recuperação de projeto de outro departamento não podem ser alterados');
+
+  // Semeia diretamente uma ação e uma pendência de gestão pertencentes ao projeto sintético de TI —
+  // usado para provar que DELETE/restore/decisão de gestão negam por escopo do PROJETO, não apenas
+  // por módulo/ação genérica (que o papel Jurídico de fato possui).
+  const store = readStore();
+  store.projectActions.push({ id: 'pac-ti-sintetica', projectId: 'prj-ti-teste', title: 'Ação TI sintética', status: 'Não iniciado', createdAt: new Date().toISOString(), createdBy: 'seed' });
+  store.projectManagementItems.push({ id: 'pmi-ti-sintetica', projectId: 'prj-ti-teste', title: 'Pendência TI sintética', status: 'Pendente', createdAt: new Date().toISOString(), createdBy: 'seed' });
+  writeStore(store);
+
+  // O gate de escopo (scoped(user,project)) foi colocado ANTES do gate de ação nestas rotas — então
+  // lider Jurídico recebe 404 (não 403) ao mirar o projeto de outro departamento, mesmo sem ter a ação
+  // 'archive'/'approveAgreement' em nenhum projeto: o escopo nega primeiro, e nunca revela se a ação
+  // seria ou não permitida caso o projeto fosse do departamento certo — consistente com "erro de
+  // permissão nunca revela existência de registro restrito" (MASTER_HANDOFF §11).
+  assert.equal((await api('DELETE', '/api/projects/prj-ti-teste/actions/pac-ti-sintetica', { token: tokenJuridico })).status, 404, 'projeto de outro departamento nega por escopo antes mesmo de avaliar a ação');
+  assert.equal((await api('POST', '/api/projects/prj-ti-teste/management-items/pmi-ti-sintetica/approve', { token: tokenJuridico })).status, 404, 'idem para decisão de gestão em projeto de outro departamento');
+
+  // Nota sobre cobertura: `archive`/`restore`/`approveAgreement` em projectPermissions são `elevated`
+  // (diretoria/administrador), e ambos os papéis elevados têm escopo global (scoped() sempre true) —
+  // não existe hoje, no RBAC real, um papel com essa ação que NÃO tenha também escopo global. Por isso,
+  // confirmar que a rota "funciona de verdade" para quem tem a ação só é possível com diretoria — que,
+  // por ter escopo global, consegue operar em qualquer projeto (esperado e correto).
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  assert.equal((await api('DELETE', '/api/projects/prj-ti-teste/actions/pac-ti-sintetica', { token: tokenDiretoria })).status, 200);
+  assert.equal((await api('POST', '/api/projects/prj-ti-teste/management-items/pmi-ti-sintetica/approve', { token: tokenDiretoria })).status, 200);
+
+  // Ciclo legítimo no projeto real do piloto, com o papel que de fato tem create/edit nele (lider
+  // Jurídico) para criar, e diretoria (única com archive/restore) para arquivar/restaurar.
+  const created = await api('POST', `/api/projects/${PROJECT_ID}/actions`, { token: tokenJuridico, json: { title: 'Ação de teste rodada 3' } });
+  assert.equal(created.status, 201);
+  const actionId = created.body.id;
+  assert.equal((await api('DELETE', `/api/projects/${PROJECT_ID}/actions/${actionId}`, { token: tokenDiretoria })).status, 200);
+  assert.equal((await api('POST', `/api/projects/${PROJECT_ID}/actions/${actionId}/restore`, { token: tokenDiretoria })).status, 200);
+});
+
+// --- Item 9: metadados internos do Monday exigem autenticação e não vazam solicitantes/erros ---
+
+test('[HTTP] /api/monday/status e /api/monday/schedule exigem autenticação e não vazam metadados internos', async () => {
+  assert.equal((await api('GET', '/api/monday/status')).status, 401, 'status do Monday não pode ser lido sem autenticação');
+  assert.equal((await api('GET', '/api/monday/schedule')).status, 401, 'schedule do Monday não pode ser lido sem autenticação');
+
+  const token = await loginAs(EMAILS.liderJuridico);
+  const statusAuth = await api('GET', '/api/monday/status', { token });
+  assert.equal(statusAuth.status, 200);
+  assert.equal(statusAuth.body.boards, undefined, 'lista de boards com IDs/nomes internos não deve mais ser exposta, nem para usuário autenticado');
+
+  const scheduleAuth = await api('GET', '/api/monday/schedule', { token });
+  assert.equal(scheduleAuth.status, 200);
+  for (const run of scheduleAuth.body.lastRuns || []) {
+    assert.equal(run.requestedBy, undefined, 'nome de solicitante não deve ser exposto');
+    for (const m of run.modules || []) assert.equal(m.error, undefined, 'mensagem de erro de sincronização não deve ser exposta');
   }
 });
