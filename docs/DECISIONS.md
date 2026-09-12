@@ -272,6 +272,36 @@ restaura o comportamento anterior.
 
 ---
 
+### ADR-009 — `requiresGlobalScope` como declaração explícita de autorização em dashboards corporativos sensíveis
+
+**Contexto.** A revisão de segurança (rodada 4, item 1) apontou que o dashboard `executive` (Visão
+Executiva/Centro de Comando) usava `module:'central'` como único controle de acesso — mas `central` é
+módulo comum a `lider` e `colaborador`, não exclusivo de alçada executiva/global. Um papel departamental
+alcançava dados consolidados de todos os departamentos (orçamento, agenda, decisões de comitê).
+
+**Decisão.** Adicionar um campo de declaração explícita, `requiresGlobalScope: true`, à definição do
+dashboard `executive` em `dashboard-model.js`. `server.js` verifica esse campo (via `hasGlobalScope(user)`)
+tanto na listagem (`GET /api/dashboards`, através de `visibleDashboards()`) quanto no detalhe
+(`GET /api/dashboards/:id`), além do gate de módulo já existente. Não foi criado um novo módulo em
+`ROLES`, nem alterado o comportamento dos demais dashboards corporativos (`budget`, `strategy`,
+`projects`, `risks`), que já são adequadamente restritos pelos próprios módulos (`orcamento`/
+`estrategia`/`projetos`/`central`) — a revisão apontou apenas o `executive` como P0 concreto.
+
+**Justificativa.** Um campo de declaração explícita, versionado junto da definição do dashboard, é mais
+robusto do que uma lista externa de exceções (que poderia ser esquecida ao criar um dashboard novo) —
+qualquer dashboard `scope:'corporate'` que precise de alçada global no futuro declara isso no próprio
+objeto, tornando o requisito visível no mesmo lugar onde o dashboard é definido.
+
+**Consequência.** Dashboards corporativos futuros que não declararem `requiresGlobalScope` continuam
+dependendo apenas do gate de módulo — cabe a quem adicionar um novo dashboard sensível avaliar se precisa
+dessa flag. Isso não é deny-by-default automático para todo `scope:'corporate'` futuro; é uma
+convenção que exige atenção humana ao adicionar um dashboard novo, documentada em `docs/PERMISSIONS.md`.
+
+**Reversível.** Sim — remover a flag e as duas checagens em `server.js` restaura o comportamento
+anterior (módulo como único controle).
+
+---
+
 ## 3. Conflitos entre código existente e MASTER_HANDOFF v1.3
 
 | Conflito | Onde | Resolução aplicada |

@@ -8,8 +8,14 @@ const WIDGET_TYPES = Object.freeze([
 const widget = (id, type, title, options = {}) => ({ id, type, title, width: options.width || 'third', ...options });
 
 const DASHBOARD_DEFINITIONS = Object.freeze({
+  // P0 corrigido (rodada 4, item 1): 'central' também pertence a lider/colaborador (ver ROLES em
+  // server.js), então usar apenas `allowed(user, module)` deixava a Visão Executiva/Centro de Comando
+  // alcançável por qualquer papel departamental. `requiresGlobalScope:true` é a declaração explícita
+  // de autorização exigida para dashboards corporativos sensíveis — verificado em server.js além do
+  // gate de módulo, tanto na listagem (visibleDashboards) quanto no detalhe (GET /api/dashboards/:id).
+  // Dashboards futuros com `scope:'corporate'` devem declarar `requiresGlobalScope` explicitamente.
   executive: {
-    id: 'executive', name: 'Painel Executivo COEVO', scope: 'corporate', module: 'central',
+    id: 'executive', name: 'Painel Executivo COEVO', scope: 'corporate', module: 'central', requiresGlobalScope: true,
     filters: ['competence', 'period', 'departments'],
     widgets: [
       widget('department-summary', 'DepartmentSummary', 'Resumo por departamento', { width: 'full' }),
@@ -60,6 +66,8 @@ const DASHBOARD_DEFINITIONS = Object.freeze({
 });
 
 function getDashboardDefinition(id) { return DASHBOARD_DEFINITIONS[id] || null; }
-function visibleDashboards(user, allowed) { return Object.values(DASHBOARD_DEFINITIONS).filter(item => allowed(user, item.module)); }
+// hasGlobalScope é opcional para não quebrar chamadores existentes que só verificam módulo, mas
+// server.js sempre o passa — sem ele, um dashboard `requiresGlobalScope` seria listado indevidamente.
+function visibleDashboards(user, allowed, hasGlobalScope) { return Object.values(DASHBOARD_DEFINITIONS).filter(item => allowed(user, item.module) && (!item.requiresGlobalScope || (typeof hasGlobalScope === 'function' && hasGlobalScope(user)))); }
 
 module.exports = { WIDGET_TYPES, DASHBOARD_DEFINITIONS, getDashboardDefinition, visibleDashboards };

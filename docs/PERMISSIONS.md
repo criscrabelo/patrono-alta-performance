@@ -214,6 +214,76 @@ real do seed): as seis rotas negam contra o projeto de outro departamento (com 4
 escopo vem antes do gate de ação — nunca revela se a ação seria permitida); o ciclo legítimo no projeto
 real do piloto continua funcionando.
 
+## P0 corrigidos — rodada 4 (rodada de fechamento)
+
+### 1. Visão Executiva acessível a papéis não executivos
+
+`executive` usava `module:'central'`, que é módulo comum a `lider`/`colaborador` — qualquer papel
+departamental abria o Centro de Comando e via `financeRows`/`agenda`/`committees` de **todos** os
+departamentos consolidados (mesma classe de vazamento do item 14/rodada 3, mas pelo dashboard, não pela
+rota `/api/dashboard`). Corrigido com um campo de declaração explícita: `requiresGlobalScope:true` em
+`dashboard-model.js`, verificado em `server.js` (`GET /api/dashboards` e `GET /api/dashboards/:id`) além
+do gate de módulo. Dashboards futuros com `scope:'corporate'` devem declarar essa flag quando a
+consolidação exigir alçada global — não é automático por `scope:'corporate'` sozinho (orçamento
+corporativo, por exemplo, já é adequadamente restrito pelo módulo `orcamento`, que colaborador não tem).
+
+### 2. Mass assignment em sub-recursos de projeto
+
+`{id:newId(prefix), ..., ...input}` no POST (e uma sanitização incompleta no PATCH, que já protegia
+`id`/`projectId`/`createdAt`/`createdBy`/`deletedAt`/`deletedBy` mas não os campos de escopo) permitiam
+ao cliente forjar identidade e vínculo com outro projeto. `sanitizeProjectItemInput()` (mesmo padrão de
+`sanitizeEntityInput`) resolve os dois verbos.
+
+### 3. Comitês sem escopo de registro
+
+O gate de módulo (rodada 3) não bastava — `GET /api/committees` devolvia a coleção inteira, e o POST não
+usava `sanitizeEntityInput()`, deixando `scopeType`/`companyId`/`speId` forjáveis. Corrigido reaproveitando
+`scoped()` e `sanitizeEntityInput()` já usados no resto da plataforma — nenhum mecanismo de escopo novo.
+
+### 4. Agenda com escopo global forjável
+
+A sanitização própria do POST de agenda (rodada 3) só cobria `department`. Substituída por
+`sanitizeEntityInput()`, que cobre os quatro campos de escopo de forma uniforme com todo o resto do
+sistema.
+
+### 5. Importação de orçamento sem escopo por linha
+
+`POST /api/budgets/import/commit` não validava o `department` de cada linha do CSV contra o escopo do
+usuário. Papel não-global agora precisa ter **todas** as linhas do próprio departamento — qualquer linha
+de outro departamento bloqueia a importação inteira (nunca parcial). Papel global segue sem restrição.
+
+### 6. Legal Deadline — validação apenas de truthiness
+
+`origin`/`date` só eram testados como truthy. `origin:'   '` e `date:'banana'`/`'2026-99-99'`/vazio
+passavam. Corrigido: `origin` exige `trim()` não vazio; `date` validado por `isValidCivilDate()`
+(regex `YYYY-MM-DD` + reconstrução via `Date.UTC`, rejeitando datas inexistentes no calendário).
+Nenhum cálculo de prazo foi implementado — apenas validação do valor informado, como pedido.
+
+### 7. Legal Deadline sem herança de escopo do processo
+
+Um prazo podia ter `department`/`companyId`/`speId`/`scopeType` inconsistentes com o Legal Process ao
+qual está subordinado — inclusive quando criado por diretoria/administrador, que têm alçada para operar
+em qualquer escopo, mas não para criar uma relação estruturalmente inconsistente. `validateLegalDeadline()`
+agora herda os quatro campos do processo relacionado, sobrescrevendo qualquer valor enviado pelo
+cliente — em POST e em PATCH (inclusive ao trocar `processId` para um processo de outro escopo).
+
+### 8. `projectPermissions()` não é deny-by-default para papel desconhecido
+
+Rotas de sub-recurso de projeto dependiam só de `projectPermissions(user)`, cujas regras (`create:
+user.role !== 'colaborador' || ...`, `edit: elevated || user.department === 'Jurídico'`) concedem
+capacidade por **exclusão** — um `role` que não seja `'colaborador'` e não seja reconhecido em `ROLES`
+ainda assim recebe `create:true`; um `department === 'Jurídico'` sem nenhum papel reconhecido ainda
+recebe `edit:true`. Corrigido adicionando `allowed(user,'projetos',ação)` — que usa `ROLES` e nega por
+padrão para papel desconhecido — em todas as 8 rotas de sub-recurso que só usavam `projectPermissions()`
+(as 3 rotas de topo, `GET /api/projects` e `GET /api/projects/:id`, já tinham esse gate desde a rodada 1).
+
+### 9. `/api/agenda` e `/api/departments` protegidos só por autenticação
+
+Nenhuma das duas tinha gate de módulo — apenas sessão válida (+ escopo do registro, no caso da agenda).
+`/api/departments` carrega o objeto `budget` completo por departamento. Corrigido reaproveitando módulos
+já existentes: `agenda` (mesmo módulo já usado no POST) e `orcamento` (mesmo módulo do dashboard e da
+importação de orçamento) — nenhum módulo novo foi criado em `ROLES`.
+
 ## P0 corrigido — MFA por papel, não por flag do cadastro (item D, rodada 1)
 
 `requireMfa(user)` depende exclusivamente do papel (`diretoria`, `administrador`, `lider`), nunca da

@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, seed, parseCsv, hash, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput } = require('../server');
+const { ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, seed, parseCsv, hash, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, isValidCivilDate, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS } = require('../server');
 const { WIDGET_TYPES, DASHBOARD_DEFINITIONS } = require('../dashboard-model');
 const { dashboardPayload } = require('../dashboard-service');
 const { PROJECT_ID, ensureProjectStore, projectDetail, projectPermissions } = require('../project-service');
@@ -341,4 +341,42 @@ test('LEGAL_MODULES é uma allowlist fechada — nenhum tipo de entidade genéri
   assert.equal(LEGAL_MODULES.has('legalDeadlines'), false, 'entidades do motor genérico não são expostas por /api/legal/:module');
   assert.equal(LEGAL_MODULES.has('__proto__'), false);
   assert.equal(LEGAL_MODULES.has('financeiroBancario'), false);
+});
+
+// --- Rodada 4: validação semântica de Legal Deadline e sanitização de sub-recursos de projeto ---
+
+test('isValidCivilDate rejeita valores não-truthy triviais: texto arbitrário, espaços, mês/dia inválidos', () => {
+  assert.equal(isValidCivilDate('2026-12-01'), true, 'data civil real deve ser aceita');
+  assert.equal(isValidCivilDate('2026-02-29'), false, '2026 não é bissexto — 29/02 não existe');
+  assert.equal(isValidCivilDate('2024-02-29'), true, '2024 é bissexto — 29/02 existe');
+  assert.equal(isValidCivilDate('banana'), false);
+  assert.equal(isValidCivilDate(' '), false);
+  assert.equal(isValidCivilDate(''), false);
+  assert.equal(isValidCivilDate('2026-99-99'), false, 'mês/dia fora do calendário');
+  assert.equal(isValidCivilDate('2026-13-01'), false, 'mês 13 não existe');
+  assert.equal(isValidCivilDate('2026-04-31'), false, 'abril não tem dia 31');
+  assert.equal(isValidCivilDate(null), false);
+  assert.equal(isValidCivilDate(undefined), false);
+  assert.equal(isValidCivilDate(20261201), false, 'precisa ser string, não número');
+});
+
+test('sanitizeProjectItemInput remove campos controlados pelo servidor de sub-recursos de projeto', () => {
+  const maliciousInput = {
+    id: 'id-forjado', projectId: 'outro-projeto-forjado', createdAt: '2000-01-01T00:00:00.000Z', createdBy: 'Invasor',
+    deletedAt: '2000-01-01T00:00:00.000Z', deletedBy: 'Invasor', departmentId: 'dep-forjado', scopeType: 'global',
+    companyId: 'empresa-forjada', speId: 'spe-forjada', title: 'Ação legítima'
+  };
+  const colaborador = { role: 'colaborador', department: 'Jurídico' };
+  const sanitized = sanitizeProjectItemInput(maliciousInput, colaborador);
+  for (const field of PROTECTED_PROJECT_ITEM_FIELDS) assert.equal(sanitized[field], undefined, `campo protegido "${field}" não pode sobreviver à sanitização`);
+  assert.equal(sanitized.departmentId, undefined);
+  assert.equal(sanitized.scopeType, undefined);
+  assert.equal(sanitized.companyId, undefined);
+  assert.equal(sanitized.speId, undefined);
+  assert.equal(sanitized.title, 'Ação legítima', 'campo de negócio legítimo permanece intacto');
+
+  const diretoria = { role: 'diretoria', department: null };
+  const sanitizedGlobal = sanitizeProjectItemInput(maliciousInput, diretoria);
+  for (const field of PROTECTED_PROJECT_ITEM_FIELDS) assert.equal(sanitizedGlobal[field], undefined);
+  assert.equal(sanitizedGlobal.departmentId, 'dep-forjado', 'papel com escopo global pode escolher o departamento do sub-recurso');
 });

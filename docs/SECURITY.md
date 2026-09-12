@@ -24,16 +24,16 @@ módulo/ação.
 | `/api/projects` | GET | `projetos`/`read` | `scoped()` por projeto (filtro) | Presente desde a rodada 1 |
 | `/api/projects/:id` | GET | `projetos`/`read` | `scoped()` por projeto | Presente |
 | `/api/projects/:id/governance` | PATCH | `projetos`/`update` | `scoped()` por projeto | Presente; campos de governança validados contra `store.users` |
-| `/api/projects/:id/target` | PUT | `projectPermissions().changeTarget` | `scoped()` por projeto | **Corrigido (rodada 3, item 5):** faltava `scoped()` — só existência do projeto era checada |
-| `/api/projects/:id/approval-rules` | PUT | `projectPermissions().changeApprovalRule` | `scoped()` por projeto | **Corrigido (rodada 3)** |
-| `/api/projects/:id/recovery-settings` | PUT | `projectPermissions().changeApprovalRule` | `scoped()` por projeto | **Corrigido (rodada 3):** rota nem buscava o projeto antes, só a configuração por `projectId` |
-| `/api/projects/:id/(actions\|milestones\|risks\|internalizations\|negotiations\|legal-treatments\|management-items)` | POST | `projectPermissions().edit` | `scoped()` por projeto | Presente |
-| `.../:itemId` | PATCH | `.edit` (+ `.internalizeProcess` para internalizations) | `scoped()` por projeto + item | Presente; campos protegidos (`id`,`projectId`,`createdAt`,`createdBy`,`deletedAt`,`deletedBy`) removidos do input |
-| `.../:itemId` | DELETE | `.archive` | `scoped()` por projeto | **Corrigido (rodada 3):** faltava buscar/validar o projeto — só o item era checado |
-| `.../:itemId/restore` | POST | `.restore` | `scoped()` por projeto | **Corrigido (rodada 3)** |
-| `management-items/:itemId/(approve\|reject\|escalate)` | POST | `.approveAgreement` (exceto escalate) | `scoped()` por projeto | **Corrigido (rodada 3)** |
+| `/api/projects/:id/target` | PUT | `allowed(user,'projetos','update')` + `projectPermissions().changeTarget` | `scoped()` por projeto | **Corrigido (rodada 3 item 5, rodada 4 item 8):** faltava `scoped()` (r3); `projectPermissions()` sozinha não é deny-by-default para papel fora de `ROLES` (r4) |
+| `/api/projects/:id/approval-rules` | PUT | `allowed(user,'projetos','update')` + `.changeApprovalRule` | `scoped()` por projeto | **Corrigido (rodada 3/4)** |
+| `/api/projects/:id/recovery-settings` | PUT | `allowed(user,'projetos','update')` + `.changeApprovalRule` | `scoped()` por projeto | **Corrigido (rodada 3/4):** rota nem buscava o projeto antes (r3) |
+| `/api/projects/:id/(actions\|milestones\|risks\|internalizations\|negotiations\|legal-treatments\|management-items)` | POST | `allowed(user,'projetos','create')` + `.edit` | `scoped()` por projeto | **Corrigido (rodada 4):** módulo adicionado; mass assignment de `id`/`projectId`/`createdBy`/`createdAt` corrigido via `sanitizeProjectItemInput()` |
+| `.../:itemId` | PATCH | `allowed(user,'projetos','update')` + `.edit` (+ `.internalizeProcess` para internalizations) | `scoped()` por projeto + item | Campos protegidos e de escopo (`departmentId`/`scopeType`/`companyId`/`speId`) removidos do input via `sanitizeProjectItemInput()` (r4) |
+| `.../:itemId` | DELETE | `allowed(user,'projetos','archive')` + `.archive` | `scoped()` por projeto | **Corrigido (rodada 3/4):** faltava buscar/validar o projeto (r3); módulo adicionado (r4) |
+| `.../:itemId/restore` | POST | `allowed(user,'projetos','restore')` + `.restore` | `scoped()` por projeto | **Corrigido (rodada 3/4)** |
+| `management-items/:itemId/(approve\|reject\|escalate)` | POST | `allowed(user,'projetos','update')` + `.approveAgreement` (exceto escalate) | `scoped()` por projeto | **Corrigido (rodada 3/4):** `escalate` não checava nenhuma permissão de negócio antes do módulo (r4) |
 | `/api/dashboards` | GET | `allowed(user, definition.module)` por item | Filtro ad hoc por `departmentId` | Presente (lógica própria, não `scoped()`) |
-| `/api/dashboards/:id` | GET | `allowed(user, definition.module)` | Filtro ad hoc por `departmentId` | Presente |
+| `/api/dashboards/:id` | GET | `allowed(user, definition.module)` (+ `hasGlobalScope(user)` quando `requiresGlobalScope:true`, ex.: `executive`) | Filtro ad hoc por `departmentId`; alçada global para dashboards corporativos sensíveis | **Corrigido (rodada 4, item 1):** `executive` exigia só módulo `central` (compartilhado por todos os papéis) |
 | `/api/dashboard-preferences/:id` | GET/PUT | Nenhum além de autenticado | Chaveado por `userId` (preferência própria) | Presente — não há registro cross-user possível |
 | `/api/monday/test` | POST | `juridico`/`read` | — | Presente |
 | `/api/legal/:module` | GET | `juridico`/`read` | `LEGAL_MODULES` allowlist + `scoped()` por registro | **Corrigido (rodada 2):** allowlist fechada evita indexar `collection()` com valor cru da URL |
@@ -44,11 +44,11 @@ módulo/ação.
 | `/api/audit` | GET | `*`/`read` | — | Presente (só diretoria/administrador) |
 | `/api/compliance` | GET | `*`/`read` | — | **Corrigido (rodada 3, item 5):** não tinha NENHUM gate antes |
 | `/api/compliance` | POST | `*`/`create` | — | **Corrigido (rodada 3):** sem gate antes; mass assignment de `id` corrigido |
-| `/api/agenda` | GET | Nenhum módulo específico | `scoped()` por registro | **Corrigido (rodada 3, item 5):** vazava agenda de todos os departamentos |
-| `/api/agenda` | POST | `agenda`/`create` | `department` forçado ao do usuário (não-global) | **Corrigido (rodada 3):** mass assignment de `id`/`department` corrigido |
-| `/api/departments` | GET | Nenhum módulo específico | Filtro departamental (`visibleDepartments`) | **Corrigido (rodada 3, item 5):** vazava orçamento de todos os departamentos |
-| `/api/committees` | GET | `comites`/`read` | — | **Corrigido (rodada 3, item 5):** sem gate antes — colaborador (sem módulo `comites`) conseguia ler |
-| `/api/committees` | POST | `comites`/`create` | — | Mass assignment de `id`/`createdBy`/`createdAt` corrigido (rodada 3) |
+| `/api/agenda` | GET | `agenda`/`read` | `scoped()` por registro | **Corrigido (rodada 3 e 4, item 9):** vazava agenda de todos os departamentos (r3); GET sem gate de módulo (r4) |
+| `/api/agenda` | POST | `agenda`/`create` | `department`/`scopeType`/`companyId`/`speId` protegidos via `sanitizeEntityInput()` | **Corrigido (rodada 3/4):** mass assignment de `id`/`department` (r3); `scopeType`/`companyId`/`speId` ainda forjáveis (r4) |
+| `/api/departments` | GET | `orcamento`/`read` | Filtro departamental (`visibleDepartments`) | **Corrigido (rodada 3 e 4, item 9):** vazava orçamento de todos os departamentos (r3); GET sem gate de módulo, mesmo carregando orçamento (r4) |
+| `/api/committees` | GET | `comites`/`read` | `scoped()` por registro | **Corrigido (rodada 3 e 4, item 3):** sem gate (r3); devolvia a coleção inteira sem escopo (r4) — Comitê Jurídico/TI/Conselho VELKOR não se misturam |
+| `/api/committees` | POST | `comites`/`create` | `department`/`scopeType`/`companyId`/`speId` protegidos via `sanitizeEntityInput()` | Mass assignment de `id`/`createdBy`/`createdAt` corrigido (r3); escopo forjável corrigido (r4) |
 | `/api/presentations/validate` \| `/export` | POST | `comites`/`export` | — | Presente; export audita e bloqueia combinação Diretoria+Compartilhável |
 | `/api/entities/:type` | GET | `entityModule(type)` + `allowed(...,'read')` | `scoped()` por registro | Presente (rodada 1) |
 | `/api/entities/:type` | POST | idem (`'create'`) | `scoped()` no processo relacionado (Legal Deadline) | **Corrigido (rodada 2/3):** sanitização de campos protegidos e de escopo; bloqueado para tipos Monday-sourced (`rejectIfMondaySourced`); Legal Deadline valida processo (existência + fonte `monday` + escopo) |
@@ -56,7 +56,7 @@ módulo/ação.
 | `/api/entities/:type/:id` | DELETE | idem (`'archive'`) | `scoped()` por registro | Bloqueado para tipos Monday-sourced (rodada 3) |
 | `/api/entities/:type/:id/restore` | POST | idem (`'restore'`) | `scoped()` por registro | Bloqueado para tipos Monday-sourced (rodada 3) |
 | `/api/budgets/import/preview` | POST | Nenhum | N/A | Só faz parsing/validação do CSV enviado pelo próprio requisitante; não persiste nem lê dado de terceiros |
-| `/api/budgets/import/commit` | POST | `orcamento`/`create` | — | Presente; checksum + deduplicação |
+| `/api/budgets/import/commit` | POST | `orcamento`/`create` | Toda linha do CSV precisa pertencer ao department do usuário (não-global) | **Corrigido (rodada 4, item 5):** checksum + deduplicação já presentes; escopo por linha adicionado — bloqueia a importação inteira se qualquer linha for de outro departamento |
 | `/api/backup` \| `/backup/restore` | POST | `*`/`approve` | — | Presente (só diretoria/administrador) |
 
 **Mass assignment fora de `/api/entities`** (item 5) — revisado em toda a superfície da API. Os três
@@ -132,6 +132,26 @@ Todos os itens 9–18 cobertos por teste automatizado — unitário (`tests/core
 HTTP real (`tests/security-integration.test.js`), incluindo dados sintéticos para os cenários de
 companyId/speId e um segundo projeto sintético em departamento diferente para os testes de escopo de
 projeto.
+
+## P0 corrigidos — rodada 4 (rodada de fechamento, sem expansão de escopo)
+
+Uma quarta revisão, após CI verde da rodada 3, encontrou mais P0. Nenhum deles amplia o produto —
+todos fecham lacunas de autorização/integridade na fundação já entregue. Detalhe completo em
+`docs/PERMISSIONS.md`.
+
+| # | Item | Antes | Depois |
+|---|---|---|---|
+| 19 | `/api/dashboards/executive` usava só `module:'central'`, que também pertence a `lider`/`colaborador` | Qualquer papel departamental acessava o Centro de Comando e via orçamento/agenda/decisões de **todos** os departamentos, consolidados | Dashboard com `requiresGlobalScope:true` (hoje só `executive`) exige alçada global (`diretoria`/`administrador`), verificado tanto na listagem (`visibleDashboards`) quanto no detalhe; dashboards futuros de escopo `'corporate'` devem declarar explicitamente essa flag |
+| 20 | POST de sub-recursos de projeto (`actions`/`milestones`/`risks`/`internalizations`/`negotiations`/`legal-treatments`/`management-items`) construía `{id:..., ...input}` — `...input` por último | Cliente podia sobrescrever `id`, `projectId`, `createdAt`, `createdBy` | `sanitizeProjectItemInput()` (mesmo padrão de `sanitizeEntityInput`) remove os campos protegidos antes; servidor os atribui depois. Aplicado também ao PATCH, que já removia os campos mas não os de escopo (`departmentId`/`scopeType`/`companyId`/`speId`) |
+| 21 | `GET /api/committees` tinha gate de módulo (rodada 3) mas devolvia a coleção inteira; POST não protegia `scopeType`/`companyId`/`speId` | Comitê Jurídico e Comitê TI se misturavam; papel departamental podia forjar escopo global | Reaproveita `scoped()`/`sanitizeEntityInput()` — mesma política de toda a plataforma, sem mecanismo próprio |
+| 22 | `sanitizeEntityInput()` em `/api/agenda` (rodada 3) só protegia `department` | Papel departamental ainda podia forjar `scopeType:'global'`/`companyId`/`speId` num evento de agenda | Troca da sanitização própria por `sanitizeEntityInput()`, protegendo os quatro campos de escopo de forma consistente |
+| 23 | `POST /api/budgets/import/commit` não validava o `department` das linhas do CSV contra o escopo do usuário | Usuário departamental podia importar/alterar linhas de outro departamento | Para papel não-global, qualquer linha com `department` diferente do próprio bloqueia a **importação inteira** (nunca parcial); papel global segue sem restrição |
+| 24 | `validateLegalDeadline()` só testava truthiness de `origin`/`date` | `origin:' '` (só espaços) e `date:'banana'`/`'2026-99-99'`/vazio passavam | `origin` exige string não vazia após `trim()`; `date` validado por `isValidCivilDate()` — regex `YYYY-MM-DD` + reconstrução via `Date.UTC` para rejeitar datas que não existem no calendário (ex.: 31/04, 29/02 em ano não bissexto) |
+| 25 | Legal Deadline podia ter `department`/`companyId`/`speId`/`scopeType` inconsistentes com o processo relacionado | Cliente (inclusive diretoria/administrador) podia forjar escopo divergente do processo | `validateLegalDeadline()` agora **herda** os quatro campos de escopo do processo relacionado, sobrescrevendo qualquer valor enviado — em POST e em PATCH (inclusive ao trocar `processId`), para qualquer papel |
+| 26 | Rotas de sub-recurso de projeto dependiam só de `projectPermissions(user)`, que não é deny-by-default para papel fora de `ROLES` | Um papel desconhecido (`role` inexistente em `ROLES`) com `department:'Jurídico'` herdava `edit`/`create` por coincidência de department, contornando o módulo `projetos` | Adicionado `allowed(user,'projetos',ação)` em todas as 8 rotas de sub-recurso que só usavam `projectPermissions()` |
+| 27 | `GET /api/agenda` e `GET /api/departments` sem gate de módulo — só "estar autenticado" + escopo do registro | Endpoint sensível (departments carrega orçamento) protegido só por autenticação | Reaproveitados os módulos já existentes `agenda` e `orcamento` (nenhum módulo novo criado) |
+
+Todos os itens 19–27 cobertos por teste automatizado — unitário e de integração HTTP real.
 
 ## P0 conhecidos e ainda abertos — classificados por o que bloqueiam
 

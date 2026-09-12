@@ -49,7 +49,10 @@ test.before(async () => {
     { id: 'usr-teste-lider-ti', name: 'Líder TI Teste', email: EMAILS.liderTi, role: 'lider', department: 'TI', mfa: true },
     // Papel inexistente em ROLES — simula um usuário autenticado sem NENHUM módulo autorizado,
     // cobrindo o caso QA §30 #1 ("usuário sem acesso tenta registro jurídico → bloqueio server-side").
-    { id: 'usr-teste-sem-acesso', name: 'Sem Acesso Teste', email: EMAILS.semAcesso, role: 'externo', department: null, mfa: false }
+    // department:'Jurídico' propositalmente (não null) — reproduz exatamente o cenário do P0 da
+    // rodada 4 (item 8): projectPermissions() concedia edit/create a um papel desconhecido só por
+    // coincidência de department, mesmo sem nenhum módulo reconhecido em ROLES.
+    { id: 'usr-teste-sem-acesso', name: 'Sem Acesso Teste', email: EMAILS.semAcesso, role: 'externo', department: 'Jurídico', mfa: false }
   );
   if (!store.records) store.records = {};
   store.records.processos = [
@@ -341,17 +344,22 @@ test('[HTTP] usuário departamental não consegue definir scopeType:"global" via
 
 // --- Item 2: companyId/speId negam por ausência ou mismatch, mesmo com department correspondente ---
 
+// Nota: legalDeadlines NÃO é usado aqui — desde a rodada 4 (item 7), seus campos de escopo são
+// sempre herdados do processo relacionado, sobrescrevendo qualquer companyId enviado pelo cliente
+// (inclusive por diretoria). Esse comportamento tem teste próprio mais abaixo ("Legal Deadline herda
+// o escopo do processo relacionado"). Aqui testamos companyId de forma genérica, via um tipo de
+// entidade sem regra de herança (documentReferences), para isolar o comportamento de scoped().
 test('[HTTP] companyId nega por ausência mesmo quando department coincide (deny-by-default)', async () => {
   const tokenDiretoria = await loginAs(EMAILS.diretoria);
-  const created = await api('POST', '/api/entities/legalDeadlines', {
+  const created = await api('POST', '/api/entities/documentReferences', {
     token: tokenDiretoria,
-    json: { processId: 'proc-juridico-teste', origin: 'Teste companyId', date: '2026-12-20', department: 'Jurídico', companyId: 'empresa-sintetica-x' }
+    json: { title: 'Documento de teste companyId', department: 'Jurídico', companyId: 'empresa-sintetica-x' }
   });
   assert.equal(created.status, 201);
   assert.equal(created.body.companyId, 'empresa-sintetica-x', 'papel global pode definir companyId — fundação para quando o cadastro de empresa existir');
 
   const tokenJuridico = await loginAs(EMAILS.liderJuridico);
-  const listAsJuridico = await api('GET', '/api/entities/legalDeadlines', { token: tokenJuridico });
+  const listAsJuridico = await api('GET', '/api/entities/documentReferences', { token: tokenJuridico });
   assert.ok(!listAsJuridico.body.some(item => item.id === created.body.id), 'usuário sem companyId deve ser negado quando o registro tem companyId, mesmo com department igual');
 });
 
@@ -525,4 +533,197 @@ test('[HTTP] /api/monday/status e /api/monday/schedule exigem autenticação e n
     assert.equal(run.requestedBy, undefined, 'nome de solicitante não deve ser exposto');
     for (const m of run.modules || []) assert.equal(m.error, undefined, 'mensagem de erro de sincronização não deve ser exposta');
   }
+});
+
+// ============================================================================================
+// Rodada 4 de correções de segurança — testes de integração HTTP real
+// ============================================================================================
+
+// --- Item 1: Visão Executiva restrita a alçada global ---
+
+test('[HTTP] colaborador/líder não executivo não acessa o dashboard executivo', async () => {
+  const tokenColaborador = await loginAs(EMAILS.colaboradorJuridico);
+  const asColaborador = await api('GET', '/api/dashboards/executive', { token: tokenColaborador });
+  assert.equal(asColaborador.status, 403);
+
+  const tokenLider = await loginAs(EMAILS.liderJuridico);
+  const asLider = await api('GET', '/api/dashboards/executive', { token: tokenLider });
+  assert.equal(asLider.status, 403, 'lider tem módulo central, mas não é alçada global — não basta para o executivo');
+
+  // Também não deve aparecer listado em GET /api/dashboards para papel não-global
+  const list = await api('GET', '/api/dashboards', { token: tokenLider });
+  assert.equal(list.status, 200);
+  assert.ok(!list.body.dashboards.some(d => d.id === 'executive'), 'dashboard executivo não deve nem ser listado para papel não-global');
+});
+
+test('[HTTP] dashboard executivo continua acessível à alçada global autorizada', async () => {
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  const res = await api('GET', '/api/dashboards/executive', { token: tokenDiretoria });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.dashboard.id, 'executive');
+
+  const list = await api('GET', '/api/dashboards', { token: tokenDiretoria });
+  assert.ok(list.body.dashboards.some(d => d.id === 'executive'), 'diretoria continua vendo o executivo na listagem');
+});
+
+// --- Item 2: mass assignment em sub-recursos de projeto ---
+
+test('[HTTP] POST de sub-recurso de Projeto não aceita id/projectId/createdBy/createdAt forjados', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const res = await api('POST', `/api/projects/${PROJECT_ID}/actions`, {
+    token,
+    json: {
+      id: 'id-forjado', projectId: 'outro-projeto-forjado', createdAt: '2000-01-01T00:00:00.000Z', createdBy: 'Invasor',
+      title: 'Ação legítima de teste rodada 4'
+    }
+  });
+  assert.equal(res.status, 201);
+  assert.notEqual(res.body.id, 'id-forjado');
+  assert.equal(res.body.projectId, PROJECT_ID, 'o resultado continua vinculado ao projeto da URL, não ao projectId forjado');
+  assert.notEqual(res.body.createdBy, 'Invasor');
+  assert.equal(res.body.createdBy, 'usr-teste-lider-juridico');
+  assert.notEqual(res.body.createdAt, '2000-01-01T00:00:00.000Z');
+  assert.equal(res.body.title, 'Ação legítima de teste rodada 4');
+});
+
+// --- Item 3: Comitês respeitam escopo ---
+
+test('[HTTP] Comitê Jurídico não vaza para TI, e Comitê TI não vaza para Jurídico', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const tokenTi = await loginAs(EMAILS.liderTi);
+
+  const committeeJuridico = await api('POST', '/api/committees', { token: tokenJuridico, json: { title: 'Comitê Jurídico de teste' } });
+  assert.equal(committeeJuridico.status, 201);
+  assert.equal(committeeJuridico.body.department, 'Jurídico');
+
+  const committeeTi = await api('POST', '/api/committees', { token: tokenTi, json: { title: 'Comitê TI de teste' } });
+  assert.equal(committeeTi.status, 201);
+  assert.equal(committeeTi.body.department, 'TI');
+
+  const listAsJuridico = await api('GET', '/api/committees', { token: tokenJuridico });
+  assert.ok(listAsJuridico.body.some(c => c.id === committeeJuridico.body.id), 'Jurídico vê o próprio comitê');
+  assert.ok(!listAsJuridico.body.some(c => c.id === committeeTi.body.id), 'Comitê TI não pode vazar para Jurídico');
+
+  const listAsTi = await api('GET', '/api/committees', { token: tokenTi });
+  assert.ok(listAsTi.body.some(c => c.id === committeeTi.body.id), 'TI vê o próprio comitê');
+  assert.ok(!listAsTi.body.some(c => c.id === committeeJuridico.body.id), 'Comitê Jurídico não pode vazar para TI');
+
+  // scopeType/companyId/speId não podem ser forjados por papel departamental também em /api/committees
+  const forged = await api('POST', '/api/committees', { token: tokenJuridico, json: { title: 'Tentativa de forjar escopo', scopeType: 'global', companyId: 'empresa-forjada' } });
+  assert.equal(forged.status, 201);
+  assert.notEqual(forged.body.scopeType, 'global');
+  assert.equal(forged.body.companyId, undefined);
+  const listAsTiAfterForge = await api('GET', '/api/committees', { token: tokenTi });
+  assert.ok(!listAsTiAfterForge.body.some(c => c.id === forged.body.id), 'tentativa de forjar scopeType:global não deve vazar o comitê do Jurídico para a TI');
+});
+
+// --- Item 4: agenda não aceita escopo global forjado ---
+
+test('[HTTP] agenda não aceita scopeType/companyId/speId forjados por usuário departamental', async () => {
+  const token = await loginAs(EMAILS.colaboradorJuridico);
+  const created = await api('POST', '/api/agenda', { token, json: { title: 'Evento com escopo forjado', scopeType: 'global', companyId: 'empresa-forjada', speId: 'spe-forjada' } });
+  assert.equal(created.status, 201);
+  assert.notEqual(created.body.scopeType, 'global');
+  assert.equal(created.body.companyId, undefined);
+  assert.equal(created.body.speId, undefined);
+  assert.equal(created.body.department, 'Jurídico');
+
+  const tokenTi = await loginAs(EMAILS.liderTi);
+  const listAsTi = await api('GET', '/api/agenda', { token: tokenTi });
+  assert.ok(!listAsTi.body.some(item => item.id === created.body.id), 'tentativa de forjar scopeType:global não pode vazar o evento do Jurídico para a TI');
+});
+
+// --- Item 5: importação de orçamento respeita escopo ---
+
+test('[HTTP] importação de orçamento bloqueia linha de outro departamento para usuário não-global', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const csvMisto = 'department,competence,budgeted,planned,committed,realized\nJurídico,2026-09,100,80,0,50\nTI,2026-09,200,150,0,100';
+  const misto = await api('POST', '/api/budgets/import/commit', { token: tokenJuridico, json: { csv: csvMisto } });
+  assert.equal(misto.status, 403, 'CSV com linha de outro departamento deve bloquear a operação inteira, nunca importar parcialmente');
+
+  const csvProprio = 'department,competence,budgeted,planned,committed,realized\nJurídico,2026-09,100,80,0,50';
+  const proprio = await api('POST', '/api/budgets/import/commit', { token: tokenJuridico, json: { csv: csvProprio } });
+  assert.equal(proprio.status, 201, 'CSV só com o próprio departamento deve ser aceito normalmente');
+
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  const comoDiretoria = await api('POST', '/api/budgets/import/commit', { token: tokenDiretoria, json: { csv: csvMisto } });
+  assert.equal(comoDiretoria.status, 201, 'papel com alçada global continua podendo importar múltiplos departamentos');
+});
+
+// --- Itens 6, 8-11: Legal Deadline — validação semântica e herança de escopo ---
+
+test('[HTTP] Legal Deadline rejeita origin em branco (POST e PATCH)', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const semOrigem = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: '   ', date: '2026-12-01' } });
+  assert.equal(semOrigem.status, 422, 'origin só com espaços deve ser rejeitado, não apenas origin ausente');
+
+  const valido = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem válida rodada 4', date: '2026-12-01' } });
+  assert.equal(valido.status, 201);
+  const patchVazio = await api('PATCH', `/api/entities/legalDeadlines/${valido.body.id}`, { token, json: { origin: '   ' } });
+  assert.equal(patchVazio.status, 422, 'PATCH também rejeita origin só com espaços');
+});
+
+test('[HTTP] Legal Deadline rejeita data inválida — "banana", espaço, e "2026-99-99" (POST e PATCH)', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  for (const badDate of ['banana', ' ', '2026-99-99', '']) {
+    const res = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Teste data inválida', date: badDate } });
+    assert.equal(res.status, 422, `date="${badDate}" deveria ser rejeitado`);
+  }
+
+  const valido = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem para PATCH de data inválida', date: '2026-12-05' } });
+  assert.equal(valido.status, 201);
+  for (const badDate of ['banana', '2026-99-99']) {
+    const patch = await api('PATCH', `/api/entities/legalDeadlines/${valido.body.id}`, { token, json: { date: badDate } });
+    assert.equal(patch.status, 422, `PATCH com date="${badDate}" deveria ser rejeitado`);
+  }
+});
+
+test('[HTTP] Legal Deadline herda o escopo (department/companyId/speId/scopeType) do processo relacionado, mesmo para diretoria', async () => {
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  // Diretoria tenta forjar department:'TI' e scopeType:'global' num prazo ligado a um processo do Jurídico
+  const created = await api('POST', '/api/entities/legalDeadlines', {
+    token: tokenDiretoria,
+    json: { processId: 'proc-juridico-teste', origin: 'Teste herança de escopo', date: '2026-12-10', department: 'TI', scopeType: 'global', companyId: 'empresa-forjada' }
+  });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.department, 'Jurídico', 'department deve ser herdado do processo relacionado, nunca escolhido livremente — nem por diretoria');
+  assert.equal(created.body.scopeType, undefined, 'processo de teste não tem scopeType — o prazo também não deve ter');
+  assert.equal(created.body.companyId, undefined, 'processo de teste não tem companyId — o prazo também não deve ter, mesmo forjado por diretoria');
+
+  // Ao trocar processId (diretoria tem escopo global, alcança processo de outro departamento), o
+  // escopo herdado deve mudar de acordo com o NOVO processo relacionado.
+  const patched = await api('PATCH', `/api/entities/legalDeadlines/${created.body.id}`, { token: tokenDiretoria, json: { processId: 'proc-ti-teste' } });
+  assert.equal(patched.status, 200);
+  assert.equal(patched.body.department, 'TI', 'ao trocar processId, o escopo herdado deve refletir o novo processo relacionado');
+});
+
+// --- Item 12: papel desconhecido/sem módulo Projetos não opera sub-recursos ---
+
+test('[HTTP] papel desconhecido sem módulo Projetos não consegue criar/alterar/arquivar/restaurar/decidir/configurar nada em Projetos, mesmo com department:"Jurídico"', async () => {
+  const token = await loginAs(EMAILS.semAcesso); // role:'externo', department:'Jurídico' — ver comentário no seed
+  assert.equal((await api('GET', '/api/projects', { token })).status, 403, 'nem sequer a listagem de projetos é permitida');
+  assert.equal((await api('POST', `/api/projects/${PROJECT_ID}/actions`, { token, json: { title: 'Tentativa indevida' } })).status, 403);
+  assert.equal((await api('PUT', `/api/projects/${PROJECT_ID}/target`, { token, json: { indicatorId: 'qualquer' } })).status, 403);
+  assert.equal((await api('PUT', `/api/projects/${PROJECT_ID}/approval-rules`, { token, json: { levels: [] } })).status, 403);
+  assert.equal((await api('PUT', `/api/projects/${PROJECT_ID}/recovery-settings`, { token, json: {} })).status, 403);
+
+  // Semeia um item legítimo diretamente na store para testar PATCH/DELETE/restore/decisão sem
+  // depender de um POST bem-sucedido (que já é negado acima).
+  const store = readStore();
+  const syntheticActionId = 'pac-sem-acesso-teste';
+  store.projectActions.push({ id: syntheticActionId, projectId: PROJECT_ID, title: 'Ação sintética', status: 'Não iniciado', createdAt: new Date().toISOString(), createdBy: 'seed' });
+  // Ação separada, já arquivada, exclusivamente para o teste de /restore — a rota de restore só
+  // encontra itens com `deletedAt` presente; usar a mesma ação do teste de DELETE acima exigiria que o
+  // DELETE tivesse sucesso primeiro (o que o próprio teste prova que NÃO deve acontecer).
+  const syntheticArchivedActionId = 'pac-sem-acesso-teste-arquivada';
+  store.projectActions.push({ id: syntheticArchivedActionId, projectId: PROJECT_ID, title: 'Ação sintética arquivada', status: 'Não iniciado', createdAt: new Date().toISOString(), createdBy: 'seed', deletedAt: new Date().toISOString(), deletedBy: 'seed' });
+  const syntheticManagementItemId = 'pmi-sem-acesso-teste';
+  store.projectManagementItems.push({ id: syntheticManagementItemId, projectId: PROJECT_ID, title: 'Pendência sintética', status: 'Pendente', createdAt: new Date().toISOString(), createdBy: 'seed' });
+  writeStore(store);
+
+  assert.equal((await api('PATCH', `/api/projects/${PROJECT_ID}/actions/${syntheticActionId}`, { token, json: { title: 'Alterado indevidamente' } })).status, 403);
+  assert.equal((await api('DELETE', `/api/projects/${PROJECT_ID}/actions/${syntheticActionId}`, { token })).status, 403);
+  assert.equal((await api('POST', `/api/projects/${PROJECT_ID}/actions/${syntheticArchivedActionId}/restore`, { token })).status, 403);
+  assert.equal((await api('POST', `/api/projects/${PROJECT_ID}/management-items/${syntheticManagementItemId}/approve`, { token })).status, 403);
+  assert.equal((await api('POST', `/api/projects/${PROJECT_ID}/management-items/${syntheticManagementItemId}/escalate`, { token })).status, 403, 'nem mesmo escalate (que não checava projectPermissions.approveAgreement) deve passar para papel sem módulo Projetos');
 });

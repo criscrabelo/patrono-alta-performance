@@ -29,12 +29,12 @@ própria v1.3 define o escopo por fase.
 Suíte: `npm test` (Node.js test runner nativo — cada arquivo `*.test.js` roda em processo próprio).
 
 ```
-tests 58
-pass 58
+tests 70
+pass 70
 fail 0
 ```
 
-**`tests/core.test.js` (32 testes)** — unitários e estruturais. Além dos 26 preexistentes e dos 6 da
+**`tests/core.test.js` (34 testes)** — unitários e estruturais. Além dos 26 preexistentes e dos 6 da
 rodada 2, dois testes foram **atualizados na rodada 3** porque a versão anterior validava exatamente o
 comportamento incorreto que a rodada 3 corrigiu:
 - `scoped()` — companyId/speId agora testados com deny-by-default real (ausência ou mismatch nega,
@@ -43,7 +43,11 @@ comportamento incorreto que a rodada 3 corrigiu:
 - `sanitizeEntityInput()` — passou a cobrir também `scopeType`/`companyId`/`speId`, confirmando que só
   papel com escopo global pode defini-los.
 
-**`tests/security-integration.test.js` (26 testes)** — HTTP real: sobe um servidor
+2 testes novos da **rodada 4**: `isValidCivilDate()` (aceita/rejeita datas civis, incluindo anos
+bissextos e meses/dias inexistentes) e `sanitizeProjectItemInput()` (protege campos de sub-recurso de
+projeto e campos de escopo, mesmo padrão de `sanitizeEntityInput`).
+
+**`tests/security-integration.test.js` (36 testes)** — HTTP real: sobe um servidor
 `http.createServer(handler)` de verdade, isolado em diretório de dados temporário
 (`COEVO_DATA_DIR`), injeta usuários e dados de teste, e faz requisições HTTP reais, verificando status e
 corpo da resposta — não presença de texto no código-fonte.
@@ -75,6 +79,23 @@ Os 10 testes novos da **rodada 3** cobrem:
    de gestão) negam por escopo de projeto, com um segundo projeto sintético em outro departamento.
 9. `/api/monday/status` e `/api/monday/schedule` exigem autenticação; payload não expõe
    `boards`/`requestedBy`/mensagens de erro.
+
+Os 10 testes novos da **rodada 4** (fechamento, sem expansão de escopo) cobrem:
+1. Colaborador/lider não executivo recebe `403` em `/api/dashboards/executive` (e ele não aparece
+   listado em `GET /api/dashboards`); diretoria continua acessando normalmente.
+2. `POST` de sub-recurso de projeto ignora `id`/`projectId`/`createdBy`/`createdAt` forjados — resultado
+   permanece vinculado ao projeto da URL e aos metadados do servidor.
+3. Comitê Jurídico não vaza para TI e Comitê TI não vaza para Jurídico; tentativa de forjar
+   `scopeType`/`companyId` em um comitê não tem efeito.
+4. Agenda não aceita `scopeType`/`companyId`/`speId` forjados por papel departamental.
+5. Importação de orçamento com CSV misto (departamento próprio + de outro departamento) é bloqueada
+   inteira para papel não-global; CSV só do próprio departamento é aceito; papel global segue livre.
+6. Legal Deadline rejeita `origin` só com espaços, em POST e PATCH.
+7. Legal Deadline rejeita `date` inválida (`"banana"`, `" "`, `"2026-99-99"`), em POST e PATCH.
+8. Legal Deadline herda `department`/`companyId`/`speId`/`scopeType` do processo relacionado — mesmo
+   quando diretoria tenta forjar valores diferentes; herança se atualiza ao trocar `processId` via PATCH.
+9. Papel desconhecido (fora de `ROLES`) com `department:'Jurídico'` não consegue listar, criar, alterar,
+   arquivar, restaurar, aprovar nem escalar nada em Projetos.
 
 ## Catálogo Global de Regressão (§30)
 
