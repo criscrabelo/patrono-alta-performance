@@ -83,7 +83,7 @@ depende de Fases 1 e 2 estarem concluídas, pois consome o mesmo `legalDeadlines
 ## Riscos e bloqueios conhecidos antes de iniciar a Fase 3
 
 - Nenhum bloqueio técnico identificado para a Fase 3 — o modelo de dados (Fase 1) e o consumo canônico
-  via dashboard/listagem/detalhe (Fase 2) estão implementados e testados (163 testes, todos passando).
+  via dashboard/listagem/detalhe (Fase 2) estão implementados e testados (168 testes, todos passando).
 - O levantamento de código não conseguiu confirmar, para os boards além de `processos`, se existe
   qualquer coluna de data relevante — isso não bloqueia o Sprint 2 (D1.2 já restringe o piloto a
   `processos`), mas deve ser revisitado se o Jurídico identificar necessidade de expandir o escopo de

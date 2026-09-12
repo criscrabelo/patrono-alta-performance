@@ -19,6 +19,13 @@ function financeRows(store) {
 function latestSync(store) { return (store.mondayRuns || []).filter(run => run.finishedAt).sort((a, b) => String(b.finishedAt).localeCompare(String(a.finishedAt)))[0]?.finishedAt || null; }
 function processStatus(row) { const value = String(row.columnsByTitle?.["'MEU TRABALHO'"] || row.columnsByTitle?.['STATUS (para comitê)'] || row.columnsByTitle?.STATUS || ''); return /finaliz|encerr|baix|extint|arquiv/i.test(value) ? 'Finalizado' : /acordo/i.test(value) ? 'Acordo' : /acompanha/i.test(value) ? 'Em acompanhamento' : /andamento|suspenso/i.test(value) ? 'Em andamento' : 'A classificar'; }
 function activeProcesses(store) { return recordList(store, 'processos').filter(row => processStatus(row) !== 'Finalizado'); }
+// P1 corrigido (revisão do PR #5): contagens do dashboard 'legal' (processos ativos, "A classificar",
+// qualidade de dados, volumes por pasta) não passavam por scoped() — um usuário autorizado ao
+// dashboard departamental podia ver contagens agregadas incluindo registros fora do próprio escopo
+// (empresa/SPE), mesmo que os REGISTROS individuais já fossem corretamente negados alhures. Defesa em
+// profundidade também para agregados, não só para o Legal Deadline em si — alçada global (diretoria)
+// continua vendo o consolidado, pois scoped() retorna true para ela em qualquer registro.
+function scopedRecordList(store, key, user, deps) { return recordList(store, key).filter(row => deps.scoped(user, row)); }
 // Sprint 2, Fase 2: única fonte canônica de prazo jurídico é `legalDeadlines` — nenhuma view/widget
 // jurídico pode mais derivar "prazo"/"vencimento"/"atraso" de DATA/CITAÇÃO/PROTOCOLO ou de qualquer
 // outra coluna bruta do Monday (D1, docs/DECISIONS.md). `deps.scoped`/`deps.isLegalDeadlineOverdue`/
@@ -52,7 +59,12 @@ function dashboardPayload(store, id, query = {}, user = null, deps = {}) {
     widgets['attention-list'] = ready('attention-list', [{ label: 'Processos ativos', value: processes.length, target: 'legal' }, { label: 'Registros sem classificação', value: processes.filter(row => processStatus(row) === 'A classificar').length, target: 'legal' }], memory('Monday', competence, processes.length, 'Contagem da carteira ativa e de cadastros a classificar.', updated));
     widgets['decision-list'] = (store.committees || []).length ? ready('decision-list', store.committees.slice(-6).reverse(), memory('Comitês', competence, store.committees.length, 'Últimas decisões registradas em comitê.', updated)) : empty('decision-list', 'Comitês', competence, 'Nenhuma decisão registrada.');
   } else if (id === 'legal') {
-    const all = recordList(store, 'processos'), active = activeProcesses(store);
+    // P1 corrigido (revisão do PR #5): `all`/`active` (e, abaixo, `legal-attention`) passam a usar
+    // scopedRecordList() — não mais recordList()/activeProcesses() sem scoped() — para que as
+    // CONTAGENS agregadas do dashboard jurídico também respeitem empresa/SPE, não só os registros
+    // individuais (Legal Deadline já tinha essa defesa em profundidade; os demais widgets não tinham).
+    const all = scopedRecordList(store, 'processos', user, deps);
+    const active = all.filter(row => processStatus(row) !== 'Finalizado');
     const scopedDeadlines = legalDeadlineRows(store, user, deps);
     // Distinção JUDICIAL_PROCESSUAL x INTERNAL_CONTROL (item 7 do plano da Fase 2): só prazo de fato
     // jurídico-processual entra nos indicadores rotulados como "prazo processual"/"risco jurídico".
@@ -73,7 +85,7 @@ function dashboardPayload(store, id, query = {}, user = null, deps = {}) {
       { label: 'Prazos críticos (30 dias)', value: upcoming.length },
       { label: 'A classificar', value: active.filter(row => processStatus(row) === 'A classificar').length }
     ], memory('legalDeadlines', competence, judicialDeadlines.length, 'Riscos jurídicos calculados exclusivamente a partir de Legal Deadline (status ativo + date), nunca de data bruta do processo.', updated));
-    widgets['legal-attention'] = ready('legal-attention', Object.entries(moduleLabels).map(([key, label]) => ({ label, value: recordList(store, key).length, target: key })), memory('Monday', competence, Object.keys(moduleLabels).reduce((sum, key) => sum + recordList(store, key).length, 0), 'Volumes por pasta jurídica sincronizada.', updated));
+    widgets['legal-attention'] = ready('legal-attention', Object.entries(moduleLabels).map(([key, label]) => ({ label, value: scopedRecordList(store, key, user, deps).length, target: key })), memory('Monday', competence, Object.keys(moduleLabels).reduce((sum, key) => sum + scopedRecordList(store, key, user, deps).length, 0), 'Volumes por pasta jurídica sincronizada, restritos ao escopo do usuário.', updated));
     widgets['legal-quality'] = ready('legal-quality', { classified: active.filter(row => processStatus(row) !== 'A classificar').length, total: active.length }, memory('Monday', competence, active.length, 'Percentual de processos ativos com status reconhecido.', updated));
     widgets['legal-deadlines'] = upcomingAndOverdue.length
       ? ready('legal-deadlines', upcomingAndOverdue.slice(0, 8).map(row => ({ title: row.origin, date: row.date, department: 'Jurídico', status: row.status, overdue: deps.isLegalDeadlineOverdue(row) })), memory('legalDeadlines', competence, upcomingAndOverdue.length, 'Próximos prazos e prazos vencidos (Legal Deadline, JUDICIAL_PROCESSUAL, status ativo).', updated))

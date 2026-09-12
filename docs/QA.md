@@ -29,12 +29,12 @@ própria v1.3 define o escopo por fase.
 Suíte: `npm test` (Node.js test runner nativo — cada arquivo `*.test.js` roda em processo próprio).
 
 ```
-tests 163
-pass 163
+tests 168
+pass 168
 fail 0
 ```
 
-**`tests/core.test.js` (58 testes)** — unitários e estruturais. Além dos 26 preexistentes e dos 6 da
+**`tests/core.test.js` (61 testes)** — unitários e estruturais. Além dos 26 preexistentes e dos 6 da
 rodada 2, dois testes foram **atualizados na rodada 3** porque a versão anterior validava exatamente o
 comportamento incorreto que a rodada 3 corrigiu:
 - `scoped()` — companyId/speId agora testados com deny-by-default real (ausência ou mismatch nega,
@@ -71,7 +71,7 @@ rejeitados) e `status` do enum fechado (`ativo`/`suspenso`/`cumprido`/`cancelado
 quando `status==='ativo'` e `date` anterior a hoje; `suspenso`/`cumprido`/`cancelado` nunca atrasados) e
 sua imunidade a deslocamento de timezone/UTC (comparação lexicográfica pura de datas civis).
 
-**`tests/security-integration.test.js` (105 testes)** — HTTP real: sobe um servidor
+**`tests/security-integration.test.js` (107 testes)** — HTTP real: sobe um servidor
 `http.createServer(handler)` de verdade, isolado em diretório de dados temporário
 (`COEVO_DATA_DIR`), injeta usuários e dados de teste, e faz requisições HTTP reais, verificando status e
 corpo da resposta — não presença de texto no código-fonte.
@@ -343,3 +343,28 @@ passando.
 13. Detalhe de Legal Deadline inexistente retorna `404`.
 14. Processo com zero Legal Deadlines não aparece como tendo prazo na listagem filtrada por `processId`.
 15. (Coberto nos testes acima) suspenso/cumprido/cancelado nunca entram em `overdue=true` na listagem.
+
+## P1 corrigido pós-revisão do PR #5 — contagens agregadas do dashboard "legal" por escopo
+
+A revisão encontrou que `active-processes`, `"A classificar"` (dentro de `legal-risk`), `legal-quality` e
+`legal-attention` calculavam sobre `recordList(store, 'processos')`/`activeProcesses(store)`/
+`recordList(store, key)` **sem** aplicar `scoped(user, row)` — só o Legal Deadline em si (e o processo
+relacionado a ele) já tinham essa defesa em profundidade. Um usuário Jurídico com `companyId`/`speId`
+próprio podia, em tese, ver contagens agregadas somando registros de outra empresa/SPE.
+
+**Correção:** novo helper `scopedRecordList(store, key, user, deps)` (`recordList(...).filter(row =>
+deps.scoped(user, row))`), usado no dashboard `legal` para `all`/`active` (de onde derivam
+`active-processes`, `"A classificar"` e `legal-quality`) e para cada pasta de `legal-attention`. Nenhum
+tratamento especial foi criado para diretoria — `scoped()` já retorna `true` para alçada global, então o
+consolidado continua aparecendo normalmente. O dashboard executivo **não foi alterado** (fora do escopo
+desta correção; hoje só acessível a quem já tem alçada global, tornando o gap inexistente na prática ali).
+
+Testes adicionados (4 unitários em `tests/core.test.js`, 2 HTTP em `tests/security-integration.test.js`):
+- Unitário: usuário da empresa A não conta processo/notificação da empresa B em `active-processes`/
+  `"A classificar"`/`legal-quality`/`legal-attention`.
+- Unitário: diretoria (alçada global) continua vendo o consolidado de A+B, sem tratamento especial manual.
+- Unitário: deny-by-default também por `speId` (usuário da SPE X não conta processo da SPE Y).
+- HTTP: comparação antes/depois por usuário (baseline) confirma que `active-processes`/`legal-attention`
+  aumentam para o usuário da própria empresa e permanecem inalterados para o usuário de outra empresa,
+  com diretoria vendo o consolidado.
+- HTTP: mesma comparação antes/depois para `speId`.

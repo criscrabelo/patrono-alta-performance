@@ -1565,3 +1565,72 @@ test('[HTTP] processo com zero Legal Deadlines não aparece como tendo prazo na 
   assert.equal(list.status, 200);
   assert.equal(list.body.count, 0, 'processo sem nenhum Legal Deadline cadastrado não aparece na listagem filtrada por processId');
 });
+
+// ============================================================================================
+// P1 corrigido (revisão do PR #5): contagens agregadas do dashboard "legal" (active-processes,
+// "A classificar", legal-quality, legal-attention) não passavam por scoped() — só os registros
+// individuais de Legal Deadline tinham essa defesa em profundidade. Testes abaixo usam uma comparação
+// antes/depois (baseline) por usuário, para não depender da contagem absoluta de processos já
+// semeados por outros testes no mesmo arquivo (store compartilhada entre testes deste arquivo).
+// ============================================================================================
+
+test('[HTTP] dashboard "legal": active-processes/legal-attention respeitam scoped() por companyId — usuário de outra empresa não vê a contagem aumentar; diretoria vê o consolidado', async () => {
+  const store = readStore();
+  store.users.push(
+    { id: 'usr-teste-empresa-a', name: 'Líder Empresa A Teste', email: 'lider.empresa.a.teste@coevo.local', role: 'lider', department: 'Jurídico', companyId: 'empresa-a-teste', mfa: false },
+    { id: 'usr-teste-empresa-b', name: 'Líder Empresa B Teste', email: 'lider.empresa.b.teste@coevo.local', role: 'lider', department: 'Jurídico', companyId: 'empresa-b-teste', mfa: false }
+  );
+  writeStore(store);
+
+  const tokenA = await loginAs('lider.empresa.a.teste@coevo.local');
+  const tokenB = await loginAs('lider.empresa.b.teste@coevo.local');
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+
+  const attentionValue = payload => payload.widgets['legal-attention'].data.find(row => row.target === 'notificacoes').value;
+  const beforeA = await api('GET', '/api/dashboards/legal', { token: tokenA });
+  const beforeB = await api('GET', '/api/dashboards/legal', { token: tokenB });
+  const beforeDiretoria = await api('GET', '/api/dashboards/legal', { token: tokenDiretoria });
+  assert.equal(beforeA.status, 200);
+  assert.equal(beforeB.status, 200);
+  const activeBeforeA = beforeA.body.widgets['active-processes'].data.value;
+  const activeBeforeB = beforeB.body.widgets['active-processes'].data.value;
+  const activeBeforeDiretoria = beforeDiretoria.body.widgets['active-processes'].data.value;
+  const attentionBeforeA = attentionValue(beforeA.body);
+  const attentionBeforeB = attentionValue(beforeB.body);
+
+  const store2 = readStore();
+  store2.records.processos.push({ id: 'proc-empresa-a-scoped-teste', source: 'monday', department: 'Jurídico', companyId: 'empresa-a-teste', title: 'Processo Empresa A (dashboard scoped)', deletedAt: null });
+  store2.records.notificacoes = store2.records.notificacoes || [];
+  store2.records.notificacoes.push({ id: 'not-empresa-a-scoped-teste', department: 'Jurídico', companyId: 'empresa-a-teste', deletedAt: null });
+  writeStore(store2);
+
+  const afterA = await api('GET', '/api/dashboards/legal', { token: tokenA });
+  const afterB = await api('GET', '/api/dashboards/legal', { token: tokenB });
+  const afterDiretoria = await api('GET', '/api/dashboards/legal', { token: tokenDiretoria });
+
+  assert.equal(afterA.body.widgets['active-processes'].data.value, activeBeforeA + 1, 'active-processes da empresa A aumenta em 1 com o novo processo da própria empresa');
+  assert.equal(attentionValue(afterA.body), attentionBeforeA + 1, 'legal-attention da empresa A aumenta em 1 com a nova notificação da própria empresa');
+
+  assert.equal(afterB.body.widgets['active-processes'].data.value, activeBeforeB, 'active-processes da empresa B permanece igual — não vê o processo da empresa A');
+  assert.equal(attentionValue(afterB.body), attentionBeforeB, 'legal-attention da empresa B permanece igual — não vê a notificação da empresa A');
+
+  assert.equal(afterDiretoria.body.widgets['active-processes'].data.value, activeBeforeDiretoria + 1, 'diretoria (alçada global) vê o consolidado, incluindo o novo processo da empresa A — sem tratamento especial manual, apenas scoped() retornando true');
+});
+
+test('[HTTP] dashboard "legal": deny-by-default também por speId — usuário de uma SPE não vê a contagem aumentar com processo de outra SPE', async () => {
+  const store = readStore();
+  store.users.push({ id: 'usr-teste-spe-x', name: 'Líder SPE X Teste', email: 'lider.spe.x.teste@coevo.local', role: 'lider', department: 'Jurídico', speId: 'spe-x-teste', mfa: false });
+  writeStore(store);
+
+  const tokenSpeX = await loginAs('lider.spe.x.teste@coevo.local');
+  const before = await api('GET', '/api/dashboards/legal', { token: tokenSpeX });
+  assert.equal(before.status, 200);
+  const activeBefore = before.body.widgets['active-processes'].data.value;
+
+  const store2 = readStore();
+  store2.records.processos.push({ id: 'proc-spe-y-scoped-teste', source: 'monday', department: 'Jurídico', speId: 'spe-y-teste', title: 'Processo SPE Y (fora do escopo)', deletedAt: null });
+  writeStore(store2);
+
+  const after = await api('GET', '/api/dashboards/legal', { token: tokenSpeX });
+  assert.equal(after.body.widgets['active-processes'].data.value, activeBefore, 'usuário da SPE X não vê a contagem aumentar com um processo de outra SPE (SPE Y)');
+});

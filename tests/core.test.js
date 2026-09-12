@@ -640,6 +640,72 @@ test('dashboard "legal": JUDICIAL_PROCESSUAL aparece corretamente e múltiplos L
   assert.ok(titles.includes('Primeira intimação') && titles.includes('Segunda intimação (fato gerador distinto)'));
 });
 
+// P1 corrigido (revisão do PR #5): as CONTAGENS agregadas do dashboard 'legal' (active-processes,
+// "A classificar", legal-quality, legal-attention) não passavam por scoped() — só os registros
+// individuais de Legal Deadline tinham essa defesa em profundidade. Um usuário Jurídico com companyId
+// próprio podia ver contagens somando processos/pastas de outra empresa.
+function buildCompanyScopedStore() {
+  return {
+    records: {
+      processos: [
+        { id: 'proc-empresa-a', source: 'monday', department: 'Jurídico', companyId: 'empresa-a', deletedAt: null },
+        { id: 'proc-empresa-b', source: 'monday', department: 'Jurídico', companyId: 'empresa-b', deletedAt: null }
+      ],
+      legalDeadlines: [
+        { id: 'ld-empresa-a', processId: 'proc-empresa-a', origin: 'Prazo empresa A', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', department: 'Jurídico', companyId: 'empresa-a' },
+        { id: 'ld-empresa-b', processId: 'proc-empresa-b', origin: 'Prazo empresa B', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', department: 'Jurídico', companyId: 'empresa-b' }
+      ],
+      notificacoes: [
+        { id: 'not-empresa-a', department: 'Jurídico', companyId: 'empresa-a', deletedAt: null },
+        { id: 'not-empresa-b', department: 'Jurídico', companyId: 'empresa-b', deletedAt: null }
+      ]
+    },
+    departments: []
+  };
+}
+
+test('dashboard "legal": active-processes/"A classificar"/legal-quality/legal-attention respeitam scoped() por companyId — usuário da empresa A não vê contagens da empresa B', () => {
+  const store = buildCompanyScopedStore();
+  const userEmpresaA = { role: 'lider', department: 'Jurídico', companyId: 'empresa-a' };
+  const payload = dashboardPayload(store, 'legal', {}, userEmpresaA, legalDashboardDeps);
+
+  assert.equal(payload.widgets['active-processes'].data.value, 1, 'active-processes só conta o processo da empresa A');
+  const classificar = payload.widgets['legal-risk'].data.find(row => row.label === 'A classificar');
+  assert.equal(classificar.value, 1, '"A classificar" também respeita companyId, não soma o processo da empresa B');
+  assert.equal(payload.widgets['legal-quality'].data.total, 1, 'legal-quality calcula apenas sobre processos visíveis (empresa A)');
+  const notificacoes = payload.widgets['legal-attention'].data.find(row => row.target === 'notificacoes');
+  assert.equal(notificacoes.value, 1, 'legal-attention não soma o registro de notificacoes da empresa B');
+  assert.equal(payload.widgets['legal-risk'].data[0].value, 1, 'Legal Deadline da empresa B continua ausente da contagem de vencidos (regressão já coberta, reforçada aqui)');
+});
+
+test('dashboard "legal": diretoria (alçada global) continua vendo o consolidado de todas as empresas, sem tratamento especial manual', () => {
+  const store = buildCompanyScopedStore();
+  const diretoria = { role: 'diretoria', department: null };
+  const payload = dashboardPayload(store, 'legal', {}, diretoria, legalDashboardDeps);
+
+  assert.equal(payload.widgets['active-processes'].data.value, 2, 'diretoria vê os processos das empresas A e B consolidados');
+  const notificacoes = payload.widgets['legal-attention'].data.find(row => row.target === 'notificacoes');
+  assert.equal(notificacoes.value, 2, 'legal-attention soma as duas empresas para quem tem alçada global');
+  assert.equal(payload.widgets['legal-risk'].data[0].value, 2, 'ambos os Legal Deadlines (empresa A e B) contam para diretoria');
+});
+
+test('dashboard "legal": deny-by-default também por speId — usuário com speId próprio não vê contagens de outra SPE', () => {
+  const store = {
+    records: {
+      processos: [
+        { id: 'proc-spe-x', source: 'monday', department: 'Jurídico', speId: 'spe-x', deletedAt: null },
+        { id: 'proc-spe-y', source: 'monday', department: 'Jurídico', speId: 'spe-y', deletedAt: null }
+      ],
+      legalDeadlines: [],
+      notificacoes: []
+    },
+    departments: []
+  };
+  const userSpeX = { role: 'lider', department: 'Jurídico', speId: 'spe-x' };
+  const payload = dashboardPayload(store, 'legal', {}, userSpeX, legalDashboardDeps);
+  assert.equal(payload.widgets['active-processes'].data.value, 1, 'usuário da SPE X não conta o processo da SPE Y em active-processes');
+});
+
 test('legalDeadlineIntegrityFlag() sinaliza registros legados sem originType/status para revisão, sem inferir nada', () => {
   assert.equal(legalDeadlineIntegrityFlag({ originType: 'JUDICIAL_PROCESSUAL', status: 'ativo' }), 'ok');
   assert.equal(legalDeadlineIntegrityFlag({ originType: 'JUDICIAL_PROCESSUAL' }), 'requires_review', 'status ausente (registro legado pré-D1) exige revisão manual');
