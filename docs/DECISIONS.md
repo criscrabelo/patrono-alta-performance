@@ -164,8 +164,10 @@ ativo; `cancelado` nunca aparece como atraso ativo — independentemente do valo
 Isso evita divergência entre o `status` gravado e a data atual sendo interpretada de forma paralela e
 inconsistente por cada view.
 
-**Nada disto foi implementado nesta rodada.** Aplica-se apenas como especificação aprovada para a Fase 1
-do Sprint 2 (`docs/SPRINT2-PLANO.md`) e para o modelo de dados (`docs/DATA_MODEL.md`).
+**Implementado na Fase 1 do Sprint 2** (`docs/SPRINT2-PLANO.md`, `docs/DATA_MODEL.md`): enum de
+`status`, regra de reabertura (via `PATCH` comum, sem status próprio) e `isLegalDeadlineOverdue()` como
+função pura de atraso derivado — testados em `tests/core.test.js`/`tests/security-integration.test.js`.
+A função ainda não é consumida por nenhuma view (isso permanece Fase 2, não iniciada).
 
 ### Novo fato gerador × alteração do mesmo prazo
 

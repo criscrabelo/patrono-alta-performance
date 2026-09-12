@@ -81,14 +81,27 @@ function isValidCivilDate(value) {
   const date = new Date(Date.UTC(year, month - 1, day));
   return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
 }
+// Sprint 2, Fase 1 (D1 homologada — docs/DECISIONS.md, seção 1.1): originType distingue prazo
+// jurídico/processual de prazo interno de controle — nunca inferido, sempre informado por quem
+// registra. Enum fechado; nenhuma categoria adicional foi homologada.
+const LEGAL_DEADLINE_ORIGIN_TYPES = Object.freeze(['JUDICIAL_PROCESSUAL', 'INTERNAL_CONTROL']);
+// Enum fechado de status homologado (mesma seção). "reaberto"/"vencido"/"atrasado"/"em_atraso" nunca
+// são valores persistidos — reabertura é o retorno a 'ativo' (ver PATCH de /api/entities/legalDeadlines),
+// e atraso é condição derivada (ver isLegalDeadlineOverdue(), abaixo).
+const LEGAL_DEADLINE_STATUSES = Object.freeze(['ativo', 'suspenso', 'cumprido', 'cancelado']);
 function validateLegalDeadline(candidate, user, store) {
-  const missing = ['processId','origin','date'].filter(field => !candidate[field]);
+  const missing = ['processId','origin','date','originType'].filter(field => !candidate[field]);
   if (missing.length) return { status: 422, error: `Prazo jurídico sem origem identificada bloqueia a operação. Campos obrigatórios ausentes: ${missing.join(', ')}` };
   // P0 corrigido (rodada 4, item 6): origin e date antes só passavam por um teste de "truthy" — uma
   // string só de espaços, ou uma data como "banana"/"2026-99-99", passavam sem checagem semântica.
   const trimmedOrigin = typeof candidate.origin === 'string' ? candidate.origin.trim() : '';
   if (!trimmedOrigin) return { status: 422, error: 'O campo origin deve ser um texto não vazio (após remover espaços em branco)' };
   if (!isValidCivilDate(candidate.date)) return { status: 422, error: 'O campo date deve ser uma data civil válida no formato YYYY-MM-DD (ex.: 2026-12-01)' };
+  // Sprint 2, Fase 1: originType/status são enums fechados — nenhum valor fora da lista é aceito, seja
+  // na criação ou no PATCH (candidate aqui já é o estado CANDIDATO — item atual + input sanitizado —
+  // então uma tentativa de esvaziar/invalidar originType/status via PATCH é rejeitada antes de gravar).
+  if (!LEGAL_DEADLINE_ORIGIN_TYPES.includes(candidate.originType)) return { status: 422, error: `O campo originType deve ser um dos valores: ${LEGAL_DEADLINE_ORIGIN_TYPES.join(', ')}` };
+  if (!LEGAL_DEADLINE_STATUSES.includes(candidate.status)) return { status: 422, error: `O campo status deve ser um dos valores: ${LEGAL_DEADLINE_STATUSES.join(', ')}` };
   const relatedProcess = collection(store,'processos').find(p => p.id === candidate.processId && !p.deletedAt);
   if (!relatedProcess || relatedProcess.source !== 'monday') return { status: 422, error: 'Processo relacionado não encontrado ou não pertence à fonte autorizada do piloto (Monday)' };
   if (!scoped(user, relatedProcess)) return { status: 403, error: 'Sem permissão para relacionar este processo' };
@@ -101,6 +114,19 @@ function validateLegalDeadline(candidate, user, store) {
   candidate.speId = relatedProcess.speId;
   candidate.scopeType = relatedProcess.scopeType;
   return null;
+}
+// Sprint 2, Fase 1 (D1 homologada, docs/DECISIONS.md seção 1.1): data civil "hoje" no fuso do piloto
+// (America/Sao_Paulo) — mesmo padrão já usado por scheduleDueNow()/scheduledMondayTick() — para não
+// deslocar o dia por comparação ingênua em UTC.
+function todayCivilDate() { return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' }); }
+// Atraso ("vencido"/"em atraso") é uma condição DERIVADA de status+date, nunca um valor persistido —
+// função pura e centralizada, para não duplicar essa lógica em cada view que listar prazos (Fase 2).
+// Comparação de strings YYYY-MM-DD é determinística (zero-padded, ordem lexicográfica == ordem
+// cronológica), sem depender de conversão para Date/UTC. `date === today` NÃO é atraso — o prazo só
+// vence após o fim da data civil informada.
+function isLegalDeadlineOverdue(deadline, today = todayCivilDate()) {
+  if (!deadline || deadline.status !== 'ativo' || !isValidCivilDate(deadline.date)) return false;
+  return deadline.date < today;
 }
 // P0 corrigido (rodada 6, item 4): a validação de processId de internalization (existe + source
 // 'monday' + escopo do usuário) foi introduzida na rodada 5 apenas no POST. O PATCH de sub-recurso de
@@ -672,6 +698,11 @@ function handler(req, res) {
   if (req.method === 'POST' && url.pathname.startsWith('/api/entities/') && !url.pathname.endsWith('/restore')) { const type=url.pathname.split('/')[3]; const module=entityModule(type); if(!module || !allowedContent(user,module,'create')) return json(res,403,{error:'Sem permissão'}); const blocked=rejectIfMondaySourced(type); if(blocked) return json(res,403,blocked); return body(req).then(input=>{
     const sanitized = sanitizeEntityInput(input, user);
     if(type==='legalDeadlines'){
+      // Sprint 2, Fase 1: status é enum fechado, mas tem default server-side quando o cliente não o
+      // informa na criação — 'ativo' é o único default seguro (nenhum Legal Deadline nasce suspenso/
+      // cumprido/cancelado por omissão). Só o campo AUSENTE recebe o default; um valor explícito
+      // (mesmo inválido) segue para validação normal, sem ser silenciosamente substituído.
+      if (sanitized.status === undefined) sanitized.status = 'ativo';
       const invalid = validateLegalDeadline(sanitized, user, store);
       if(invalid) return json(res,invalid.status,{error:invalid.error});
     }
@@ -685,7 +716,16 @@ function handler(req, res) {
   }); }
   if (req.method === 'PATCH' && url.pathname.startsWith('/api/entities/')) { const [, , , type, id]=url.pathname.split('/'); const module=entityModule(type); if(!module || !allowedContent(user,module,'update')) return json(res,403,{error:'Sem permissão'}); const blocked=rejectIfMondaySourced(type); if(blocked) return json(res,403,blocked); return body(req).then(input=>{
     const list=collection(store,type); const item=list.find(x=>x.id===id && !x.deletedAt); if(!item || !scoped(user,item)) return json(res,404,{error:'Registro não encontrado'});
-    const before=structuredClone(item); const sanitized=sanitizeEntityInput(input,user);
+    const before=structuredClone(item);
+    // Sprint 2, Fase 1: `reason` (motivo da alteração — obrigatório para reabertura de Legal Deadline
+    // preservar o porquê no histórico, regra homologada em docs/DECISIONS.md, seção 1.1) é extraído do
+    // input ANTES de sanitizeEntityInput()/Object.assign(), para (a) alimentar audit() como já é feito
+    // nas rotas de sub-recurso de projeto, e (b) nunca virar um campo `reason` gravado no próprio
+    // registro (o motor genérico não tinha essa extração; sem ela, `input.reason` seria persistido
+    // como campo comum do registro — mesma classe de mass assignment já corrigida alhures).
+    const reason = typeof input.reason === 'string' && input.reason.trim() ? input.reason.trim() : 'Atualização de registro';
+    delete input.reason;
+    const sanitized=sanitizeEntityInput(input,user);
     // P0 corrigido (rodada 3, item 3): as invariantes de Legal Deadline precisam continuar válidas
     // após QUALQUER atualização — revalida sobre o estado CANDIDATO (item atual + input sanitizado),
     // não apenas sobre os campos enviados nesta requisição. Um PATCH que esvazia origin/date, ou troca
@@ -699,7 +739,7 @@ function handler(req, res) {
       // registro abaixo) para que o PATCH também respeite a herança (rodada 4, item 7).
       sanitized.department = candidate.department; sanitized.companyId = candidate.companyId; sanitized.speId = candidate.speId; sanitized.scopeType = candidate.scopeType;
     }
-    Object.assign(item,sanitized,{version:item.version+1,updatedAt:new Date().toISOString(),updatedBy:user.name}); audit(store,user,'UPDATE',type,id,before,item); writeStore(store); return json(res,200,item);
+    Object.assign(item,sanitized,{version:item.version+1,updatedAt:new Date().toISOString(),updatedBy:user.name}); audit(store,user,'UPDATE',type,id,before,item,reason); writeStore(store); return json(res,200,item);
   }); }
   if (req.method === 'DELETE' && url.pathname.startsWith('/api/entities/')) { const [, , , type, id]=url.pathname.split('/'); const module=entityModule(type); if(!module || !allowedContent(user,module,'archive')) return json(res,403,{error:'Exclusão lógica não autorizada'}); const blocked=rejectIfMondaySourced(type); if(blocked) return json(res,403,blocked); const item=collection(store,type).find(x=>x.id===id); if(!item || !scoped(user,item)) return json(res,404,{error:'Registro não encontrado'}); const before=structuredClone(item); item.deletedAt=new Date().toISOString(); item.deletedBy=user.name; audit(store,user,'ARCHIVE',type,id,before,item); writeStore(store); return json(res,200,{archived:true,id}); }
   if (req.method === 'POST' && url.pathname.match(/^\/api\/entities\/[^/]+\/[^/]+\/restore$/)) { const [, , , type, id]=url.pathname.split('/'); const module=entityModule(type); if(!module || !allowedContent(user,module,'restore')) return json(res,403,{error:'Restauração não autorizada'}); const blocked=rejectIfMondaySourced(type); if(blocked) return json(res,403,blocked); const item=collection(store,type).find(x=>x.id===id); if(!item || !scoped(user,item)) return json(res,404,{error:'Registro não encontrado'}); const before=structuredClone(item); delete item.deletedAt; delete item.deletedBy; item.version++; item.updatedAt=new Date().toISOString(); audit(store,user,'RESTORE',type,id,before,item); writeStore(store); return json(res,200,item); }
@@ -717,5 +757,5 @@ function handler(req, res) {
   return json(res,404,{error:'Rota não encontrada'});
 }
 if (require.main === module) { ensureStore(); http.createServer((req,res)=>handler(req,res)).listen(PORT,()=>console.log(`COEVO Alta Performance disponível em http://localhost:${PORT}`)); setInterval(()=>scheduledMondayTick().catch(error=>console.error('Monday scheduler:',error.message)),60000); }
-module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser };
+module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate };
 
