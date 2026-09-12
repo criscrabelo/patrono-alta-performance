@@ -15,7 +15,10 @@ if (fs.existsSync(ENV_FILE)) {
     if (match && !process.env[match[1]]) process.env[match[1]] = match[2].replace(/^['"]|['"]$/g, '');
   }
 }
-const DATA_DIR = path.join(ROOT, 'data');
+// COEVO_DATA_DIR: override reversível e local, usado apenas pela suíte de testes de integração
+// (tests/security-integration.test.js) para isolar a store de teste da store real do repositório.
+// Em produção/homologação normal a variável não é definida e o caminho padrão é usado.
+const DATA_DIR = process.env.COEVO_DATA_DIR ? path.resolve(process.env.COEVO_DATA_DIR) : path.join(ROOT, 'data');
 const DB_FILE = path.join(DATA_DIR, 'store.json');
 const PORT = Number(process.env.PORT || 3007);
 const sessions = new Map();
@@ -30,6 +33,12 @@ const MONDAY_BOARDS = {
   ...(process.env.MONDAY_BOARD_TRANSFERENCIA_INTERMEDIARIA ? { transferenciaIntermediaria: { id: process.env.MONDAY_BOARD_TRANSFERENCIA_INTERMEDIARIA, name: 'Transferência intermediária' } } : {})
 };
 const MONDAY_SYNC_TIMES = (process.env.MONDAY_SYNC_TIMES || '08:00,13:00,18:00').split(',').map(x=>x.trim()).filter(Boolean);
+// P0 corrigido (rodada 2): allowlist explícita e fechada dos módulos aceitos por GET /api/legal/:module.
+// Antes, :module ia direto para collection(store, moduleName), o que tanto lia quanto podia CRIAR
+// incidentalmente qualquer coleção arbitrária de store.records — inclusive uma não pertencente ao
+// Jurídico — apenas por o usuário trocar o segmento da URL. Deny-by-default: nada fora desta lista é
+// lido, e a coleção nunca é tocada quando o módulo não está na allowlist.
+const LEGAL_MODULES = new Set([...Object.keys(MONDAY_BOARDS), 'honorariosJudiciais']);
 const PROJECT_RESOURCE_MAP={actions:['projectActions','pac'],milestones:['projectMilestones','pms'],risks:['projectRisks','prk'],internalizations:['recoveryCases','rca'],negotiations:['recoveryNegotiations','rng'],'legal-treatments':['legalNegotiationHistory','lth'],'management-items':['projectManagementItems','pmi']};
 // Fase 0 / Sprint 1 — Data Core: mapeia cada tipo de entidade genérica (/api/entities/:type)
 // para o módulo de RBAC correspondente. Tipo ausente deste mapa é negado por padrão (deny-by-default),
@@ -39,12 +48,31 @@ const ENTITY_MODULE_MAP = Object.assign(Object.create(null), {
   honorariosJudiciais: 'juridico', unidades: 'juridico', compraVenda: 'juridico', transferenciaIntermediaria: 'juridico',
   // Esqueleto das entidades do piloto jurídico (Handoff §6/§26 — Sprint 1: preparar arquitetura, sem
   // fonte/cálculo automático de prazo; fonte por tipo de processo/board é decisão pendente antes do Sprint 2).
+  // 'legalProcesses' fica reservado para quando o Legal Process tiver um ID Patrono canônico próprio,
+  // independente do registro Monday (ver docs/DATA_MODEL.md, gap). Até lá, Legal Deadline valida seu
+  // processo relacionado contra 'processos' (registro do piloto de fato), nunca contra 'legalProcesses'
+  // — ver docs/DECISIONS.md, seção de conflitos, para o registro dessa decisão.
   legalDeadlines: 'juridico', legalProcesses: 'juridico', responsibilities: 'juridico',
   documentReferences: 'juridico', externalIdentities: 'juridico'
 });
 // Object.create(null) evita que uma chave como '__proto__' resolva para o protótipo do objeto em vez
 // de `undefined` — leitura de tipo arbitrário na URL nunca deve devolver um valor verdadeiro por acidente.
 function entityModule(type) { return (typeof type === 'string' && ENTITY_MODULE_MAP[type]) || null; }
+// P0 corrigido (rodada 2): campos controlados pelo servidor (identidade do registro, versionamento,
+// metadados de auditoria e metadados de origem/sincronização) nunca podem vir do cliente — antes,
+// `{...input}` permitia que o corpo da requisição sobrescrevesse `id`, `version`, `createdBy`,
+// `updatedAt`, dados de exclusão lógica ou a origem/externalId de um registro sincronizado.
+const PROTECTED_ENTITY_FIELDS = ['id','version','createdAt','createdBy','updatedAt','updatedBy','deletedAt','deletedBy','source','externalId','boardId','boardName','syncedAt'];
+// Remove os campos protegidos do input do cliente. `department` só é preservado quando o papel do
+// usuário tem escopo global (`scopes:['*']`) — um papel com escopo departamental nunca escolhe o
+// departamento do próprio registro, mesmo que o envie no corpo da requisição.
+function sanitizeEntityInput(input, user) {
+  const clean = { ...(input && typeof input === 'object' ? input : {}) };
+  for (const field of PROTECTED_ENTITY_FIELDS) delete clean[field];
+  const hasGlobalScope = (ROLES[user.role]?.scopes || []).includes('*');
+  if (!hasGlobalScope) delete clean.department;
+  return clean;
+}
 const ROLES = {
   diretoria: { modules: ['*'], scopes: ['*'], actions: ['read','create','update','archive','restore','approve','export'] },
   administrador: { modules: ['*'], scopes: ['*'], actions: ['*'] },
@@ -104,7 +132,24 @@ function decryptBackup(input) {
 // papel, não pela flag `mfa` do próprio cadastro — um cadastro aprovado com `mfa:false` e papel
 // privilegiado não deve conseguir contornar o segundo fator (MASTER_HANDOFF §11/§31).
 function requireMfa(user) { return user.role === 'diretoria' || user.role === 'administrador' || user.role === 'lider'; }
-function scoped(user, item) { return user.role === 'diretoria' || user.role === 'administrador' || !item.department || item.department === user.department; }
+// P0 corrigido (rodada 2): antes, um registro SEM `department` era tratado como acessível a qualquer
+// usuário autenticado — ausência de classificação virava, na prática, "global" por acidente. Agora é
+// deny-by-default: um registro só é global se explicitamente marcado (`scopeType:'global'`); um
+// registro sem classificação nenhuma é negado, nunca liberado por omissão.
+//
+// Empresa/SPE (MASTER_HANDOFF §4/§11): nenhum cadastro de empresa/SPE existe ainda neste repositório —
+// nenhum ID foi inventado. As linhas de `companyId`/`speId` abaixo são a fundação da autorização por
+// empresa/SPE prevista na v1.3: hoje são inertes (nenhum registro ou usuário carrega esses campos),
+// mas já bloqueiam automaticamente quando esse cadastro existir, sem exigir nova revisão de `scoped()`.
+// Ver docs/PERMISSIONS.md para o estado exato do que está e do que NÃO está implementado.
+function scoped(user, item) {
+  if (user.role === 'diretoria' || user.role === 'administrador') return true;
+  if (item.scopeType === 'global') return true;
+  if (item.companyId && user.companyId && item.companyId !== user.companyId) return false;
+  if (item.speId && user.speId && item.speId !== user.speId) return false;
+  if (!item.department) return false;
+  return item.department === user.department;
+}
 function collection(store, type) { if (!store.records) store.records = {}; if (!store.records[type]) store.records[type] = []; return store.records[type]; }
 function parseCsv(csv) {
   const rows = String(csv || '').trim().split(/\r?\n/).filter(Boolean).map(row => row.split(',').map(v => v.trim()));
@@ -124,7 +169,11 @@ async function fetchMondayBoard(boardId) {
   const query=`query($boardId:ID!,$limit:Int!,$cursor:String){boards(ids:[$boardId]){columns{id title} items_page(limit:$limit,cursor:$cursor){cursor items{id name created_at group{id title} column_values{id text}}}}}`;
   let cursor=null, items=[]; let columnTitles={}; do { const data=await mondayQuery(query,{boardId:String(boardId),limit:200,cursor}); const board=data.boards?.[0]; const page=board?.items_page; if(!page)break; columnTitles=Object.fromEntries((board.columns||[]).map(c=>[String(c.id),c.title])); items=items.concat((page.items||[]).map(item=>({...item,column_titles:columnTitles})));cursor=page.cursor||null; } while(cursor); return items;
 }
-function normalizeMondayItem(item,module,board){const columns=Object.fromEntries((item.column_values||[]).map(c=>[c.id,c.text]));const columnsByTitle=Object.fromEntries((item.column_values||[]).map(c=>[item.column_titles?.[c.id]||c.id,c.text]));return {id:crypto.randomUUID(),source:'monday',externalId:String(item.id),module,boardId:board.id,boardName:board.name,title:item.name,group:item.group?.title||null,columns,columnsByTitle,createdAt:item.created_at||null,syncedAt:new Date().toISOString(),classification:'Interno',deletedAt:null};}
+// department:'Jurídico' é atribuído explicitamente porque todos os boards em MONDAY_BOARDS pertencem
+// ao Jurídico (P0 corrigido na rodada 2 de scoped(): ausência de `department` deixou de significar
+// acesso liberado a qualquer departamento — sem esta classificação explícita, TI teria sido bloqueado
+// destes registros por engano, em vez de Jurídico ser corretamente isolado de TI).
+function normalizeMondayItem(item,module,board){const columns=Object.fromEntries((item.column_values||[]).map(c=>[c.id,c.text]));const columnsByTitle=Object.fromEntries((item.column_values||[]).map(c=>[item.column_titles?.[c.id]||c.id,c.text]));return {id:crypto.randomUUID(),source:'monday',externalId:String(item.id),module,boardId:board.id,boardName:board.name,department:'Jurídico',title:item.name,group:item.group?.title||null,columns,columnsByTitle,createdAt:item.created_at||null,syncedAt:new Date().toISOString(),classification:'Interno',deletedAt:null};}
 function processColumn(row,title,id){return String(row.columnsByTitle?.[title]??row.columns?.[id]??'').trim();}
 function processStatusValue(row){const value=processColumn(row,"'MEU TRABALHO'",'status5')||processColumn(row,'STATUS (para comitê)','status84__1')||processColumn(row,'STATUS','color_mky1db73');if(/acordo/i.test(value))return 'Acordo';if(/finaliz|encerr|baix|extint|arquiv/i.test(value))return 'Finalizado';if(/acompanha/i.test(value))return 'Em acompanhamento';if(/andamento|suspenso/i.test(value))return 'Em andamento';return 'A classificar';}
 function processScopeValue(row){const value=processColumn(row,'LOCAL','status3');if(/interno/i.test(value))return 'Interno';if(/externo/i.test(value))return 'Externo';return 'A classificar';}
@@ -298,7 +347,7 @@ function handler(req, res) {
     return body(req).then(input=>{const validIds=new Set(definition.widgets.map(item=>item.id)),preference={userId:user.id,dashboardId,hiddenWidgets:[...new Set(input.hiddenWidgets||[])].filter(id=>validIds.has(id)),widgetOrder:[...new Set(input.widgetOrder||[])].filter(id=>validIds.has(id)),density:input.density==='compact'?'compact':'comfortable',updatedAt:new Date().toISOString()};for(const id of validIds)if(!preference.widgetOrder.includes(id))preference.widgetOrder.push(id);store.dashboardPreferences=store.dashboardPreferences||[];const index=store.dashboardPreferences.findIndex(item=>item.userId===user.id&&item.dashboardId===dashboardId);if(index>=0)store.dashboardPreferences[index]=preference;else store.dashboardPreferences.push(preference);audit(store,user,'UPDATE','dashboardPreference',dashboardId,null,preference,'Personalização de dashboard');writeStore(store);return json(res,200,preference)});
   }
   if (req.method === 'POST' && url.pathname === '/api/monday/test') { if(!allowed(user,'juridico','read')) return json(res,403,{error:'Sem permissão'}); return mondayQuery('{me{id name email}}').then(data=>json(res,200,{connected:true,account:data.me})).catch(error=>json(res,503,{connected:false,error:error.message})); }
-  if (req.method === 'GET' && url.pathname.startsWith('/api/legal/')) { const moduleName=url.pathname.split('/')[3]; if(!allowed(user,'juridico','read')) return json(res,403,{error:'Sem permissão para o módulo Jurídico'}); if(moduleName==='honorariosJudiciais'){const processRows=collection(store,'processos').filter(x=>!x.deletedAt&&x.source==='monday'&&scoped(user,x));return json(res,200,{module:moduleName,...judicialHonorariumPayload(processRows)});}const rows=collection(store,moduleName).filter(x=>!x.deletedAt&&x.source==='monday'&&scoped(user,x)); if(moduleName==='processos'&&url.searchParams.get('paginated')==='1')return json(res,200,{module:moduleName,...filterProcesses(rows,url)});if(moduleName==='honorarios'&&url.searchParams.get('paginated')==='1')return json(res,200,{module:moduleName,...filterHonorariums(rows,url)});return json(res,200,{module:moduleName,count:rows.length,records:rows}); }
+  if (req.method === 'GET' && url.pathname.startsWith('/api/legal/')) { const moduleName=url.pathname.split('/')[3]; if(!allowed(user,'juridico','read')) return json(res,403,{error:'Sem permissão para o módulo Jurídico'}); if(!LEGAL_MODULES.has(moduleName)) return json(res,404,{error:'Módulo jurídico não encontrado'}); if(moduleName==='honorariosJudiciais'){const processRows=collection(store,'processos').filter(x=>!x.deletedAt&&x.source==='monday'&&scoped(user,x));return json(res,200,{module:moduleName,...judicialHonorariumPayload(processRows)});}const rows=collection(store,moduleName).filter(x=>!x.deletedAt&&x.source==='monday'&&scoped(user,x)); if(moduleName==='processos'&&url.searchParams.get('paginated')==='1')return json(res,200,{module:moduleName,...filterProcesses(rows,url)});if(moduleName==='honorarios'&&url.searchParams.get('paginated')==='1')return json(res,200,{module:moduleName,...filterHonorariums(rows,url)});return json(res,200,{module:moduleName,count:rows.length,records:rows}); }
   if (req.method === 'POST' && url.pathname === '/api/monday/sync') { if(!allowed(user,'juridico','create')) return json(res,403,{error:'Sem permissão para sincronizar'}); return body(req).then(async input=>{const modules=input.modules?.length?input.modules:Object.keys(MONDAY_BOARDS);store.mondayRuns=store.mondayRuns||[];const run={id:crypto.randomUUID(),startedAt:new Date().toISOString(),requestedBy:user.name,modules:[],status:'running'};store.mondayRuns.push(run);let failed=0;for(const moduleName of modules){const board=MONDAY_BOARDS[moduleName];if(!board)continue;try{const items=await fetchMondayBoard(board.id);const list=collection(store,moduleName);let created=0,updated=0;for(const raw of items){const normalized=normalizeMondayItem(raw,moduleName,board);const existing=list.find(x=>x.source==='monday'&&x.externalId===normalized.externalId);if(existing){const before=structuredClone(existing);Object.assign(existing,normalized,{id:existing.id,version:(existing.version||1)+1});updated++;}else{list.push({...normalized,version:1});created++;}}run.modules.push({module:moduleName,board:board.name,read:items.length,created,updated,status:'ok'});}catch(error){failed++;run.modules.push({module:moduleName,board:board.name,status:'error',error:error.message});}}run.status=failed?'partial':'completed';run.finishedAt=new Date().toISOString();audit(store,user,'SYNC','monday',run.id,null,run,'Sincronização somente leitura com preservação de dados anteriores');writeStore(store);return json(res,failed?207:200,run);}); }
   if (req.method === 'GET' && url.pathname === '/api/auth/requests') { if(!allowed(user,'*','approve')) return json(res,403,{error:'Somente aprovadores podem consultar solicitações'}); return json(res,200,store.registrationRequests); }
   if (req.method === 'POST' && url.pathname.match(/^\/api\/auth\/requests\/[^/]+\/approve$/)) { if(!allowed(user,'*','approve')) return json(res,403,{error:'Somente aprovadores podem aprovar'}); const id=url.pathname.split('/')[4]; const request=store.registrationRequests.find(r=>r.id===id&&r.status==='pending'); if(!request) return json(res,404,{error:'Solicitação não encontrada'}); request.status='approved';request.approvedAt=new Date().toISOString();request.approvedBy=user.name; const created={id:crypto.randomUUID(),name:request.name,email:request.email,role:request.requestedRole,department:request.department,mfa:false,temporaryPassword:true}; store.users.push(created); audit(store,user,'APPROVE','registration',id,{status:'pending'},{status:'approved',userId:created.id},'Aprovação de cadastro por responsável humano'); writeStore(store); return json(res,200,{approved:true,user:created}); }
@@ -317,8 +366,25 @@ function handler(req, res) {
   // permitindo que qualquer usuário autenticado lesse qualquer coleção via troca de :type na URL
   // (IDOR/BOLA — MASTER_HANDOFF §11/§26). Tipo fora de ENTITY_MODULE_MAP é negado por padrão.
   if (req.method === 'GET' && url.pathname.startsWith('/api/entities/')) { const type=url.pathname.split('/')[3]; const module=entityModule(type); if(!module || !allowed(user,module,'read')) return json(res,403,{error:'Sem permissão'}); return json(res,200,collection(store,type).filter(x=>!x.deletedAt && scoped(user,x))); }
-  if (req.method === 'POST' && url.pathname.startsWith('/api/entities/') && !url.pathname.endsWith('/restore')) { const type=url.pathname.split('/')[3]; const module=entityModule(type); if(!module || !allowed(user,module,'create')) return json(res,403,{error:'Sem permissão'}); return body(req).then(input=>{ if(type==='legalDeadlines'){ const missing=['processId','origin','date'].filter(field=>!input[field]); if(missing.length) return json(res,422,{error:`Prazo jurídico sem origem identificada bloqueia o cadastro. Campos obrigatórios ausentes: ${missing.join(', ')}`}); } const item={id:crypto.randomUUID(),version:1,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),createdBy:user.name,...input}; collection(store,type).push(item); audit(store,user,'CREATE',type,item.id,null,item); writeStore(store); return json(res,201,item); }); }
-  if (req.method === 'PATCH' && url.pathname.startsWith('/api/entities/')) { const [, , , type, id]=url.pathname.split('/'); const module=entityModule(type); if(!module || !allowed(user,module,'update')) return json(res,403,{error:'Sem permissão'}); return body(req).then(input=>{ const list=collection(store,type); const item=list.find(x=>x.id===id && !x.deletedAt); if(!item || !scoped(user,item)) return json(res,404,{error:'Registro não encontrado'}); const before=structuredClone(item); Object.assign(item,input,{version:item.version+1,updatedAt:new Date().toISOString(),updatedBy:user.name}); audit(store,user,'UPDATE',type,id,before,item); writeStore(store); return json(res,200,item); }); }
+  if (req.method === 'POST' && url.pathname.startsWith('/api/entities/') && !url.pathname.endsWith('/restore')) { const type=url.pathname.split('/')[3]; const module=entityModule(type); if(!module || !allowed(user,module,'create')) return json(res,403,{error:'Sem permissão'}); return body(req).then(input=>{
+    if(type==='legalDeadlines'){
+      const missing=['processId','origin','date'].filter(field=>!input[field]);
+      if(missing.length) return json(res,422,{error:`Prazo jurídico sem origem identificada bloqueia o cadastro. Campos obrigatórios ausentes: ${missing.join(', ')}`});
+      // Integridade relacional (rodada 2): o processo referenciado precisa existir na coleção que
+      // representa de fato o Legal Process do piloto ('processos', sincronizada do Monday — ver
+      // docs/DECISIONS.md) e precisar estar dentro do escopo que o próprio usuário pode acessar.
+      // Não cria/calcula origem: apenas valida a relação com o processo informado.
+      const relatedProcess = collection(store,'processos').find(p=>p.id===input.processId && !p.deletedAt);
+      if(!relatedProcess) return json(res,422,{error:'Processo relacionado não encontrado'});
+      if(!scoped(user,relatedProcess)) return json(res,403,{error:'Sem permissão para relacionar este processo'});
+    }
+    // Campos controlados pelo servidor são atribuídos DEPOIS do input sanitizado, garantindo que
+    // nenhum deles seja sobrescrito mesmo que o cliente os reenvie por outro nome/caminho.
+    const sanitized = sanitizeEntityInput(input, user);
+    const item={ ...sanitized, id:crypto.randomUUID(), version:1, createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(), createdBy:user.name, department: sanitized.department ?? ((ROLES[user.role]?.scopes||[]).includes('*') ? null : (user.department||null)) };
+    collection(store,type).push(item); audit(store,user,'CREATE',type,item.id,null,item); writeStore(store); return json(res,201,item);
+  }); }
+  if (req.method === 'PATCH' && url.pathname.startsWith('/api/entities/')) { const [, , , type, id]=url.pathname.split('/'); const module=entityModule(type); if(!module || !allowed(user,module,'update')) return json(res,403,{error:'Sem permissão'}); return body(req).then(input=>{ const list=collection(store,type); const item=list.find(x=>x.id===id && !x.deletedAt); if(!item || !scoped(user,item)) return json(res,404,{error:'Registro não encontrado'}); const before=structuredClone(item); const sanitized=sanitizeEntityInput(input,user); Object.assign(item,sanitized,{version:item.version+1,updatedAt:new Date().toISOString(),updatedBy:user.name}); audit(store,user,'UPDATE',type,id,before,item); writeStore(store); return json(res,200,item); }); }
   if (req.method === 'DELETE' && url.pathname.startsWith('/api/entities/')) { const [, , , type, id]=url.pathname.split('/'); const module=entityModule(type); if(!module || !allowed(user,module,'archive')) return json(res,403,{error:'Exclusão lógica não autorizada'}); const item=collection(store,type).find(x=>x.id===id); if(!item || !scoped(user,item)) return json(res,404,{error:'Registro não encontrado'}); const before=structuredClone(item); item.deletedAt=new Date().toISOString(); item.deletedBy=user.name; audit(store,user,'ARCHIVE',type,id,before,item); writeStore(store); return json(res,200,{archived:true,id}); }
   if (req.method === 'POST' && url.pathname.match(/^\/api\/entities\/[^/]+\/[^/]+\/restore$/)) { const [, , , type, id]=url.pathname.split('/'); const module=entityModule(type); if(!module || !allowed(user,module,'restore')) return json(res,403,{error:'Restauração não autorizada'}); const item=collection(store,type).find(x=>x.id===id); if(!item || !scoped(user,item)) return json(res,404,{error:'Registro não encontrado'}); const before=structuredClone(item); delete item.deletedAt; delete item.deletedBy; item.version++; item.updatedAt=new Date().toISOString(); audit(store,user,'RESTORE',type,id,before,item); writeStore(store); return json(res,200,item); }
   if (req.method === 'POST' && url.pathname === '/api/budgets/import/preview') return body(req).then(input=>json(res,200,parseCsv(input.csv)));
@@ -328,5 +394,5 @@ function handler(req, res) {
   return json(res,404,{error:'Rota não encontrada'});
 }
 if (require.main === module) { ensureStore(); http.createServer((req,res)=>handler(req,res)).listen(PORT,()=>console.log(`COEVO Alta Performance disponível em http://localhost:${PORT}`)); setInterval(()=>scheduledMondayTick().catch(error=>console.error('Monday scheduler:',error.message)),60000); }
-module.exports = { seed, ROLES, allowed, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa };
+module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT };
 

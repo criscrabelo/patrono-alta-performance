@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { ROLES, allowed, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, seed, parseCsv, hash, ENTITY_MODULE_MAP, entityModule, requireMfa } = require('../server');
+const { ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, seed, parseCsv, hash, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput } = require('../server');
 const { WIDGET_TYPES, DASHBOARD_DEFINITIONS } = require('../dashboard-model');
 const { dashboardPayload } = require('../dashboard-service');
 const { PROJECT_ID, ensureProjectStore, projectDetail, projectPermissions } = require('../project-service');
@@ -262,29 +262,6 @@ test('GET /api/entities/:type nega tipo fora do allowlist (deny-by-default, sem 
   assert.equal(entityModule('__proto__'), null);
 });
 
-test('GET /api/entities e /api/legal aplicam allowed() por módulo, não apenas scoped() por registro', () => {
-  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  assert.match(
-    source,
-    /url\.pathname\.startsWith\('\/api\/entities\/'\)\) \{ const type=url\.pathname\.split\('\/'\)\[3\]; const module=entityModule\(type\); if\(!module \|\| !allowed\(user,module,'read'\)\)/,
-    'GET /api/entities/:type deve verificar entityModule + allowed antes de devolver a coleção (P0 item B corrigido)'
-  );
-  assert.match(
-    source,
-    /url\.pathname\.startsWith\('\/api\/legal\/'\)\) \{ const moduleName=url\.pathname\.split\('\/'\)\[3\]; if\(!allowed\(user,'juridico','read'\)\)/,
-    'GET /api/legal/:module deve verificar allowed(user, "juridico", "read") antes de devolver registros (P0 item H corrigido)'
-  );
-});
-
-test('restauração de entidade genérica respeita escopo departamental do registro (object-level authorization)', () => {
-  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  assert.match(
-    source,
-    /restore\$\/\)\) \{ const \[, , , type, id\]=url\.pathname\.split\('\/'\); const module=entityModule\(type\); if\(!module \|\| !allowed\(user,module,'restore'\)\)[\s\S]{0,200}!scoped\(user,item\)/,
-    'restauração deve validar módulo e escopo do registro, não apenas existência do id'
-  );
-});
-
 test('MFA de perfis privilegiados independe da flag mfa do cadastro (item D corrigido)', () => {
   assert.equal(requireMfa({ role: 'lider', mfa: false }), true, 'papel privilegiado deve exigir MFA mesmo com mfa:false');
   assert.equal(requireMfa({ role: 'diretoria', mfa: false }), true);
@@ -292,12 +269,48 @@ test('MFA de perfis privilegiados independe da flag mfa do cadastro (item D corr
   assert.equal(requireMfa({ role: 'colaborador', mfa: false }), false, 'colaborador não é perfil privilegiado');
 });
 
-test('Legal Deadline não é criado sem origem, processo relacionado ou data (esqueleto do piloto, MASTER_HANDOFF §6/§30)', () => {
-  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  assert.match(source, /legalDeadlines/, 'ENTITY_MODULE_MAP e validação devem referenciar legalDeadlines');
-  assert.match(
-    source,
-    /type==='legalDeadlines'\)\{ const missing=\['processId','origin','date'\]\.filter/,
-    'criação de Legal Deadline deve exigir processId, origin e date — sem fonte identificada, o cadastro é bloqueado'
-  );
+// Cobertura funcional real (não baseada em regex de source) das correções de object-level authorization,
+// sanitização de campos protegidos e escopo — ver tests/security-integration.test.js para os testes de
+// HTTP em runtime equivalentes, exercitando o handler real via servidor real.
+
+test('scoped() nega registro sem department nem classificação global (deny-by-default, corrigido na rodada 2)', () => {
+  const colaborador = { role: 'colaborador', department: 'Jurídico' };
+  assert.equal(scoped(colaborador, {}), false, 'registro sem department não pode ser tratado como global por omissão');
+  assert.equal(scoped(colaborador, { department: 'Jurídico' }), true);
+  assert.equal(scoped(colaborador, { department: 'TI' }), false);
+  assert.equal(scoped(colaborador, { scopeType: 'global' }), true, 'registro explicitamente global permanece acessível');
+  assert.equal(scoped({ role: 'diretoria' }, {}), true, 'diretoria/administrador continuam com acesso total');
+});
+
+test('scoped() prepara o gate de empresa/SPE sem inventar cadastro (inerte até existir companyId/speId real)', () => {
+  const user = { role: 'colaborador', department: 'Jurídico' };
+  assert.equal(scoped(user, { department: 'Jurídico', companyId: 'empresa-x' }), true, 'sem companyId no usuário, o gate de empresa não se aplica ainda');
+  assert.equal(scoped({ ...user, companyId: 'empresa-y' }, { department: 'Jurídico', companyId: 'empresa-x' }), false, 'quando ambos os lados carregam companyId, precisam coincidir');
+});
+
+test('sanitizeEntityInput remove campos controlados pelo servidor e o escopo departamental do input do cliente', () => {
+  const maliciousInput = {
+    id: 'id-forjado', version: 999, createdAt: '2000-01-01', createdBy: 'Invasor',
+    updatedAt: '2000-01-01', updatedBy: 'Invasor', deletedAt: '2000-01-01', deletedBy: 'Invasor',
+    source: 'monday', externalId: 'ext-forjado', boardId: 'board-x', boardName: 'Board X', syncedAt: '2000-01-01',
+    department: 'TI', title: 'Registro legítimo'
+  };
+  const colaborador = { role: 'colaborador', department: 'Jurídico' };
+  const sanitizedForColaborador = sanitizeEntityInput(maliciousInput, colaborador);
+  for (const field of PROTECTED_ENTITY_FIELDS) assert.equal(sanitizedForColaborador[field], undefined, `campo protegido "${field}" não pode sobreviver à sanitização`);
+  assert.equal(sanitizedForColaborador.department, undefined, 'papel com escopo departamental não escolhe o department do próprio registro');
+  assert.equal(sanitizedForColaborador.title, 'Registro legítimo', 'campos de negócio legítimos permanecem intactos');
+
+  const diretoria = { role: 'diretoria', department: null };
+  const sanitizedForDiretoria = sanitizeEntityInput(maliciousInput, diretoria);
+  for (const field of PROTECTED_ENTITY_FIELDS) assert.equal(sanitizedForDiretoria[field], undefined);
+  assert.equal(sanitizedForDiretoria.department, 'TI', 'papel com escopo global (*) pode escolher o department do registro que está criando/gerindo');
+});
+
+test('LEGAL_MODULES é uma allowlist fechada — nenhum tipo de entidade genérica vaza por /api/legal/:module', () => {
+  assert.ok(LEGAL_MODULES.has('processos'));
+  assert.ok(LEGAL_MODULES.has('honorariosJudiciais'));
+  assert.equal(LEGAL_MODULES.has('legalDeadlines'), false, 'entidades do motor genérico não são expostas por /api/legal/:module');
+  assert.equal(LEGAL_MODULES.has('__proto__'), false);
+  assert.equal(LEGAL_MODULES.has('financeiroBancario'), false);
 });

@@ -126,6 +126,90 @@ sempre com origem identificada").
 **Reversível.** Sim — quando D1 for decidida, um job de sincronização por board pode ser adicionado sem
 alterar o esquema da entidade.
 
+**Atualização (rodada 2 de correções de segurança).** A revisão de código pediu integridade relacional:
+o `processId` de um Legal Deadline precisa corresponder a um processo existente e dentro do escopo do
+usuário. Isso levantou uma ambiguidade que precisava ser resolvida sem inventar uma terceira entidade —
+ver ADR-004 abaixo.
+
+---
+
+### ADR-004 — Legal Deadline valida `processId` contra a coleção `processos`, não contra `legalProcesses`
+
+**Contexto.** `ENTITY_MODULE_MAP` (adicionado no Sprint 1) reserva duas chaves que soam como "o
+processo do piloto": `processos` (a coleção real, sincronizada do Monday, usada em toda a aplicação —
+inclusive já referenciada por `project-service.js` para internalizações) e `legalProcesses` (reservada
+para quando Legal Process tiver um ID Patrono canônico próprio, independente do Monday — gap documentado
+em `docs/DATA_MODEL.md`). Nenhuma das duas é uma terceira entidade nova; a pergunta era qual delas usar
+para validar a relação de um Legal Deadline com seu processo.
+
+**Decisão.** `POST /api/entities/legalDeadlines` valida `input.processId` contra
+`collection(store, 'processos')` — a coleção que de fato representa o Legal Process do piloto hoje,
+population e usada pelo restante da aplicação. `legalProcesses` permanece reservada e **não é usada**
+nesta validação, nem em nenhum outro código nesta execução.
+
+**Justificativa.** `processos` é a única coleção que realmente contém dados de Legal Process no piloto
+atual (via sincronização Monday) e já é o padrão usado em outro lugar do código
+(`project-service.js`/rotas de projeto: `collection(store,'processos').some(item=>item.id===input.processId)`
+para internalizações). Validar contra `legalProcesses` — hoje sempre vazia — rejeitaria **todo**
+`processId` real, quebrando o próprio propósito da validação. Criar uma terceira entidade só para essa
+validação seria exatamente o que a instrução desta rodada pediu para evitar.
+
+**Consequência.** Quando o Legal Process ganhar um ID Patrono canônico independente do Monday (gap já
+registrado em `docs/DATA_MODEL.md`), esta validação precisará ser revisada para apontar para essa nova
+entidade — ou para ambas, durante uma transição. Fica registrado aqui para não ser esquecido.
+
+**Reversível.** Sim — é uma única linha de `collection(store, 'processos')` no handler de criação.
+
+---
+
+### ADR-005 — Registros sincronizados do Monday recebem `department:'Jurídico'` explicitamente
+
+**Contexto.** A correção de `scoped()` (rodada 2, ver `docs/SECURITY.md`/`docs/PERMISSIONS.md`) passou a
+negar por padrão qualquer registro sem `department` — antes, ausência de `department` liberava o
+registro para qualquer usuário autenticado, o que é o oposto do que a v1.3 pede. Isso teria, como efeito
+colateral, bloqueado o próprio Jurídico de ver seus registros sincronizados do Monday, já que
+`normalizeMondayItem()` nunca atribuía `department`.
+
+**Decisão.** `normalizeMondayItem()` passa a atribuir `department: 'Jurídico'` a todo registro que
+sincroniza, porque **todos** os boards em `MONDAY_BOARDS` pertencem ao Jurídico (processos,
+notificações, distratos, honorários, unidades, compra e venda, transferência intermediária — não há
+nenhum board de outro departamento nesta configuração).
+
+**Justificativa.** É uma classificação verdadeira, não inventada — os próprios nomes e o propósito de
+cada board em `MONDAY_BOARDS` já eram exclusivamente jurídicos antes desta execução; o código apenas
+não declarava isso explicitamente no registro. Não há ambiguidade a resolver aqui.
+
+**Consequência (desejada e testada).** Um usuário de TI (que também tem o módulo `juridico` liberado por
+papel, ver `docs/PERMISSIONS.md`) deixa de conseguir ler/listar registros Jurídicos por meio de
+`/api/entities/:type` ou `/api/legal/:module` — o que estava indevidamente liberado antes desta correção,
+e é exatamente o cenário "TI tenta acessar Jurídico → bloqueado no backend" do Catálogo Global de
+Regressão (§30).
+
+**Reversível.** Sim — se um board de outro departamento for adicionado a `MONDAY_BOARDS` no futuro,
+`normalizeMondayItem()` precisará receber o departamento correto por parâmetro em vez do valor fixo.
+
+---
+
+### ADR-006 — Isolamento de dados de teste via `COEVO_DATA_DIR` (variável de ambiente, opcional)
+
+**Contexto.** A revisão de segurança pediu testes de integração HTTP reais, exercitando o `handler` real
+contra um servidor real. `DATA_DIR`/`DB_FILE` eram caminhos fixos dentro do repositório
+(`path.join(ROOT,'data')`) — testes que chamassem `handler` diretamente escreveriam na store real do
+projeto (ainda que gitignored), o que é inaceitável para uma suíte de testes automatizada e repetível
+em CI.
+
+**Decisão.** `DATA_DIR` passa a respeitar `process.env.COEVO_DATA_DIR` quando definida, mantendo o
+caminho padrão (`ROOT/data`) quando ausente. Somente `tests/security-integration.test.js` define essa
+variável, apontando para um diretório temporário criado e removido pelo próprio teste
+(`fs.mkdtempSync`/`fs.rmSync`).
+
+**Justificativa.** Menor mudança possível para tornar os testes de integração seguros e repetíveis, sem
+introduzir um framework de teste novo ou reestruturar `server.js`. Não afeta o comportamento em
+produção/homologação, onde a variável nunca é definida.
+
+**Reversível.** Sim — é uma única linha condicional; remover a variável de ambiente restaura o
+comportamento anterior exatamente.
+
 ---
 
 ## 3. Conflitos entre código existente e MASTER_HANDOFF v1.3

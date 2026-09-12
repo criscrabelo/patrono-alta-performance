@@ -8,7 +8,7 @@
 
 | Entidade (§6) | Implementação atual | Situação | Nota |
 |---|---|---|---|
-| Legal Process | Coleção `processos`, sincronizada do Monday (somente leitura), com `externalId`, `source`, `syncedAt` | **Presente**, como registro operacional/transitório (Monday é System of Record transitório, §9) | Não é modelado com ID Patrono próprio ainda — usa o registro Monday normalizado diretamente |
+| Legal Process | Coleção `processos`, sincronizada do Monday (somente leitura), com `externalId`, `source`, `syncedAt`, `department:'Jurídico'` (atribuído explicitamente na rodada 2 — ver `docs/DECISIONS.md`, ADR-005) | **Presente**, como registro operacional/transitório (Monday é System of Record transitório, §9) | Não é modelado com ID Patrono próprio ainda — usa o registro Monday normalizado diretamente |
 | Legal Deadline | Coleção genérica `legalDeadlines`, adicionada nesta execução via `/api/entities/legalDeadlines` | **Esqueleto criado no Sprint 1** — sem pipeline automático de origem (decisão D1 pendente, ver `docs/DECISIONS.md`) | Exige `processId`, `origin`, `date` na criação; herda versionamento, exclusão lógica, restauração e auditoria do motor genérico |
 | Responsibility | Sem entidade própria; responsável é um campo textual dentro dos registros Monday normalizados (`processResponsibleValues`) | **Gap** | `responsibilities` reservado em `ENTITY_MODULE_MAP` para uso futuro quando a modelagem de Responsibility for necessária além do campo textual |
 | External Identity | Cada registro sincronizado do Monday já carrega `source: 'monday'`, `externalId`, `boardId`, `boardName`, `syncedAt` | **Presente**, de forma implícita (par sistema/id/timestamp por registro) | Padrão consistente com "`patrono_id → (sistema, id_externo, tipo de fonte, última sincronização)`" (§8); generalização como entidade própria fica para quando outra fonte além do Monday for integrada |
@@ -30,7 +30,7 @@ Campos mínimos exigidos na criação (bloqueio obrigatório, QA §30 caso 8):
 
 | Campo | Obrigatório | Descrição |
 |---|---|---|
-| `processId` | Sim | Referência ao Legal Process relacionado |
+| `processId` | Sim | Referência ao Legal Process relacionado — validada na criação contra a coleção `processos` (existência + escopo do usuário sobre o processo; ver `docs/DECISIONS.md`, ADR-004, para a ambiguidade `processos`/`legalProcesses` e por que `processos` foi escolhida) |
 | `origin` | Sim | Origem identificada do prazo (nunca inventada; deve vir de fonte validada ou registro autorizado, §6) |
 | `date` | Sim | Data-limite |
 | `status` | Não (default implícito) | Ex.: Ativo, Suspenso, Cumprido — suspensão preserva motivo/estado, nunca é exibida como vencimento comum (§30 caso 6) |
