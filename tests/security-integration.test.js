@@ -1250,3 +1250,136 @@ test('[HTTP] novo fato gerador (nova intimação) cria novo Legal Deadline, sem 
   assert.equal(stillOriginal.origin, 'Intimação original', 'o registro original permanece inalterado após o novo fato gerador');
   assert.equal(stillOriginal.date, '2026-12-01');
 });
+
+// --- Correção pós-revisão do PR #4: reabertura exige `reason` explícito; `reason` fica restrito a
+// legalDeadlines; body(req) tratado de forma null-safe. Nenhum dos 132 testes anteriores foi removido.
+
+test('[HTTP] reabertura de "suspenso" para "ativo" sem reason é rejeitada com 422 e não altera o registro', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem reabertura sem motivo', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(created.status, 201);
+  const id = created.body.id;
+
+  const suspended = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { status: 'suspenso', reason: 'Suspenso para o teste' } });
+  assert.equal(suspended.status, 200);
+  assert.equal(suspended.body.version, 2);
+
+  const reopenSemReason = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { status: 'ativo' } });
+  assert.equal(reopenSemReason.status, 422, 'reabertura sem reason deve ser rejeitada com 422');
+  assert.ok(reopenSemReason.body.error, 'mensagem de erro clara deve ser retornada');
+
+  const list = await api('GET', '/api/entities/legalDeadlines', { token });
+  const record = list.body.find(item => item.id === id);
+  assert.equal(record.status, 'suspenso', 'tentativa rejeitada sem reason não altera o status — permanece "suspenso"');
+  assert.equal(record.version, 2, 'tentativa rejeitada sem reason não incrementa version');
+});
+
+test('[HTTP] reabertura de "cancelado" para "ativo" sem reason é rejeitada com 422', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem cancelado sem motivo', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(created.status, 201);
+  const id = created.body.id;
+
+  const cancelled = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { status: 'cancelado', reason: 'Cancelado para o teste' } });
+  assert.equal(cancelled.status, 200);
+
+  const reopenSemReason = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { status: 'ativo' } });
+  assert.equal(reopenSemReason.status, 422, 'reabertura de "cancelado" sem reason também é rejeitada');
+
+  const list = await api('GET', '/api/entities/legalDeadlines', { token });
+  const record = list.body.find(item => item.id === id);
+  assert.equal(record.status, 'cancelado', 'status permanece "cancelado" após tentativa rejeitada');
+});
+
+test('[HTTP] reabertura de "cumprido" para "ativo" sem reason é rejeitada com 422', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem cumprido sem motivo', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(created.status, 201);
+  const id = created.body.id;
+
+  const cumprido = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { status: 'cumprido', reason: 'Cumprido para o teste' } });
+  assert.equal(cumprido.status, 200);
+
+  const reopenSemReason = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { status: 'ativo' } });
+  assert.equal(reopenSemReason.status, 422, 'reabertura de "cumprido" sem reason também é rejeitada');
+});
+
+test('[HTTP] reabertura com reason não vazio é aceita (200), mantém o mesmo id e incrementa version', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem reabertura com motivo', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  const id = created.body.id;
+  await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { status: 'suspenso', reason: 'Suspensão para o teste' } });
+
+  const reopened = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { status: 'ativo', reason: 'Motivo explícito de reabertura' } });
+  assert.equal(reopened.status, 200, 'reabertura com reason válido é aceita');
+  assert.equal(reopened.body.id, id, 'reabertura mantém o mesmo id');
+  assert.equal(reopened.body.version, 3, 'reabertura incrementa version');
+  assert.equal(reopened.body.status, 'ativo');
+
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  const auditList = await api('GET', '/api/audit', { token: tokenDiretoria });
+  const reopenEvent = auditList.body.find(event => event.entityId === id && event.after?.status === 'ativo' && event.before?.status === 'suspenso');
+  assert.ok(reopenEvent, 'evento de auditoria da reabertura deve existir');
+  assert.equal(reopenEvent.reason, 'Motivo explícito de reabertura', 'reason do audit é exatamente o texto informado pelo usuário');
+});
+
+test('[HTTP] reason de rejeição textual apenas com espaços em branco é tratado como ausente (422)', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem reason em branco', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  const id = created.body.id;
+  await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { status: 'suspenso', reason: 'Suspensão para o teste' } });
+
+  const reopenComEspacos = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { status: 'ativo', reason: '   ' } });
+  assert.equal(reopenComEspacos.status, 422, 'reason contendo apenas espaços em branco não é aceito como motivo válido');
+});
+
+test('[HTTP] reason não é persistido como campo de negócio do registro Legal Deadline', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem sem persistir reason', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  const id = created.body.id;
+
+  const patched = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { status: 'suspenso', reason: 'Este texto não deve virar campo do registro' } });
+  assert.equal(patched.status, 200);
+  assert.equal(patched.body.reason, undefined, 'reason não aparece na resposta do PATCH como campo do registro');
+
+  const list = await api('GET', '/api/entities/legalDeadlines', { token });
+  const record = list.body.find(item => item.id === id);
+  assert.equal(record.reason, undefined, 'reason não é persistido como campo comum do Legal Deadline — alimenta apenas a auditoria');
+});
+
+test('[HTTP] PATCH de Legal Deadline com body JSON null não derruba o servidor e responde de forma controlada', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Origem body null', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(created.status, 201);
+  const id = created.body.id;
+
+  const patchComBodyNull = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: null });
+  assert.notEqual(patchComBodyNull.status, 500, 'body JSON null não pode derrubar o servidor com 500');
+  assert.ok([200, 422].includes(patchComBodyNull.status), `esperado 200 ou 422 para body null, recebido ${patchComBodyNull.status}`);
+  assert.ok(patchComBodyNull.body && typeof patchComBodyNull.body === 'object', 'resposta deve ser um corpo JSON estruturado, nunca um crash sem corpo');
+
+  const list = await api('GET', '/api/entities/legalDeadlines', { token });
+  const record = list.body.find(item => item.id === id);
+  assert.equal(record.status, 'ativo', 'registro permanece consistente após PATCH com body null');
+});
+
+test('[HTTP] entidade genérica não-legalDeadlines não sofre extração/remoção de reason nesta Fase 1', async () => {
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  const created = await api('POST', '/api/entities/documentReferences', { token: tokenDiretoria, json: { title: 'Referência não-Legal-Deadline' } });
+  assert.equal(created.status, 201);
+  const id = created.body.id;
+
+  const patched = await api('PATCH', `/api/entities/documentReferences/${id}`, { token: tokenDiretoria, json: { title: 'Referência atualizada', reason: 'Este reason não deve ganhar tratamento especial' } });
+  assert.equal(patched.status, 200);
+  assert.equal(patched.body.title, 'Referência atualizada');
+  // Comportamento idêntico ao anterior ao PR #4: `reason` não está em PROTECTED_ENTITY_FIELDS, então
+  // para entidades genéricas ele é persistido como um campo comum do registro (igual a qualquer outro
+  // campo não reconhecido) — exatamente como acontecia antes desta Fase 1. O tratamento especial
+  // (extrair, apagar do registro, alimentar audit()) é exclusivo de legalDeadlines.
+  assert.equal(patched.body.reason, 'Este reason não deve ganhar tratamento especial', 'reason continua sendo persistido como campo comum para entidades genéricas, igual ao comportamento anterior ao PR #4');
+
+  const auditList = await api('GET', '/api/audit', { token: tokenDiretoria });
+  const updateEvent = auditList.body.find(event => event.entityId === id && event.entity === 'documentReferences' && event.after?.title === 'Referência atualizada');
+  assert.ok(updateEvent, 'evento de auditoria de documentReferences deve existir');
+  assert.equal(updateEvent.reason, 'Operação solicitada pelo usuário', 'auditoria de entidade genérica usa o default de audit(), sem o tratamento especial de reason da Fase 1 (restrito a legalDeadlines)');
+});

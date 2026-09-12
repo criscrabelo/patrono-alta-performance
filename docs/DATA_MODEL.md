@@ -83,10 +83,17 @@ servidor atribui `ativo` antes da validação (só o campo **ausente** recebe o 
 mesmo inválido, segue para validação normal, nunca é silenciosamente substituído).
 
 **Reabertura não é um quinto status.** Um Legal Deadline reaberto é um `PATCH` comum para
-`status:'ativo'`: mantém o mesmo `id`, incrementa `version`, atualiza `updatedAt`/`updatedBy`, e o
-`PATCH` de `/api/entities/:type` passa a extrair `reason` do input (antes de sanitizar) para alimentar
-`audit()` com o motivo da alteração — o ciclo anterior (`before`/`after`, quem alterou, quando, por quê)
-fica preservado no histórico de auditoria, nunca em um valor de status separado.
+`status:'ativo'`: mantém o mesmo `id`, incrementa `version`, atualiza `updatedAt`/`updatedBy`. Para
+`legalDeadlines` especificamente (e só para este tipo — nenhuma outra entidade genérica recebe este
+tratamento), o `PATCH` de `/api/entities/:type` extrai `reason` do input antes de sanitizar, para
+alimentar `audit()` com o motivo da alteração; o ciclo anterior (`before`/`after`, quem alterou, quando,
+por quê) fica preservado no histórico de auditoria, nunca em um valor de status separado. **Reabertura
+exige `reason` textual não vazio (após remover espaços):** quando o registro atual tem `status` diferente
+de `ativo` e o `PATCH` está levando o estado candidato de volta a `ativo`, a ausência de `reason` (ou um
+valor só com espaços) é rejeitada com `422`, sem alterar `status`, `version` ou qualquer campo do
+registro, e sem criar evento de auditoria — a suspensão/cancelamento/cumprimento anterior permanece
+intocado. `reason` nunca é persistido como campo do registro `legalDeadlines`; alimenta exclusivamente o
+evento de auditoria.
 
 **"Vencido"/"atrasado"/"em atraso" é condição derivada, não status.** Nova função pura e centralizada
 `isLegalDeadlineOverdue(deadline, today)`: retorna `true` somente quando `status === 'ativo'` **e**
@@ -107,6 +114,16 @@ como tarefa obrigatória da Fase 2** — deliberadamente **não corrigido nesta 
 autorizado desta rodada): nenhuma view pode calcular ou apresentar "prazo jurídico" com lógica própria
 paralela; `legalDeadlines` (e `isLegalDeadlineOverdue()` para atraso) devem ser a única fonte canônica
 para qualquer widget de prazo, quando a Fase 2 for autorizada.
+
+### Registros legados anteriores à D1 — sem backfill automático
+
+`originType` é uma decisão jurídica sobre a natureza do prazo (fato jurídico-processual vs. controle
+interno) — **não pode ser inferida automaticamente** a partir de dados existentes. Esta rodada
+**não criou nenhuma migration nem backfill** para Legal Deadlines eventualmente persistidos antes da
+homologação da D1 (12/09/2026). Caso existam registros assim em dados persistidos, eles precisam ser
+**revisados e classificados manualmente pelo Jurídico** (atribuindo `originType`/`status` corretos via
+`PATCH` comum, um a um) antes de qualquer edição ou homologação formal do piloto — nenhuma tela ou rotina
+deve assumir que um Legal Deadline pré-D1 já tem `originType` válido sem essa revisão.
 
 ## Distinções que não podem ser violadas (checadas nesta execução)
 

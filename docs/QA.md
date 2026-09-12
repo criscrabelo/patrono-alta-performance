@@ -29,8 +29,8 @@ própria v1.3 define o escopo por fase.
 Suíte: `npm test` (Node.js test runner nativo — cada arquivo `*.test.js` roda em processo próprio).
 
 ```
-tests 132
-pass 132
+tests 140
+pass 140
 fail 0
 ```
 
@@ -71,7 +71,7 @@ rejeitados) e `status` do enum fechado (`ativo`/`suspenso`/`cumprido`/`cancelado
 quando `status==='ativo'` e `date` anterior a hoje; `suspenso`/`cumprido`/`cancelado` nunca atrasados) e
 sua imunidade a deslocamento de timezone/UTC (comparação lexicográfica pura de datas civis).
 
-**`tests/security-integration.test.js` (83 testes)** — HTTP real: sobe um servidor
+**`tests/security-integration.test.js` (91 testes)** — HTTP real: sobe um servidor
 `http.createServer(handler)` de verdade, isolado em diretório de dados temporário
 (`COEVO_DATA_DIR`), injeta usuários e dados de teste, e faz requisições HTTP reais, verificando status e
 corpo da resposta — não presença de texto no código-fonte.
@@ -197,6 +197,23 @@ Os 17 testes novos do **Sprint 2, Fase 1** (D1 homologada) cobrem:
     `originType`/`status` no corpo da requisição.
 16. Um processo pode ter múltiplos Legal Deadlines (`originType` distintos) coexistindo.
 17. Novo fato gerador (nova intimação) cria novo Legal Deadline, sem alterar o registro anterior.
+
+Os 8 testes novos da **correção pós-revisão do PR #4** (reason obrigatório na reabertura, restrito a
+`legalDeadlines`, body null-safe) cobrem:
+1. Reabertura de `suspenso` → `ativo` sem `reason` → `422`; `status`/`version` do registro não se alteram.
+2. Reabertura de `cancelado` → `ativo` sem `reason` → `422`.
+3. Reabertura de `cumprido` → `ativo` sem `reason` → `422`.
+4. Reabertura com `reason` válido → `200`; mesmo `id`; `version` incrementada; evento de auditoria com o
+   `reason` exato informado.
+5. `reason` contendo apenas espaços em branco é tratado como ausente → `422`.
+6. `reason` nunca aparece como campo persistido no registro `legalDeadlines` (nem na resposta do `PATCH`
+   nem na listagem subsequente) — alimenta somente o evento de auditoria.
+7. `PATCH` de Legal Deadline com corpo JSON `null` não derruba o servidor (nunca `500`) e responde de
+   forma controlada (`200`/`422`, corpo estruturado), sem corromper o registro existente.
+8. Entidade genérica (`documentReferences`) não sofreu nenhuma alteração de comportamento: `reason`
+   enviado no corpo continua sendo persistido como campo comum do registro (como antes do PR #4), e o
+   evento de auditoria continua usando o `reason` default de `audit()` — o tratamento especial desta
+   rodada é exclusivo de `legalDeadlines`.
 
 ## Catálogo Global de Regressão (§30)
 

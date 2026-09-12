@@ -714,24 +714,31 @@ function handler(req, res) {
     const item={ ...sanitized, id:crypto.randomUUID(), version:1, createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(), createdBy:user.name, department: type==='legalDeadlines' ? (sanitized.department ?? null) : (sanitized.department ?? (hasGlobalScope(user) ? null : (user.department||null))) };
     collection(store,type).push(item); audit(store,user,'CREATE',type,item.id,null,item); writeStore(store); return json(res,201,item);
   }); }
-  if (req.method === 'PATCH' && url.pathname.startsWith('/api/entities/')) { const [, , , type, id]=url.pathname.split('/'); const module=entityModule(type); if(!module || !allowedContent(user,module,'update')) return json(res,403,{error:'Sem permissão'}); const blocked=rejectIfMondaySourced(type); if(blocked) return json(res,403,blocked); return body(req).then(input=>{
+  if (req.method === 'PATCH' && url.pathname.startsWith('/api/entities/')) { const [, , , type, id]=url.pathname.split('/'); const module=entityModule(type); if(!module || !allowedContent(user,module,'update')) return json(res,403,{error:'Sem permissão'}); const blocked=rejectIfMondaySourced(type); if(blocked) return json(res,403,blocked); return body(req).then(rawInput=>{
+    // Correção (revisão do PR #4): body(req) pode resolver para `null` (ex.: cliente envia o literal
+    // JSON `null`) — sem essa guarda, qualquer leitura de propriedade abaixo (`input.reason` incluído)
+    // derrubaria a rota com 500. `rawInput` só é tratado como objeto de fato quando for um.
+    const input = rawInput && typeof rawInput === 'object' ? rawInput : {};
     const list=collection(store,type); const item=list.find(x=>x.id===id && !x.deletedAt); if(!item || !scoped(user,item)) return json(res,404,{error:'Registro não encontrado'});
     const before=structuredClone(item);
-    // Sprint 2, Fase 1: `reason` (motivo da alteração — obrigatório para reabertura de Legal Deadline
-    // preservar o porquê no histórico, regra homologada em docs/DECISIONS.md, seção 1.1) é extraído do
-    // input ANTES de sanitizeEntityInput()/Object.assign(), para (a) alimentar audit() como já é feito
-    // nas rotas de sub-recurso de projeto, e (b) nunca virar um campo `reason` gravado no próprio
-    // registro (o motor genérico não tinha essa extração; sem ela, `input.reason` seria persistido
-    // como campo comum do registro — mesma classe de mass assignment já corrigida alhures).
-    const reason = typeof input.reason === 'string' && input.reason.trim() ? input.reason.trim() : 'Atualização de registro';
-    delete input.reason;
+    // Sprint 2, Fase 1 (correção pós-revisão): o tratamento especial de `reason` é exclusivo de
+    // legalDeadlines — para as demais entidades o comportamento permanece exatamente o anterior ao
+    // PR #4 (sem extração de `reason`, audit() usa seu próprio default, nada é removido do input).
+    const isLegalDeadline = type === 'legalDeadlines';
+    const legalDeadlineReason = isLegalDeadline && typeof input.reason === 'string' && input.reason.trim() ? input.reason.trim() : '';
+    if (isLegalDeadline) delete input.reason;
     const sanitized=sanitizeEntityInput(input,user);
     // P0 corrigido (rodada 3, item 3): as invariantes de Legal Deadline precisam continuar válidas
     // após QUALQUER atualização — revalida sobre o estado CANDIDATO (item atual + input sanitizado),
     // não apenas sobre os campos enviados nesta requisição. Um PATCH que esvazia origin/date, ou troca
     // processId para um processo inexistente/fora de escopo, é rejeitado antes de qualquer gravação.
-    if(type==='legalDeadlines'){
+    if(isLegalDeadline){
       const candidate = { ...item, ...sanitized };
+      // Correção (revisão do PR #4): reabertura (status sai de um valor diferente de 'ativo' e o PATCH
+      // o leva de volta a 'ativo') exige `reason` textual não vazio — sem isso, 422 e NADA é alterado
+      // (nem version, nem status, nem evento de auditoria).
+      const isReopening = item.status !== 'ativo' && candidate.status === 'ativo';
+      if (isReopening && !legalDeadlineReason) return json(res,422,{error:'A reabertura de um Legal Deadline exige motivo explícito (reason não pode ser vazio).'});
       const invalid = validateLegalDeadline(candidate, user, store);
       if(invalid) return json(res,invalid.status,{error:invalid.error});
       // validateLegalDeadline() herda department/companyId/speId/scopeType do processo relacionado
@@ -739,7 +746,10 @@ function handler(req, res) {
       // registro abaixo) para que o PATCH também respeite a herança (rodada 4, item 7).
       sanitized.department = candidate.department; sanitized.companyId = candidate.companyId; sanitized.speId = candidate.speId; sanitized.scopeType = candidate.scopeType;
     }
-    Object.assign(item,sanitized,{version:item.version+1,updatedAt:new Date().toISOString(),updatedBy:user.name}); audit(store,user,'UPDATE',type,id,before,item,reason); writeStore(store); return json(res,200,item);
+    Object.assign(item,sanitized,{version:item.version+1,updatedAt:new Date().toISOString(),updatedBy:user.name});
+    if (isLegalDeadline) audit(store,user,'UPDATE',type,id,before,item,legalDeadlineReason || 'Atualização de registro');
+    else audit(store,user,'UPDATE',type,id,before,item);
+    writeStore(store); return json(res,200,item);
   }); }
   if (req.method === 'DELETE' && url.pathname.startsWith('/api/entities/')) { const [, , , type, id]=url.pathname.split('/'); const module=entityModule(type); if(!module || !allowedContent(user,module,'archive')) return json(res,403,{error:'Exclusão lógica não autorizada'}); const blocked=rejectIfMondaySourced(type); if(blocked) return json(res,403,blocked); const item=collection(store,type).find(x=>x.id===id); if(!item || !scoped(user,item)) return json(res,404,{error:'Registro não encontrado'}); const before=structuredClone(item); item.deletedAt=new Date().toISOString(); item.deletedBy=user.name; audit(store,user,'ARCHIVE',type,id,before,item); writeStore(store); return json(res,200,{archived:true,id}); }
   if (req.method === 'POST' && url.pathname.match(/^\/api\/entities\/[^/]+\/[^/]+\/restore$/)) { const [, , , type, id]=url.pathname.split('/'); const module=entityModule(type); if(!module || !allowedContent(user,module,'restore')) return json(res,403,{error:'Restauração não autorizada'}); const blocked=rejectIfMondaySourced(type); if(blocked) return json(res,403,blocked); const item=collection(store,type).find(x=>x.id===id); if(!item || !scoped(user,item)) return json(res,404,{error:'Registro não encontrado'}); const before=structuredClone(item); delete item.deletedAt; delete item.deletedBy; item.version++; item.updatedAt=new Date().toISOString(); audit(store,user,'RESTORE',type,id,before,item); writeStore(store); return json(res,200,item); }
