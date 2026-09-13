@@ -1024,6 +1024,18 @@ adicionada nesta rodada.
 mecanismo está completo e testado, mas depende de uma peça de infraestrutura de produção (agregador de
 logs e/ou destino de alerta real) fora do escopo autorizado desta rodada (H11).
 
+### Correção técnica final (PR #17, revisão técnica independente)
+
+Antes da revisão final, 6 problemas técnicos foram identificados e corrigidos sem expandir escopo (ver
+`docs/DECISIONS.md`, adendo à PROD-H6-01, e `docs/QA.md` para o detalhamento completo dos testes):
+campos reservados do logger e do payload de alerta nunca mais podem ser sobrescritos pelo chamador;
+redaction de `Bearer` ampliada para cobrir o alfabeto base64/base64url/JWT por inteiro; threshold real
+de HTTP 5xx repetido (`HTTP_5XX_ALERT_THRESHOLD`/`HTTP_5XX_ALERT_WINDOW_MS`) substituindo o disparo no
+primeiro 5xx isolado; estado em memória do alerta explicitamente limitado (`MAX_TRACKED_KEYS`); cooldown
+do alerta passa a ser marcado somente após entrega bem-sucedida. **527/527 testes passando** (485
+anteriores + 42 em `tests/h6-observability.test.js`). `npm audit` inalterado. PG-17 permanece ABERTO,
+sem alteração da pendência específica já registrada acima.
+
 ## 16. Decisão final atual
 
 **NO-GO PARA PRODUÇÃO** — inalterado por esta rodada de hardening.

@@ -71,6 +71,24 @@ test('[H6-redact-D] Bearer token dentro de string livre é redigido', () => {
   assert.ok(!sanitized.includes('abcdef123456'));
 });
 
+// Correção pós-H6 (revisão técnica final, PR #17, item 3): o regex anterior ([a-z0-9._-]) não cobria
+// o alfabeto completo de base64/base64url/JWT ("+", "/", "=") — um token com esses caracteres podia
+// sobreviver PARCIALMENTE no log. Cobre explicitamente os 3 formatos citados na correção.
+test('[H6-redact-Bearer] Bearer com "+"/"/"/"=" (base64) é redigido por inteiro, nunca parcialmente', () => {
+  const casos = [
+    { input: 'Authorization: Bearer abc+/DEF==', token: 'abc+/DEF==' },
+    { input: 'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U', token: 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U' },
+    { input: 'Authorization: Bearer token-with_~chars+/=', token: 'token-with_~chars+/=' }
+  ];
+  for (const { input, token } of casos) {
+    const sanitized = sanitizeString(input);
+    assert.match(sanitized, /\[REDACTED\]/);
+    assert.ok(!sanitized.includes(token), `o token inteiro nunca deveria sobreviver, mesmo parcialmente: ${sanitized}`);
+    // Nenhum PREFIXO significativo do token (10+ caracteres) pode sobrar — cobre redação parcial.
+    assert.ok(!sanitized.includes(token.slice(0, 10)), `um prefixo do token sobrou: ${sanitized}`);
+  }
+});
+
 test('[H6-redact-E] remove CR/LF (impede injeção de linha de log) e trunca mensagens excessivas', () => {
   const withNewlines = sanitizeString('linha1\nlinha2\rlinha3');
   assert.ok(!withNewlines.includes('\n') && !withNewlines.includes('\r'));
@@ -182,6 +200,32 @@ test('[H6-logger-G] serializeError() nunca inclui stack em produção e nunca fa
   } finally {
     process.env.NODE_ENV = originalNodeEnv;
   }
+});
+
+// Correção pós-H6 (revisão técnica final, PR #17, item 1): `fields` nunca pode sobrescrever o envelope
+// canônico do evento — antes disso, `{ ...base, ...safeFields }` permitia justamente essa falsificação.
+test('[H6-logger-reserved] campos reservados (level/event/timestamp/service/environment) do chamador nunca sobrescrevem o envelope canônico', async () => {
+  const before = Date.now();
+  const lines = await captureLogLines(() => {
+    logger.error('real_event', {
+      level: 'debug',
+      event: 'evento_falsificado',
+      timestamp: '1999-01-01T00:00:00.000Z',
+      service: 'servico-falso',
+      environment: 'ambiente-falso',
+      applicationCommit: 'commit-falso',
+      requestId: 'r-real'
+    });
+  });
+  assert.equal(lines.length, 1, 'o evento real (ERROR) deveria ter sido emitido — nunca rebaixado a debug e descartado');
+  const line = lines[0];
+  assert.equal(line.level, 'error', 'fields.level nunca deveria rebaixar um evento ERROR real');
+  assert.equal(line.event, 'real_event', 'fields.event nunca deveria substituir o nome do evento real');
+  assert.notEqual(line.timestamp, '1999-01-01T00:00:00.000Z');
+  assert.ok(Date.parse(line.timestamp) >= before, 'timestamp deveria continuar sendo gerado pelo servidor');
+  assert.notEqual(line.service, 'servico-falso');
+  assert.notEqual(line.environment, 'ambiente-falso');
+  assert.equal(line.requestId, 'r-real', 'campos operacionais legítimos (requestId) continuam passando normalmente');
 });
 
 // --- observability/alert.js ----------------------------------------------------------------------------
@@ -349,6 +393,164 @@ test('[H6-alert-J] assinatura HMAC é enviada quando ALERT_WEBHOOK_HMAC_KEY est�
     if (originalKey === undefined) delete process.env.ALERT_WEBHOOK_HMAC_KEY; else process.env.ALERT_WEBHOOK_HMAC_KEY = originalKey;
     await new Promise((resolve) => server.close(resolve));
   }
+});
+
+// Correção pós-H6 (revisão técnica final, PR #17, item 2): `fields` nunca pode sobrescrever o envelope
+// canônico do payload de alerta (timestamp/service/environment/level/event/message/requestId/
+// correlationId) — antes disso, `Object.assign(payload, redact(fields))` permitia exatamente isso.
+test('[H6-alert-reserved] campos reservados do payload de alerta nunca são sobrescritos por `fields`', async () => {
+  const { server, received, port } = await startLocalWebhook();
+  const originalUrl = process.env.ALERT_WEBHOOK_URL;
+  process.env.ALERT_WEBHOOK_URL = `http://127.0.0.1:${port}/hook`;
+  alert._resetCooldownForTests();
+  try {
+    await alert.notify({
+      level: 'error',
+      event: 'evento_real',
+      message: 'mensagem real',
+      requestId: 'req-real',
+      dedupKey: 'test-reserved',
+      fields: {
+        timestamp: '1999-01-01T00:00:00.000Z',
+        service: 'servico-falso',
+        environment: 'ambiente-falso',
+        level: 'info',
+        event: 'evento_falsificado',
+        message: 'mensagem falsificada',
+        requestId: 'req-falso',
+        correlationId: 'corr-falso',
+        extra: 'valor-legitimo'
+      }
+    });
+    const payload = received[0].body;
+    assert.equal(payload.event, 'evento_real');
+    assert.equal(payload.message, 'mensagem real');
+    assert.equal(payload.requestId, 'req-real');
+    assert.equal(payload.level, 'error');
+    assert.notEqual(payload.timestamp, '1999-01-01T00:00:00.000Z');
+    assert.notEqual(payload.service, 'servico-falso');
+    assert.notEqual(payload.environment, 'ambiente-falso');
+    assert.equal(payload.extra, 'valor-legitimo', 'um campo extra legítimo não reservado continua passando');
+  } finally {
+    process.env.ALERT_WEBHOOK_URL = originalUrl;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+// Correção pós-H6 (revisão técnica final, PR #17, item 6): o cooldown só é marcado APÓS entrega
+// bem-sucedida — uma primeira tentativa que falha (webhook inalcançável) nunca deve suprimir um alerta
+// futuro que nunca chegou a ser entregue.
+test('[H6-alert-cooldown-after-success] entrega falha não marca cooldown; evento seguinte para o mesmo destino ainda alerta', async () => {
+  const originalUrl = process.env.ALERT_WEBHOOK_URL;
+  alert._resetCooldownForTests();
+  try {
+    process.env.ALERT_WEBHOOK_URL = 'http://127.0.0.1:1'; // ECONNREFUSED imediato
+    const first = await alert.notify({ level: 'error', event: 'evento_repetido', dedupKey: 'test-cooldown-after-success' });
+    assert.equal(first.sent, false);
+    assert.equal(first.reason, 'delivery_failed');
+
+    const { server, received, port } = await startLocalWebhook();
+    try {
+      process.env.ALERT_WEBHOOK_URL = `http://127.0.0.1:${port}/hook`;
+      const second = await alert.notify({ level: 'error', event: 'evento_repetido', dedupKey: 'test-cooldown-after-success' });
+      assert.equal(second.sent, true, 'a falha anterior nunca deveria ter deixado o cooldown ativo para um alerta que nunca saiu');
+      assert.equal(received.length, 1);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    process.env.ALERT_WEBHOOK_URL = originalUrl;
+  }
+});
+
+// --- Threshold real de HTTP 5xx repetido (item 4) --------------------------------------------------
+test('[H6-5xx-D] um único 500 isolado nunca dispara repeated_http_5xx (abaixo do threshold)', async () => {
+  const { server, received, port } = await startLocalWebhook();
+  const originalUrl = process.env.ALERT_WEBHOOK_URL;
+  process.env.ALERT_WEBHOOK_URL = `http://127.0.0.1:${port}/hook`;
+  alert._resetCooldownForTests();
+  try {
+    const result = alert.recordHttp5xxAndMaybeNotify({ key: '/api/rota-d', route: '/api/rota-d', statusCode: 500, requestId: 'r1' });
+    assert.equal(result.thresholdReached, false);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(received.length, 0);
+  } finally {
+    process.env.ALERT_WEBHOOK_URL = originalUrl;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('[H6-5xx-E] ocorrências abaixo do HTTP_5XX_ALERT_THRESHOLD nunca alertam', async () => {
+  const { server, received, port } = await startLocalWebhook();
+  const originalUrl = process.env.ALERT_WEBHOOK_URL;
+  const originalThreshold = process.env.HTTP_5XX_ALERT_THRESHOLD;
+  process.env.ALERT_WEBHOOK_URL = `http://127.0.0.1:${port}/hook`;
+  process.env.HTTP_5XX_ALERT_THRESHOLD = '5';
+  alert._resetCooldownForTests();
+  try {
+    for (let i = 0; i < 4; i += 1) {
+      alert.recordHttp5xxAndMaybeNotify({ key: '/api/rota-e', route: '/api/rota-e', statusCode: 500, requestId: `r${i}` });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(received.length, 0, '4 ocorrências abaixo do threshold de 5 nunca deveriam alertar');
+  } finally {
+    process.env.ALERT_WEBHOOK_URL = originalUrl;
+    if (originalThreshold === undefined) delete process.env.HTTP_5XX_ALERT_THRESHOLD; else process.env.HTTP_5XX_ALERT_THRESHOLD = originalThreshold;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('[H6-5xx-F] ao atingir o threshold, o alerta repeated_http_5xx é disparado exatamente uma vez', async () => {
+  const { server, received, port } = await startLocalWebhook();
+  const originalUrl = process.env.ALERT_WEBHOOK_URL;
+  const originalThreshold = process.env.HTTP_5XX_ALERT_THRESHOLD;
+  process.env.ALERT_WEBHOOK_URL = `http://127.0.0.1:${port}/hook`;
+  process.env.HTTP_5XX_ALERT_THRESHOLD = '5';
+  alert._resetCooldownForTests();
+  try {
+    for (let i = 0; i < 7; i += 1) {
+      alert.recordHttp5xxAndMaybeNotify({ key: '/api/rota-f', route: '/api/rota-f', statusCode: 500, requestId: `r${i}` });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(received.length, 1, '7 ocorrências acima do threshold de 5 deveriam alertar exatamente uma vez (a 7ª não deveria gerar um 2º alerta)');
+    assert.equal(received[0].body.event, 'repeated_http_5xx');
+  } finally {
+    process.env.ALERT_WEBHOOK_URL = originalUrl;
+    if (originalThreshold === undefined) delete process.env.HTTP_5XX_ALERT_THRESHOLD; else process.env.HTTP_5XX_ALERT_THRESHOLD = originalThreshold;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('[H6-5xx-G] após a janela expirar, o contador reinicia naturalmente (nova ocorrência conta a partir de 1)', async () => {
+  const { server, received, port } = await startLocalWebhook();
+  const originalUrl = process.env.ALERT_WEBHOOK_URL;
+  const originalThreshold = process.env.HTTP_5XX_ALERT_THRESHOLD;
+  const originalWindow = process.env.HTTP_5XX_ALERT_WINDOW_MS;
+  process.env.ALERT_WEBHOOK_URL = `http://127.0.0.1:${port}/hook`;
+  process.env.HTTP_5XX_ALERT_THRESHOLD = '2';
+  process.env.HTTP_5XX_ALERT_WINDOW_MS = '50';
+  alert._resetCooldownForTests();
+  try {
+    alert.recordHttp5xxAndMaybeNotify({ key: '/api/rota-g', route: '/api/rota-g', statusCode: 500 });
+    await new Promise((resolve) => setTimeout(resolve, 80)); // janela expira
+    const afterWindow = alert.recordHttp5xxAndMaybeNotify({ key: '/api/rota-g', route: '/api/rota-g', statusCode: 500 });
+    assert.equal(afterWindow.count, 1, 'a janela expirada deveria ter reiniciado o contador para 1, não acumulado com a ocorrência anterior');
+    assert.equal(afterWindow.thresholdReached, false);
+  } finally {
+    process.env.ALERT_WEBHOOK_URL = originalUrl;
+    if (originalThreshold === undefined) delete process.env.HTTP_5XX_ALERT_THRESHOLD; else process.env.HTTP_5XX_ALERT_THRESHOLD = originalThreshold;
+    if (originalWindow === undefined) delete process.env.HTTP_5XX_ALERT_WINDOW_MS; else process.env.HTTP_5XX_ALERT_WINDOW_MS = originalWindow;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('[H6-state-bounded] estado de cooldown/threshold em memória nunca cresce indefinidamente', () => {
+  alert._resetCooldownForTests();
+  for (let i = 0; i < alert.MAX_TRACKED_KEYS + 50; i += 1) {
+    alert.recordHttp5xxAndMaybeNotify({ key: `/api/rota-dinamica-${i}`, route: `/api/rota-dinamica-${i}`, statusCode: 500 });
+  }
+  const sizes = alert._stateSizesForTests();
+  assert.ok(sizes.http5xxKeys <= alert.MAX_TRACKED_KEYS, `esperado <= ${alert.MAX_TRACKED_KEYS} chaves rastreadas, obtido ${sizes.http5xxKeys}`);
 });
 
 // --- server.js: requestId, access log, health, route normalization -------------------------------------

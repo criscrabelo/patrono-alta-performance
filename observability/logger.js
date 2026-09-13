@@ -48,6 +48,20 @@ let testSink = null;
 function _setTestSink(fn) { testSink = fn; }
 function _clearTestSink() { testSink = null; }
 
+// Campos canônicos do envelope — NUNCA sobrescritos por `fields` (que vem de código de chamada,
+// potencialmente menos confiável). Um campo `fields.level = 'debug'` nunca deve rebaixar um evento
+// realmente ERROR, nem `fields.event`/`fields.timestamp`/etc. falsificar o envelope estruturado.
+const RESERVED_FIELDS = new Set(['timestamp', 'level', 'event', 'service', 'environment', 'applicationCommit']);
+
+function stripReservedFields(fields) {
+  const safe = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (RESERVED_FIELDS.has(key)) continue;
+    safe[key] = value;
+  }
+  return safe;
+}
+
 // Cada evento estruturado é exatamente UMA linha JSON — nunca múltiplas linhas, nunca texto livre solto.
 function write(level, event, fields) {
   if (!isEnabled(level)) return;
@@ -61,9 +75,13 @@ function write(level, event, fields) {
   const commit = applicationCommit();
   if (commit) base.applicationCommit = sanitizeString(commit);
 
-  const safeFields = redact(fields || {});
+  // fields é redigido (segredo/PII) E despojado de qualquer campo reservado ANTES de entrar na linha —
+  // nessa ordem os campos canônicos de `base` sempre prevalecem, nunca precisam "vencer" um spread
+  // posterior. `message` é a única exceção deliberada: pode vir do chamador, sempre sanitizado.
+  const safeFields = stripReservedFields(redact(fields || {}));
   const line = { ...base, ...safeFields };
   if (!line.message) line.message = sanitizeString(event);
+  else line.message = sanitizeString(line.message);
 
   const payload = JSON.stringify(line);
   if (testSink) return testSink(level, payload);

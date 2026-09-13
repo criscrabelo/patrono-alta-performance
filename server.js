@@ -1205,7 +1205,9 @@ function logHttpAccess(req, res, requestId, route, durationMs) {
   if (isHealthOk) return logger.debug('http_request_completed', fields);
   if (statusCode >= 500) {
     logger.error('http_request_completed', fields);
-    alert.notify({ level: 'error', event: 'repeated_http_5xx', message: `HTTP 5xx em ${route}`, requestId, dedupKey: `http5xx:${route}`, fields: { route, statusCode } });
+    // Item 4 (correção pós-H6, PR #17): um 500 isolado nunca alerta — só ao atingir o threshold real
+    // (HTTP_5XX_ALERT_THRESHOLD ocorrências na janela HTTP_5XX_ALERT_WINDOW_MS) o alerta é emitido.
+    alert.recordHttp5xxAndMaybeNotify({ key: route, route, statusCode, requestId });
     return;
   }
   return logger.info('http_request_completed', fields);

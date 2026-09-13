@@ -1152,3 +1152,36 @@ ABERTO. Não expande H6 — apenas garante a integridade do requisito de evidên
 - **PG-17 permanece ABERTO** — o mecanismo de observabilidade da aplicação está implementado e testado
   com evidência real, mas depende de um agregador de logs e/ou destino de alerta real de produção
   (H11) para ser considerado "buscável" — ver `docs/PRODUCTION_GATE.md`, seção 23.
+
+## QA — Correção técnica final do H6 (PR #17 — 9 pontos corrigidos, sem expandir escopo)
+
+`docs/PRODUCTION_GATE.md`, seção 23; `docs/DECISIONS.md`, PROD-H6-01 (adendo). PG-17 continua ABERTO.
+
+- **527 testes totais** com `TEST_DATABASE_URL` (485 anteriores + 42 em `tests/h6-observability.test.js`,
+  9 a mais que a primeira versão), 0 falhando, nenhum teste removido.
+- **`[H6-logger-reserved]`**: `fields.level/event/timestamp/service/environment/applicationCommit`
+  nunca sobrescrevem o envelope canônico do logger — um evento ERROR real nunca é rebaixado a DEBUG e
+  descartado por um `fields.level` falsificado; `requestId` (campo operacional legítimo, não reservado)
+  continua passando normalmente.
+- **`[H6-alert-reserved]`**: o mesmo princípio aplicado ao payload do webhook de alerta —
+  `fields.timestamp/service/environment/level/event/message/requestId/correlationId` nunca sobrescrevem
+  o envelope canônico; um campo extra legítimo não reservado continua passando.
+- **`[H6-redact-Bearer]`**: `Bearer abc+/DEF==`, um JWT completo (3 segmentos separados por `.`) e um
+  token com `_`/`~`/`+`/`/`/`=` são redigidos por INTEIRO — o regex anterior ([a-z0-9._-]) deixava
+  sobreviver parcialmente qualquer caractere de base64/base64url fora desse conjunto.
+- **`[H6-5xx-D/E/F/G]`**: um único 500 isolado nunca dispara `repeated_http_5xx`; ocorrências abaixo do
+  `HTTP_5XX_ALERT_THRESHOLD` (padrão 5) nunca alertam; ao atingir o threshold dentro de
+  `HTTP_5XX_ALERT_WINDOW_MS` (padrão 300000ms) o alerta dispara exatamente uma vez, mesmo com
+  ocorrências adicionais além do threshold na mesma janela; ao expirar a janela, o contador reinicia
+  naturalmente (nova ocorrência conta a partir de 1, não acumula com o estado anterior).
+- **`[H6-alert-cooldown-after-success]`**: uma primeira entrega que falha (webhook inalcançável) nunca
+  marca o cooldown — o próximo evento para a mesma chave, contra um destino agora alcançável, ainda é
+  entregue normalmente (antes desta correção, o cooldown era marcado ANTES da tentativa de entrega,
+  podendo suprimir um alerta que nunca havia realmente saído).
+- **`[H6-state-bounded]`**: inserir `MAX_TRACKED_KEYS + 50` chaves distintas de threshold de 5xx nunca
+  faz o Map interno crescer além do teto defensivo (`alert.MAX_TRACKED_KEYS = 500`).
+- CI: Node 20.x/22.x, PostgreSQL real — nenhum teste crítico pulado; H5 inalterado.
+- `npm audit`: inalterado (2 vulnerabilidades altas conhecidas — H9); nenhuma dependência nova.
+- **PG-17 continua ABERTO** — inalterado por esta correção (não relacionado a agregador/destino de
+  alerta real de produção, que continua sendo a pendência específica do gate).
+- Nenhum escopo de H7-H11/LGPD foi expandido nesta correção.

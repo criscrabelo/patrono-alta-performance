@@ -16,10 +16,15 @@ const MAX_ARRAY_ITEMS = 50;
 
 const SECRET_KEY_PATTERN = /(password|passwordhash|temporarypassword|token|secret|secretkey|accesskey|apikey|authorization|cookie|setcookie|mfa|totp|hmac|encryption|encryptionkey|pgpassword|databaseurl|privatekey|clientsecret|signature)/i;
 
+// Correção pós-H6 (revisão técnica final, PR #17): o token que segue "Bearer " pode ser um JWT
+// (segmentos separados por ".") ou um valor base64/base64url — ambos usam caracteres além de
+// [a-z0-9._-], entre eles "+", "/" e "=" (padding). O conjunto abaixo cobre esse alfabeto inteiro,
+// ainda delimitado por qualquer whitespace/aspas/vírgula (nunca consome texto ilimitado — é um único
+// bloco de caracteres do próprio alfabeto de token, não um `.*`).
 const STRING_SECRET_PATTERNS = [
   /postgres(?:ql)?:\/\/[^\s"']*/gi,
   /password\s*=\s*[^\s"'&]+/gi,
-  /bearer\s+[a-z0-9._-]+/gi,
+  /bearer\s+[a-z0-9\-._~+/=]+/gi,
   /\bsk-[a-z0-9]{10,}/gi
 ];
 

@@ -44,6 +44,17 @@ Campos condicionais, quando aplicável: `requestId`, `correlationId`, `method`, 
 mesmo que o chamador esqueça de sanitizar algo, o logger nunca deixa passar um valor cujo NOME de campo
 pareça segredo (ver seção 5).
 
+**Campos reservados (correção pós-implementação, revisão técnica final):** `timestamp`, `level`,
+`event`, `service`, `environment` e `applicationCommit` são campos CANÔNICOS do envelope — gerados
+sempre pelo próprio `observability/logger.js`, nunca pelo chamador. Caso o objeto `fields` passado a
+`logger.error(event, fields)` (ou qualquer outro nível) contenha uma dessas chaves, o valor do chamador
+é descartado silenciosamente e o valor canônico prevalece — um `fields.level = 'debug'` nunca rebaixa
+um evento realmente ERROR, um `fields.event`/`fields.timestamp` nunca falsifica o nome ou o instante real
+do evento. `message` é a única exceção deliberada: pode ser fornecida pelo chamador, mas sempre passa
+pela mesma sanitização de string antes de sair. Campos operacionais legítimos como `requestId`/
+`correlationId` continuam passando normalmente — não são reservados, fazem parte do contexto da
+requisição.
+
 ## 4. Níveis
 
 - **DEBUG** — diagnóstico detalhado; desabilitado em produção por padrão. Ex.: `/api/health` de sucesso.
@@ -68,7 +79,10 @@ só 5xx vira ERROR.
    `apikey`, `accesskey`, `privatekey`, `clientsecret`, `signature` é substituída por `[REDACTED]`
    inteiro — mesmo aninhada em um objeto.
 2. **Por padrão no conteúdo de string** — connection string PostgreSQL (`postgres://user:pass@host/db`),
-   `password=...`, cabeçalho `Bearer ...` embutidos em uma mensagem de erro livre.
+   `password=...`, cabeçalho `Bearer ...` embutidos em uma mensagem de erro livre. O alfabeto reconhecido
+   após `Bearer ` cobre token JWT/base64/base64url por inteiro (`+`, `/`, `=`, `_`, `-`, `.`, `~`, além de
+   alfanuméricos) — correção pós-implementação (revisão técnica final): o regex original só cobria
+   `[a-z0-9._-]`, deixando sobreviver parcialmente um token com `+`/`/`/`=` (comum em base64 clássico).
 
 Nunca aparecem em log/alerta: `DATABASE_URL`/`DATABASE_URL_TARGET`, `PGPASSWORD`, `BACKUP_ENCRYPTION_KEY`,
 `COEVO_BACKUP_KEY`, `MFA_ENCRYPTION_KEY`, `RATE_LIMIT_HMAC_KEY`, `ALERT_WEBHOOK_HMAC_KEY`,
@@ -136,7 +150,11 @@ por ausência). Em produção, se configurada, a URL **deve** ser `https:`.
   corpo exato enviado.
 - **Payload mínimo, sempre redigido** — `timestamp, service, environment, level, event, message,
   requestId/correlationId` (quando presentes). Nunca stack completa, corpo de requisição ou dado
-  pessoal.
+  pessoal. **Campos reservados** (correção pós-implementação, revisão técnica final): esses mesmos
+  campos do envelope canônico NUNCA podem ser sobrescritos por `fields` — um chamador que passe
+  `fields.timestamp`/`fields.level`/etc. tem esses valores silenciosamente descartados; o payload que
+  sai sempre reflete o envelope gerado pelo próprio `alert.js`, nunca um valor falsificado pelo
+  chamador. Um campo extra legítimo (não reservado) em `fields` continua passando normalmente.
 - **Retry limitado** — até 3 tentativas com pequeno backoff; nunca retry infinito.
 - **Nunca mascara o erro original** — uma falha ao entregar o alerta gera um evento
   `alert_delivery_failed` sanitizado, e nunca substitui/esconde o erro que motivou o alerta.
@@ -145,17 +163,39 @@ por ausência). Em produção, se configurada, a URL **deve** ser `https:`.
 - **Cooldown/dedup** — `ALERT_COOLDOWN_MS` (padrão 300000 = 5 min) por chave de evento, para nunca gerar
   uma tempestade de alertas repetidos durante uma indisponibilidade prolongada. **Em memória, por
   instância** — best-effort, nunca uma garantia de deduplicação entre múltiplas instâncias (isso
-  dependeria de um agregador real — H11).
+  dependeria de um agregador real — H11). **Marcado somente APÓS entrega bem-sucedida** (correção
+  pós-implementação, revisão técnica final): antes disso, o cooldown era marcado antes de tentar
+  entregar — uma primeira tentativa que falhasse (todas as retries esgotadas) deixava o cooldown
+  "ativo" indevidamente, suprimindo um alerta futuro que na verdade nunca havia sido entregue.
 - **Nível mínimo** — `ALERT_MIN_LEVEL` (padrão `error`); eventos abaixo disso nunca disparam alerta,
   mesmo que fiquem no log.
+- **Estado em memória limitado** (item 5, correção pós-implementação): os Maps internos de cooldown e de
+  threshold de 5xx nunca crescem sem limite — um teto defensivo (`MAX_TRACKED_KEYS = 500`) evicta a
+  entrada mais antiga ao ser excedido. Rotas já são normalizadas (`:id` em vez do valor real), então a
+  cardinalidade natural já é finita; o teto é só uma segunda camada defensiva.
+
+### Threshold real de HTTP 5xx repetido
+
+Correção pós-implementação (revisão técnica final): antes, TODO primeiro HTTP 5xx chamava
+`alert.notify()` diretamente — o cooldown só deduplicava os seguintes, o que não era um threshold, era
+apenas anti-tempestade de um alerta já disparado. Agora `recordHttp5xxAndMaybeNotify()` implementa uma
+janela fixa por rota normalizada:
+
+- Um **500 isolado nunca alerta** — é logado normalmente em ERROR, sem chamar o webhook.
+- Abaixo de `HTTP_5XX_ALERT_THRESHOLD` (padrão 5) ocorrências na mesma janela: nunca alerta.
+- Ao **atingir** o threshold dentro de `HTTP_5XX_ALERT_WINDOW_MS` (padrão 300000 = 5 min): dispara
+  `repeated_http_5xx` **uma única vez** (o cooldown/dedup normal continua evitando repetição).
+- Ao expirar a janela, o contador **reinicia naturalmente** — a próxima ocorrência conta a partir de 1.
+- Estado em memória, por instância, best-effort — nunca persistido no PostgreSQL, nunca confundido com
+  o rate limiting real de H3 (`auth/rate-limit.js`, um controle de segurança distribuído via
+  PostgreSQL — este threshold é apenas um filtro de ruído para o alerta operacional).
 
 ### Eventos mínimos alertáveis
 
-`app_start_failed`, `repeated_http_5xx`, `monday_sync_failed`, `backup_failed`/`backup_tracking_failed`,
-`restore_failed`/`restore_evidence_failed`. Um evento FATAL isolado (exceção não tratada, falha de boot)
-sempre é elegível a alerta imediato; um 5xx isolado passa pelo mesmo caminho de `repeated_http_5xx` com
-o cooldown normal — não há um contador de limiar dedicado nesta rodada (documentado como simplificação
-aceitável; um limiar explícito de "N erros em M minutos" pode ser adicionado depois, se necessário).
+`app_start_failed`, `repeated_http_5xx` (via threshold acima), `monday_sync_failed`,
+`backup_failed`/`backup_tracking_failed`, `restore_failed`/`restore_evidence_failed`. Um evento FATAL
+isolado (exceção não tratada, falha de boot) sempre é elegível a alerta imediato — o threshold acima se
+aplica apenas ao caminho de HTTP 5xx repetido.
 
 ## 12. Catálogo de eventos (crítico/central)
 
@@ -179,7 +219,8 @@ aceitável; um limiar explícito de "N erros em M minutos" pode ser adicionado d
 ## 13. Configuração (`.env.example`)
 
 `LOG_LEVEL`, `LOG_FORMAT`, `SERVICE_NAME`, `ALERT_WEBHOOK_URL`, `ALERT_WEBHOOK_HMAC_KEY`,
-`ALERT_MIN_LEVEL`, `ALERT_COOLDOWN_MS` — ver `.env.example` para os comentários completos de cada uma.
+`ALERT_MIN_LEVEL`, `ALERT_COOLDOWN_MS`, `HTTP_5XX_ALERT_THRESHOLD`, `HTTP_5XX_ALERT_WINDOW_MS` — ver
+`.env.example` para os comentários completos de cada uma.
 
 ## 14. Troubleshooting
 

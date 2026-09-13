@@ -1584,6 +1584,42 @@ PROD-H4-01/PROD-H5-01 já homologadas — apenas registra o avanço parcial do H
 produção já aberto. Não altera H5/PG-21 (backup/restore) nem qualquer decisão de LGPD/incident
 response/retenção.
 
+**Adendo (correção técnica final, PR #17) — 9 pontos corrigidos, sem expandir escopo:**
+
+1. **Campos reservados do logger** (`observability/logger.js`): `fields` do chamador nunca sobrescreve
+   `timestamp/level/event/service/environment/applicationCommit` — antes, `{ ...base, ...safeFields }`
+   permitia justamente essa falsificação (um `fields.level='debug'` podia rebaixar um evento ERROR real
+   e descartá-lo silenciosamente). Corrigido por despojo explícito de campos reservados antes do merge.
+2. **Campos reservados do payload de alerta** (`observability/alert.js`): mesmo princípio aplicado ao
+   envelope do webhook — `fields` nunca sobrescreve `timestamp/service/environment/level/event/message/
+   requestId/correlationId`.
+3. **Redaction de Bearer ampliada**: o regex `bearer\s+[a-z0-9._-]+` não cobria o alfabeto completo de
+   base64/base64url/JWT (`+`, `/`, `=`); corrigido para `bearer\s+[a-z0-9\-._~+/=]+`, cobrindo o token
+   inteiro sem consumir texto ilimitado.
+4. **Threshold real de HTTP 5xx repetido**: antes, todo primeiro 5xx chamava `alert.notify()`
+   diretamente (o cooldown só deduplicava os seguintes — não era um threshold). Implementado
+   `recordHttp5xxAndMaybeNotify()` com janela fixa (`HTTP_5XX_ALERT_THRESHOLD`, padrão 5;
+   `HTTP_5XX_ALERT_WINDOW_MS`, padrão 300000ms) — um 500 isolado nunca alerta; só ao atingir o threshold
+   dentro da janela o alerta dispara uma vez; a janela expirada reinicia o contador naturalmente.
+5. **Estado em memória limitado**: os Maps de cooldown/threshold nunca crescem sem limite —
+   `MAX_TRACKED_KEYS = 500`, com evicção da entrada mais antiga ao exceder.
+6. **Cooldown marcado só após entrega bem-sucedida**: antes, `markSent(key)` ocorria ANTES da tentativa
+   de entrega — uma primeira tentativa que falhasse (todas as retries esgotadas) deixava o cooldown
+   "ativo" para um alerta que nunca chegou a sair. Corrigido para marcar somente após confirmação de
+   entrega bem-sucedida.
+7. Nenhuma expansão de escopo — H7-H11, LGPD, qualquer collector/SaaS real, permanecem intocados.
+8. Documentação atualizada em `docs/OBSERVABILITY.md` (seções 3, 5, 11, 13), `docs/QA.md`,
+   `docs/PRODUCTION_GATE.md` (seção 23) e `.env.example` (`HTTP_5XX_ALERT_THRESHOLD`,
+   `HTTP_5XX_ALERT_WINDOW_MS`).
+9. **Testes**: 527/527 passando com PostgreSQL real (485 anteriores + 42 em
+   `tests/h6-observability.test.js`, 9 novos: reserved fields do logger e do alerta, Bearer com
+   `+`/`/`/`=`, threshold D/E/F/G, cooldown-após-sucesso, estado limitado). `npm audit`: inalterado (2
+   vulnerabilidades altas conhecidas — H9); nenhuma dependência nova.
+
+**PG-17 continua ABERTO** — inalterado por esta correção; a pendência específica (agregação/busca real
+de produção e/ou destino de alerta real, dependentes de H11) permanece exatamente a mesma. Produção
+continua NO-GO. `docs/MASTER_HANDOFF.md` intocado.
+
 ---
 
 ## 2. ADRs de Engenharia — Fase 0 (Sprint 1)
