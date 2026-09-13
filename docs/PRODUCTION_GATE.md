@@ -88,8 +88,8 @@ e um checklist mínimo de LGPD. Não cobre: desenho de novas funcionalidades de 
 | PG-15 | Dependências | `npm audit`: 2 altas (`image-size`/`pptxgenjs`, DoS por parser) | Negação de serviço na geração de apresentações PPTX | **P1** | SIM | Avaliar migração/downgrade controlado de `pptxgenjs` com validação de exportação PPTX/PDF | Vulnerabilidade tratada ou mitigação/waiver formal registrado | H9 |
 | PG-16 | Google Calendar | Sem OAuth real, sem token storage seguro | Bloqueia apenas a leitura real de Calendar (funcionalidade opcional) | **P2** | NÃO (feature opcional, adapter seguro por design) | Implementar OAuth mínimo + storage seguro de token quando priorizado | Fluxo de leitura real testado ponta a ponta sem expor token | H10 |
 | PG-17 | Logging/Monitoramento | **H6 IMPLEMENTADO PARCIALMENTE (ver seção 23) — PERMANECE ABERTO.** Logger estruturado JSON provider-neutro, redaction defensiva (segredo nunca aparece por nome de campo nem por padrão em texto livre), requestId/correlação por requisição, access log HTTP normalizado, serializador seguro de erro, eventos de boot/shutdown/Monday/backup-restore, health liveness/readiness, alerta via webhook HTTPS com HMAC/cooldown/anti-recursão — tudo implementado e testado (`tests/h6-observability.test.js`, 33/33). Falta apenas: agregação/busca real de produção (nenhum coletor/agregador real foi configurado ou exercitado) e/ou destino de alerta real (nenhum `ALERT_WEBHOOK_URL` de produção foi validado contra infraestrutura real) — ambos dependentes de H11 | Incidente pode passar despercebido; sem visibilidade operacional | **P1** | SIM | Logging estruturado (sem PII/segredo) + alerta básico de erro/disponibilidade | Log de erro em produção é buscável e não contém segredo/PII — **atendido do lado da aplicação (JSON estruturado, correlação, redaction); falta a busca real num agregador de produção** | H6 (parcial), H11 |
-| PG-18 | Auditoria | Eventos de auditoria não capturam IP/sessão/user-agent; sem rotação/retenção | Rastreabilidade incompleta para investigação; crescimento não controlado do arquivo | **P2** | NÃO (MVP aceitável) | Adicionar metadados de origem e política de retenção ao evoluir para produção | Auditoria permite reconstruir "quem, quando, de onde, o quê" | H8 |
-| PG-19 | Retenção/Legal Hold | Nenhuma política de retenção/exclusão/legal hold definida para nenhuma entidade | Impossível responder a obrigação legal de retenção ou a um pedido de exclusão (LGPD) | **P0** | SIM | Definir política por tipo de dado (audit, Legal Deadline, documentos, backups) | Política documentada e aplicável tecnicamente (mesmo que manual no início) | H8 |
+| PG-18 | Auditoria | **H8 IMPLEMENTADO PARCIALMENTE (ver seção 25) — PERMANECE ABERTO.** `audit()` ganhou `requestId` (reaproveitado de H6)/`ipHmac` (HMAC-SHA256, nunca IP em texto puro)/`userAgentSummary` (família/plataforma minimizada, nunca a string crua) — aplicado às novas rotas de legal hold e aos eventos do runner de retenção, testado (`tests/h8-retention-legal-hold.test.js`). Falta: os ~50 pontos de chamada de `audit()` já existentes (login, MFA, financeiro, jurídico, backup/restore, rate limit) não foram retrofitados com esse contexto; `sessionId` permanece sempre `null` (exigiria alterar `getUser()` e todos os seus chamadores); ainda sem rotação/retenção do próprio `audit_log` (o purge de `SECURITY_AUDIT`/`BUSINESS_AUDIT` não foi implementado nesta rodada, ver `docs/DATA_RETENTION.md`) | Rastreabilidade incompleta para investigação; crescimento não controlado do arquivo | **P2** | NÃO (MVP aceitável) | Retrofitar os pontos de chamada restantes; popular `sessionId`; implementar purge de auditoria antiga fora do escopo desta rodada | Auditoria permite reconstruir "quem, quando, de onde, o quê" — **atendido apenas nas rotas novas de H8; os eventos pré-existentes permanecem sem o contexto ampliado** | H8 (parcial) |
+| PG-19 | Retenção/Legal Hold | **H8 IMPLEMENTADO PARCIALMENTE (ver seção 25) — PERMANECE ABERTO.** Matriz completa de 15 classes de dado × retenção × legal hold em `docs/DATA_RETENTION.md`; modelo formal de legal hold (`legal_holds`, 5 escopos, RBAC, nunca deletado historicamente) em `docs/LEGAL_HOLD.md`; runner de retenção (`retention/runner.js`) dry-run por padrão, `--execute` explícito, sempre respeitando `isUnderLegalHold()`, sempre com evidência (`retention_runs` + eventos `RETENTION_*`) — tudo implementado e testado (`tests/h8-retention-legal-hold.test.js`, 26/26). Falta: apenas 3 classes efêmeras (`AUTH_SESSION`/`AUTH_RESET_TOKEN`/`RATE_LIMIT`) têm purge de fato implementado — `SECURITY_AUDIT`/`BUSINESS_AUDIT`/`INCIDENT_RECORD`/`LEGAL_PROCESS`/`LEGAL_DEADLINE`/`USER_ACCOUNT` permanecem sem mecanismo de purge (decisão deliberada, não lacuna técnica — ver `docs/DATA_RETENTION.md`, seção 6); portanto a política **GLOBAL** completa (cobrindo todas as classes) ainda não está formalmente definida/homologada pelo jurídico | Impossível responder a obrigação legal de retenção ou a um pedido de exclusão (LGPD) para as classes ainda não cobertas | **P0** | SIM | Definir política por tipo de dado (audit, Legal Deadline, documentos, backups) — **parcialmente atendido**; formalizar e homologar a política GLOBAL com o jurídico para as classes restantes | Política documentada e aplicável tecnicamente (mesmo que manual no início) — **atendido para as 3 classes efêmeras; falta a definição formal da política para as classes sensíveis restantes** | H8 (parcial) |
 | PG-20 | Incident Response | **H7 IMPLEMENTADO PARCIALMENTE (ver seção 24) — PERMANECE ABERTO.** Processo completo documentado em `docs/INCIDENT_RESPONSE.md`: severidade (SEV-1..SEV-4), categorias, papéis funcionais, lifecycle, checklist de 18 itens, modelo de registro, 5 runbooks específicos (auth/dados/disponibilidade/backup-restore/segredos), templates de comunicação/postmortem, exercício de mesa (tabletop), e `scripts/create-incident.js` testado. Falta apenas: nenhum canal de comunicação real nem nome individual real foi parametrizado (`INCIDENT_PRIMARY_CHANNEL`/`INCIDENT_SECONDARY_CHANNEL`/`INCIDENT_SECURITY_CONTACT`/`INCIDENT_PRIVACY_CONTACT` permanecem vazios em `.env.example`, corretamente — nenhum valor foi inventado) | Sem detecção/contenção/comunicação formal em caso de violação | **P0** | SIM | Checklist mínimo de IR (ver seção 8) | Checklist existe, tem responsável nomeado e canal de comunicação definido — **atendido para o processo em si (papéis, severidade, runbooks, templates, tabletop); falta a parametrização nominal/de canal real, decisão operacional pré-produção** | H7 (parcial) |
 | PG-21 | Backup/Restore | **H5 IMPLEMENTADO PARCIALMENTE (ver seção 22) — PERMANECE ABERTO.** `pg_dump`/`pg_restore` reais do PostgreSQL canônico, RPO=6h/RTO=4h definidos e comprovados por restore real, manifesto com integridade (SHA-256), política de ambiente/confirmação/replace, revogação de estado efêmero pós-restore — tudo implementado e testado (`tests/h5-backup-restore-postgres.test.js`, 18/18). Falta apenas: o adapter de storage offsite real (`s3`) nunca foi exercitado contra um bucket real (só testado com cliente S3 injetado) — nenhuma infraestrutura foi provisionada nesta rodada (fora de escopo de H5, ver H11); agendamento de produção real (cron/scheduler) também é H11 | Perda de dado sem recuperação viável em caso de incidente | **P0** | SIM | Backup agendado, offsite, com RPO/RTO definidos e teste de restore documentado | Restore de um backup real é executado e validado ao menos uma vez, com evidência — **atendido para o mecanismo em si; falta a validação com storage offsite real** | H5 (parcial), H11 |
 | PG-22 | Deploy/Infra | Não existe `fly.toml` nem `Dockerfile` no repositório — nenhuma infraestrutura como código versionada | Deploy depende de processo manual/tácito, não reprodutível | **P0** | SIM | Criar infraestrutura como código (container + config de deploy), healthcheck, variáveis de ambiente documentadas | Deploy reproduzível a partir do repositório, sem passo manual não documentado | H11 |
@@ -167,6 +167,21 @@ e um checklist mínimo de LGPD. Não cobre: desenho de novas funcionalidades de 
   inventada. Fechar PG-20 sem essa parametrização seria fechar por intenção, não por comprovação — mesma
   disciplina de PG-21/H5 e PG-17/H6.
 - **P1/P2 inalterados** — H7 não altera nenhum outro achado.
+- **Fechados = 13** — inalterado (PG-01 a PG-13).
+
+**Após o Hardening H8 (ver seção 25) — nenhum fechamento de contagem:**
+
+- **P0 aberto = 4** — inalterado (PG-19, PG-20, PG-21, PG-22). PG-19 permanece aberto DELIBERADAMENTE:
+  a matriz de retenção, o modelo de legal hold e o runner (dry-run/execute, sempre respeitando hold,
+  sempre com evidência) estão implementados e testados para as 3 classes efêmeras do escopo desta rodada,
+  mas a política **GLOBAL** cobrindo as classes sensíveis restantes (auditoria, processos jurídicos,
+  incidentes, contas de usuário) ainda não foi formalmente definida/homologada pelo jurídico — decisão
+  deliberada de escopo, não uma lacuna técnica descoberta tardiamente. Fechar PG-19 sem essa definição
+  seria fechar por intenção, não por comprovação — mesma disciplina de PG-21/H5, PG-17/H6 e PG-20/H7.
+- **P2 aberto = 4** — inalterado (PG-14, PG-16, PG-18, PG-25). PG-18 avança substancialmente
+  (metadados de auditoria implementados e testados nas rotas novas), mas permanece aberto: os ~50 pontos
+  de chamada de `audit()` pré-existentes não foram retrofitados, e `sessionId` permanece sempre `null`.
+- **P1 inalterado** — H8 não altera nenhum achado P1.
 - **Fechados = 13** — inalterado (PG-01 a PG-13).
 
 PG-01/PG-02 são exibidos como dois achados por clareza de causa raiz (persistência sem transação e sem
@@ -1120,27 +1135,115 @@ nenhum teste removido. `npm audit`: inalterado (2 vulnerabilidades altas conheci
 processo está completo e testado, mas depende de uma parametrização operacional real (canal e
 responsável nominal) fora do escopo técnico autorizado desta rodada.
 
+## 25. Status do Hardening H8 (IMPLEMENTADO PARCIALMENTE — PG-19 PERMANECE ABERTO)
+
+### Matriz H8 — Classe de dado × retenção × legal hold (auditoria pré-implementação)
+
+Ver `docs/DATA_RETENTION.md`, seção 3, para a matriz completa (Classe | Fonte | Finalidade | Retenção
+padrão | Base da retenção | Pode expirar? | Legal Hold aplicável? | Método de descarte | Evidência),
+cobrindo as 15 classes de dado do escopo: `SECURITY_AUDIT`, `BUSINESS_AUDIT`, `AUTH_SESSION`,
+`AUTH_RESET_TOKEN`, `RATE_LIMIT`, `BACKUP_METADATA`, `RESTORE_METADATA`, `INCIDENT_RECORD`,
+`OPERATIONAL_LOG`, `LEGAL_PROCESS`, `LEGAL_DEADLINE`, `INTEGRATION_CACHE`, `TEMPORARY_ARTIFACT`,
+`USER_ACCOUNT`, `OTHER`.
+
+### O que foi implementado
+
+- **`retention/policy.js`** — política centralizada: classes, defaults de retenção (nunca apresentados
+  como obrigação legal — sempre "DEFAULT / PROPOSED INTERNAL POLICY"), resolução/validação de override
+  via variável de ambiente (`resolveRetentionValue()`, `validatePolicyForProduction()`), versão de
+  política (`POLICY_VERSION`). Nunca executa purge sozinho — apenas expõe a política.
+- **`retention/legal-hold.js`** — modelo formal de legal hold: 5 escopos (GLOBAL/DATA_CLASS/ENTITY/
+  INCIDENT/LEGAL_PROCESS), `reason`/`releaseReason` sempre obrigatórios, liberação nunca deleta a linha
+  (histórico permanente), `isUnderLegalHold()` como função central consultada antes de qualquer purge.
+- **`migrations/009_h8_retention_legal_hold.sql`** — `legal_holds` e `retention_runs` (Postgres,
+  append-only por design — nunca reaproveitando a ponte JSONB), colunas aditivas/nullable em `audit_log`
+  (`request_id`/`session_id`/`ip_hmac`/`user_agent_summary`).
+- **`retention/runner.js`** — inspeção/purge das 3 classes efêmeras (`AUTH_SESSION`/`AUTH_RESET_TOKEN`/
+  `RATE_LIMIT`), dry-run e execute, sempre respeitando legal hold, sempre registrando evidência
+  (`retention_runs` + eventos `RETENTION_DRY_RUN`/`RETENTION_EXECUTED`/`RETENTION_ITEM_SKIPPED_LEGAL_HOLD`/
+  `RETENTION_FAILED` em `audit_log`, resumidos por classe/execução — nunca um evento por registro).
+- **`scripts/run-retention.js`** — CLI: dry-run por padrão, `--execute` explícito, confirmação adicional
+  obrigatória em produção (`RETENTION_EXECUTE_CONFIRMATION`, mesmo padrão de `RESTORE_CONFIRM_PRODUCTION`
+  de H5), valida a política antes de executar de fato.
+- **`observability/audit-context.js`** — `pseudonymizeIp()` (HMAC-SHA256 com `AUDIT_IP_HMAC_KEY`,
+  fail-fast em produção se o recurso for exercitado sem chave — nunca hash sem segredo nem IP em texto
+  puro), `summarizeUserAgent()` (família/plataforma minimizada, nunca a string crua).
+- **`POST /api/legal-holds`, `POST /api/legal-holds/:id/release`, `GET /api/legal-holds`** — protegidas
+  pela mesma gate de `/api/backup` (`allowed(user,'*','approve')`, só `diretoria`/`administrador`), sem
+  vazamento cross-scope, auditando `LEGAL_HOLD_CREATED`/`LEGAL_HOLD_RELEASED` com o contexto ampliado.
+- **`docs/DATA_RETENTION.md`**, **`docs/LEGAL_HOLD.md`** — documentos de referência completos.
+
+### Por que PG-19 permanece ABERTO (não fechado por intenção)
+
+O mecanismo — política centralizada, legal hold formal e testado, runner dry-run/execute com evidência —
+está implementado e testado para as classes do escopo autorizado desta rodada. O critério de aceite de
+PG-19 exige, no entanto, uma política **aplicável a todas as classes de dado relevantes**: nesta rodada,
+deliberadamente, apenas 3 classes efêmeras (`AUTH_SESSION`/`AUTH_RESET_TOKEN`/`RATE_LIMIT`) têm purge de
+fato implementado. `SECURITY_AUDIT`, `BUSINESS_AUDIT`, `INCIDENT_RECORD`, `LEGAL_PROCESS`,
+`LEGAL_DEADLINE` e `USER_ACCOUNT` permanecem sem mecanismo de purge automático — decisão de escopo
+explícita (ver `docs/DATA_RETENTION.md`, seção 6), não uma lacuna técnica descoberta tardiamente. A
+política **GLOBAL** completa, cobrindo essas classes sensíveis, depende de definição/homologação
+jurídica que não ocorreu nesta rodada. Fechar PG-19 sem essa definição seria fechar por intenção, não
+por comprovação — mesma disciplina já aplicada a PG-21/H5, PG-17/H6 e PG-20/H7.
+
+### Limitações explicitamente documentadas
+
+- Purge automático não implementado para `SECURITY_AUDIT`/`BUSINESS_AUDIT`/`INCIDENT_RECORD`/
+  `LEGAL_PROCESS`/`LEGAL_DEADLINE`/`USER_ACCOUNT` — decisão deliberada (ver `docs/DATA_RETENTION.md`).
+- `sessionId` em `audit_log` permanece sempre `null` — `getUser()` não expõe o id da sessão resolvida.
+- Os ~50 pontos de chamada de `audit()` pré-existentes não foram retrofitados com o novo `context`
+  (requestId/ipHmac/userAgentSummary) — aplicado apenas às rotas novas de legal hold e ao runner.
+- Retenção de log operacional agregado (`OPERATIONAL_LOG`) é apenas documental — depende de um
+  agregador/coletor real ainda não provisionado (PG-17, H11).
+- Nenhuma reconciliação automática entre `restore` (H5) e retenção já expirada foi implementada —
+  documentado como dependência de H11/storage lifecycle (ver `docs/DATA_RETENTION.md`, seção 8).
+- Retenção não alcança backups já gerados (arquivos/objetos de storage externo) — depende de H11/PG-21.
+- Nenhuma infraestrutura de eDiscovery/DLP/WORM/immutable vault/object lock foi criada ou é necessária
+  para o escopo atual.
+
+### Testes
+
+**575/575 passando** com PostgreSQL real (549 anteriores + 26 novos em
+`tests/h8-retention-legal-hold.test.js` — política de retenção (defaults/override/env inválida),
+pseudonimização de IP/resumo de User-Agent, legal hold (criação/liberação/validação de escopo/reason
+obrigatório/nunca deletado/sem vazamento cross-scope/`isUnderLegalHold()` nos 3 níveis de escopo),
+runner (dry-run nunca apaga/execute apaga só o elegível e nunca o que está sob hold/evidência em
+`retention_runs`/eventos `RETENTION_*` resumidos por classe, nunca por registro/`RETENTION_FAILED` real
+em política inválida em runtime), e HTTP (RBAC 403/201, `requestId` presente, nunca token/segredo/
+`Bearer` no `audit_log`, `docs/MASTER_HANDOFF.md` intocado), 0 falhando, nenhum teste removido. `npm
+audit`: inalterado (2 vulnerabilidades altas conhecidas, `image-size`/`pptxgenjs` — H9); nenhuma
+dependência nova adicionada nesta rodada.
+
+**Por que "implementado parcialmente" e não "aguardando homologação":** mesma disciplina de H5/H6/H7 — o
+mecanismo está completo e testado para o escopo autorizado, mas depende de uma decisão jurídica/de
+negócio real (política GLOBAL para as classes sensíveis restantes) fora do escopo técnico desta rodada.
+
 ## 16. Decisão final atual
 
 **NO-GO PARA PRODUÇÃO** — inalterado por esta rodada de hardening.
 
-Após o H1A/H1B/H2/H3/H4/H5(parcial)/H6(parcial)/H7(parcial): **4 P0 abertos** (ausência de retenção/
-legal hold — H8, incident response avançado mas PG-20 aberto por parametrização real pendente — H7,
-backup/restore de produção com offsite real ainda não validado — H5/PG-21, ausência de infraestrutura de
-deploy como código — H11), **4 P1 abertos** (dependências — H9, logging/monitoramento com agregação/
-alerta real ainda não validados — H6/PG-17, LGPD ×2), **4 P2 abertos** — 12 achados abertos, **13
+Após o H1A/H1B/H2/H3/H4/H5(parcial)/H6(parcial)/H7(parcial)/H8(parcial): **4 P0 abertos** (retenção/legal
+hold avançados mas PG-19 aberto por política GLOBAL ainda não homologada para classes sensíveis — H8,
+incident response avançado mas PG-20 aberto por parametrização real pendente — H7, backup/restore de
+produção com offsite real ainda não validado — H5/PG-21, ausência de infraestrutura de deploy como
+código — H11), **4 P1 abertos** (dependências — H9, logging/monitoramento com agregação/alerta real ainda
+não validados — H6/PG-17, LGPD ×2), **4 P2 abertos** (auditoria avançada mas PG-18 aberto por retrofit
+pendente nos pontos de chamada pré-existentes — H8, mais 3 inalterados) — 12 achados abertos, **13
 fechados** (PG-01 a PG-13, ver seções 17/18/19/20/21). Na matriz da seção 5, as linhas "Persistência",
 "Sessões", "Autenticação (credenciais)", "Rate limiting" e "Headers HTTP" deixam de bloquear; "Backup"/
-"Restore", "Logging/Monitoramento" e "Incident Response" avançaram substancialmente (mecanismo/processo
-real implementado e testado) mas continuam bloqueando até, respectivamente, o storage offsite real, o
-agregador/destino de alerta real, e a parametrização real de canal/responsável serem exercitados; os
-demais gates bloqueantes (Retenção/Legal Hold, Dependências, Deploy/Infra) permanecem inalterados, mais o
+"Restore", "Logging/Monitoramento", "Incident Response" e "Retenção/Legal Hold" avançaram
+substancialmente (mecanismo/processo real implementado e testado) mas continuam bloqueando até,
+respectivamente, o storage offsite real, o agregador/destino de alerta real, a parametrização real de
+canal/responsável, e a homologação jurídica da política GLOBAL para as classes sensíveis restantes serem
+exercitados; os demais gates bloqueantes (Dependências, Deploy/Infra) permanecem inalterados, mais o
 LGPD (P1, não bloqueante técnico mas pendente de decisão de negócio/jurídico). Nenhum waiver foi emitido.
 O Sprint 2 permanece concluído no escopo homologado (`docs/DECISIONS.md`, D2-CLOSE) — este documento não
 o reabre nem contradiz; apenas formaliza que produção é um gate técnico/de negócio separado, ainda não
 atendido, e que
 o H1A/H1B/H2/H3/H4 avançaram critérios específicos de persistência/sessão/autenticação/rate limiting/
-headers HTTP sem declarar o gate inteiro atendido, e H5/H6/H7 avançaram substancialmente os mecanismos/
-processos de backup/restore, observabilidade e resposta a incidentes sem ainda fechar PG-21/PG-17/PG-20
-(pendências específicas e documentadas: storage offsite real; agregação/busca real de produção e
-destino de alerta real; parametrização real de canal de comunicação e responsável nomeado).
+headers HTTP sem declarar o gate inteiro atendido, e H5/H6/H7/H8 avançaram substancialmente os
+mecanismos/processos de backup/restore, observabilidade, resposta a incidentes e retenção/legal hold sem
+ainda fechar PG-21/PG-17/PG-20/PG-19 (pendências específicas e documentadas: storage offsite real;
+agregação/busca real de produção e destino de alerta real; parametrização real de canal de comunicação e
+responsável nomeado; homologação jurídica da política GLOBAL de retenção para as classes sensíveis
+restantes).

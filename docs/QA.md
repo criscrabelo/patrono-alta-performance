@@ -1244,3 +1244,46 @@ ABERTO. Não expande H6 — apenas garante a integridade do requisito de evidên
 - **PG-20 continua ABERTO** — inalterado por esta correção (não relacionado à parametrização real de
   canal/responsável, que continua sendo a pendência específica do gate). Nenhum escopo de H8-H11 foi
   expandido.
+
+## QA — Hardening H8 (Retenção, Legal Hold e Auditoria — IMPLEMENTADO PARCIALMENTE, PG-19 ABERTO)
+
+`docs/PRODUCTION_GATE.md`, seção 25; `docs/DECISIONS.md`, PROD-H8-01/02/03; `docs/DATA_RETENTION.md`;
+`docs/LEGAL_HOLD.md`.
+
+- **575 testes totais** com `TEST_DATABASE_URL` (549 anteriores + 26 novos em
+  `tests/h8-retention-legal-hold.test.js`), 0 falhando, nenhum teste removido/pulado.
+- **Política de retenção (`[H8-policy-A..E]`)**: defaults documentados retornados sem env var; override
+  de env var válida aplicado corretamente; env var inválida (não-inteiro/negativa) lança erro explícito
+  nomeando a variável; `validatePolicyForProduction()` agrega/propaga a mesma falha; `retentionMs()`
+  converte corretamente dias e horas.
+- **Pseudonimização de IP / resumo de User-Agent (`[H8-ip-A..C]`, `[H8-ua-A]`)**: `pseudonymizeIp()` usa
+  HMAC-SHA256 quando `AUDIT_IP_HMAC_KEY` está definida; sem chave fora de produção retorna `null` (nunca
+  IP em texto puro); em produção sem chave, lança erro explícito (fail-fast); `summarizeUserAgent()`
+  nunca retorna a string crua, apenas família/plataforma.
+- **Legal hold (`[H8-hold-A..F]`)**: `createLegalHold()` rejeita `reason` vazio e `scopeType` inválido;
+  rejeita `GLOBAL` com `scopeValue` e escopo não-GLOBAL sem `scopeValue`; ciclo completo criação/liberação
+  nunca deleta a linha (histórico permanente); `listLegalHolds()` com filtro de escopo nunca vaza hold de
+  outro escopo (cross-scope); `isUnderLegalHold()` corretamente bloqueia por GLOBAL (tudo), DATA_CLASS
+  (toda a classe) e ENTITY (só a entidade).
+- **Runner de retenção (`[H8-runner-A..G]`)**: dry-run nunca apaga nada mesmo com linhas elegíveis;
+  execute apaga somente o elegível, nunca o que está sob legal hold (ENTITY); `runRetention()` registra
+  `retention_runs` com `policyVersion`/status/summary; `retention_runs.summary` nunca contém payload
+  sensível (`token_hash`/`password`/`secret`); eventos de auditoria `RETENTION_DRY_RUN`/
+  `RETENTION_EXECUTED` são resumidos por execução — exatamente 1 linha em `audit_log`, nunca uma por
+  registro apagado; `RETENTION_ITEM_SKIPPED_LEGAL_HOLD` resumido por classe sob hold (não por registro);
+  `RETENTION_FAILED` e `retention_runs.status='failed'` registrados corretamente quando a política é
+  inválida em runtime (env var corrompida durante a execução).
+- **HTTP/RBAC/auditoria (`[H8-http-A..D]`)**: `colaborador` recebe `403` ao tentar criar legal hold;
+  `diretoria` cria/lista/libera com sucesso, e `audit_log` registra exatamente os 2 eventos esperados
+  (`LEGAL_HOLD_CREATED`/`LEGAL_HOLD_RELEASED`) com `requestId` presente e nunca o token de sessão nem
+  `Bearer` em qualquer campo serializado; `reason` vazio é rejeitado pela rota (`422`), nunca cria hold
+  sem motivo; `docs/MASTER_HANDOFF.md` permanece sem diff contra `origin/master`.
+- CI: Node 20.x/22.x, PostgreSQL real — nenhum teste H8 crítico pulado; H1-H7 inalterados.
+- `npm audit`: inalterado (2 vulnerabilidades altas conhecidas, `image-size`/`pptxgenjs` — H9); nenhuma
+  dependência nova adicionada nesta rodada.
+- **PG-19 permanece ABERTO** — o mecanismo (política, legal hold, runner com evidência) está implementado
+  e testado para as 3 classes efêmeras do escopo autorizado, mas a política GLOBAL cobrindo as classes
+  sensíveis restantes ainda depende de homologação jurídica — ver `docs/PRODUCTION_GATE.md`, seção 25.
+- **PG-18 permanece ABERTO** — o novo contexto de auditoria (requestId/ipHmac/userAgentSummary) foi
+  aplicado apenas às rotas novas de legal hold e ao runner; os ~50 pontos de chamada de `audit()`
+  pré-existentes não foram retrofitados, e `sessionId` permanece sempre `null`.
