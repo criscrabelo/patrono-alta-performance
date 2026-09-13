@@ -4,15 +4,30 @@
 // usar X-Forwarded-For é combinada com uma política explícita de quantos saltos de proxy confiável
 // existem entre o cliente real e este processo (`TRUST_PROXY_HOPS`).
 //
+// CORREÇÃO (revisão técnica pós-PR #14): a fórmula original desta função (`chain.length - 1 - hops`)
+// estava desalinhada um salto para a esquerda — e o teste original também partia da mesma premissa
+// errada, por isso o CI não pegou o bug. Cada proxy confiável, ao encaminhar a requisição, ACRESCENTA ao
+// final de X-Forwarded-For o endereço de quem se conectou A ELE (nunca o próprio endereço) — logo, com N
+// proxies confiáveis e nenhuma entrada forjada, a cadeia tem exatamente N entradas (cliente + os N-1
+// proxies intermediários; o N-ésimo proxy, o mais próximo desta aplicação, nunca aparece na própria
+// cadeia — ele é `req.socket.remoteAddress`). O cliente é sempre a entrada `chain.length - N`
+// (0-indexado) — a fórmula certa é SEM o "-1" adicional.
+//
+// Exemplo (1 proxy confiável): cliente → proxy → aplicação. `remoteAddress` = IP do proxy;
+// `X-Forwarded-For: <IP do cliente>` (1 entrada). `chain.length - hops` = `1 - 1` = `0` → `chain[0]`
+// = IP do cliente. Um atacante que já chega ao proxy com um X-Forwarded-For pré-forjado
+// (`X-Forwarded-For: 9.9.9.9`) não muda o resultado: o proxy ACRESCENTA o IP real observado ao final
+// (`9.9.9.9, <IP real>`, 2 entradas), e `chain.length - hops` = `2 - 1` = `1` → a última entrada, o IP
+// real — nunca a primeira, forjada.
+//
 // Semântica de `TRUST_PROXY_HOPS` (mesmo modelo do `trust proxy` numérico do Express/nginx):
 // - `0` (padrão): nenhum proxy confiável configurado — usa sempre o endereço remoto real da conexão
 //   TCP (`req.socket.remoteAddress`), nunca X-Forwarded-For.
-// - `N` (N >= 1): existem exatamente N proxies confiáveis na frente desta aplicação. Cada proxy
-//   confiável ACRESCENTA uma entrada ao final de X-Forwarded-For (a conexão TCP que este processo
-//   enxerga — `req.socket.remoteAddress` — é o N-ésimo/último desses proxies, e não aparece na própria
-//   cadeia). O IP do cliente é sempre a entrada `chain.length - 1 - N` (0-indexado) — nunca a primeira
-//   entrada da esquerda (que qualquer requisição não autenticada pode forjar livremente), nem a última
-//   (que é o próprio proxy confiável mais próximo).
+// - `N` (N >= 1): existem exatamente N proxies confiáveis na frente desta aplicação. O IP do cliente é
+//   sempre a entrada `chain.length - N` (0-indexado) — nunca a primeira entrada da cadeia (forjável por
+//   qualquer requisição que já chegue ao primeiro proxy confiável com um X-Forwarded-For pré-existente).
+//   Uma cadeia mais curta do que `hops` exigiria nunca inventa um IP — cai para o endereço direto da
+//   conexão (fail-safe).
 //
 // Limitação documentada (inerente a qualquer resolução por header, não específica desta implementação):
 // isto só é seguro se a topologia de rede garantir que ESTE PROCESSO só é alcançável através dos N
@@ -21,6 +36,7 @@
 // não está de fato na frente da aplicação; a garantia vem da topologia de rede combinada com esta
 // política.
 const crypto = require('node:crypto');
+const net = require('node:net');
 
 function readTrustProxyHops() {
   const raw = Number(process.env.TRUST_PROXY_HOPS);
@@ -37,22 +53,27 @@ function normalizeIp(value) {
   return v4Mapped ? v4Mapped[1] : trimmed;
 }
 
+// Item 7 da revisão técnica: uma entrada de X-Forwarded-For não é confiável só por vir na posição
+// certa da cadeia — precisa também ser um IPv4/IPv6 sintaticamente válido, nunca uma string arbitrária
+// (nunca vira uma identidade legítima de rate limit). `node:net.isIP()` — nenhuma dependência nova.
+function isValidIp(value) {
+  return typeof value === 'string' && value.length > 0 && net.isIP(value) !== 0;
+}
+
 function resolveClientIp(req) {
   const direct = normalizeIp(req.socket && req.socket.remoteAddress);
   const hops = readTrustProxyHops();
   if (hops <= 0) return direct;
   const header = req.headers['x-forwarded-for'];
   if (!header) return direct;
-  // X-Forwarded-For: cliente, proxy1, proxy2, ..., proxy(N-1) (o N-ésimo proxy, mais próximo deste
-  // processo, não se auto-adiciona à cadeia — ele é `req.socket.remoteAddress`). Com N saltos
-  // confiáveis configurados, o IP do cliente é a entrada `chain.length - 1 - N` (0-indexado) — nunca a
-  // primeira entrada da cadeia, que é exatamente o valor que um atacante sem proxy nenhum poderia
-  // inserir à vontade. Uma cadeia mais curta do que o esperado (menos entradas do que `hops` exigiria)
-  // nunca inventa um IP — cai para o endereço direto da conexão.
-  const chain = String(header).split(',').map(part => normalizeIp(part)).filter(Boolean);
-  const index = chain.length - 1 - hops;
+  // Nunca remove/filtra entradas antes de calcular a posição — um atacante poderia inserir uma entrada
+  // inválida deliberadamente para deslocar os índices e escapar da posição correta. A cadeia inteira,
+  // exatamente como enviada, determina a posição; só o valor FINAL escolhido é validado.
+  const chain = String(header).split(',').map(part => normalizeIp(part));
+  const index = chain.length - hops;
   if (index < 0 || index >= chain.length) return direct;
-  return chain[index] || direct;
+  const candidate = chain[index];
+  return isValidIp(candidate) ? candidate : direct;
 }
 
 // Deriva um identificador estável e não-reversível do IP para uso em chaves de rate limit
@@ -61,4 +82,4 @@ function hashIp(ip, secret) {
   return crypto.createHmac('sha256', secret).update(`ip:${ip || 'desconhecido'}`).digest('hex');
 }
 
-module.exports = { resolveClientIp, normalizeIp, hashIp, readTrustProxyHops };
+module.exports = { resolveClientIp, normalizeIp, hashIp, readTrustProxyHops, isValidIp };

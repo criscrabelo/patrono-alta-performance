@@ -1272,19 +1272,75 @@ test('resolveClientIp (H3-proxy-A): sem TRUST_PROXY_HOPS configurado, X-Forwarde
   if (originalHops === undefined) delete process.env.TRUST_PROXY_HOPS; else process.env.TRUST_PROXY_HOPS = originalHops;
 });
 
-test('resolveClientIp (H3-proxy-B/C): com proxy confiável, resolve o IP conforme o número de saltos configurado, sem escolher arbitrariamente a primeira entrada', () => {
+// Revisão técnica pós-PR #14: a versão original desta função (e deste teste) tinha a fórmula
+// desalinhada um salto para a esquerda (`chain.length - 1 - hops`) — o teste original partia da MESMA
+// premissa errada da implementação, por isso o CI verde não pegava o bug. Corrigido para
+// `chain.length - hops`: cada proxy confiável acrescenta ao final de X-Forwarded-For o endereço de quem
+// se conectou A ELE (nunca o próprio endereço) — com N proxies confiáveis e nenhuma entrada forjada, a
+// cadeia tem exatamente N entradas (cliente + os N-1 proxies intermediários; o N-ésimo, mais próximo
+// desta aplicação, nunca aparece na cadeia — é `req.socket.remoteAddress`).
+test('resolveClientIp (H3-proxy-B): 1 proxy confiável — cadeia com apenas o IP do cliente resolve corretamente', () => {
   const originalHops = process.env.TRUST_PROXY_HOPS;
   process.env.TRUST_PROXY_HOPS = '1';
   delete require.cache[require.resolve('../auth/client-ip')];
   const { resolveClientIp } = require('../auth/client-ip');
-  // Cadeia esperada com 1 proxy confiável: "cliente, proxy1" — o cliente é a entrada a 1 posição do fim.
-  const reqOk = { socket: { remoteAddress: '10.0.0.1' }, headers: { 'x-forwarded-for': '198.51.100.7, 10.0.0.2' } };
-  assert.equal(resolveClientIp(reqOk), '198.51.100.7');
-  // Cadeia MAIOR que o esperado (um atacante tentando inserir entradas extras à esquerda): a posição
-  // resolvida acompanha a fórmula determinística (chain.length - hops), nunca escolhe arbitrariamente a
-  // primeira entrada da esquerda como se fosse sempre o cliente.
-  const reqLonger = { socket: { remoteAddress: '10.0.0.1' }, headers: { 'x-forwarded-for': '9.9.9.9, 198.51.100.7, 10.0.0.2' } };
-  assert.equal(resolveClientIp(reqLonger), '198.51.100.7', 'com hops=1, a posição resolvida é sempre chain.length-1, nunca a primeira entrada da cadeia');
+  // Cliente -> Proxy confiável -> Aplicação: remoteAddress é o IP do proxy; X-Forwarded-For tem 1
+  // entrada (o IP do cliente, que é quem se conectou ao proxy).
+  const req = { socket: { remoteAddress: '10.0.0.10' }, headers: { 'x-forwarded-for': '198.51.100.7' } };
+  assert.equal(resolveClientIp(req), '198.51.100.7', 'com hops=1 e cadeia de 1 entrada, o cliente é essa única entrada — nunca o remoteAddress (o proxy)');
+  if (originalHops === undefined) delete process.env.TRUST_PROXY_HOPS; else process.env.TRUST_PROXY_HOPS = originalHops;
+});
+
+test('resolveClientIp (H3-proxy-C): 1 proxy confiável — X-Forwarded-For pré-forjado pelo atacante não sobrevive à entrada real acrescentada pelo proxy', () => {
+  const originalHops = process.env.TRUST_PROXY_HOPS;
+  process.env.TRUST_PROXY_HOPS = '1';
+  delete require.cache[require.resolve('../auth/client-ip')];
+  const { resolveClientIp } = require('../auth/client-ip');
+  // O atacante já envia um X-Forwarded-For forjado ("9.9.9.9") ao proxy confiável; o proxy ACRESCENTA
+  // (nunca substitui) o IP real que observou ao final da cadeia — "9.9.9.9, 198.51.100.7". Com hops=1,
+  // o cliente é sempre a ÚLTIMA entrada (a que o proxy confiável de fato observou), nunca a primeira.
+  const req = { socket: { remoteAddress: '10.0.0.10' }, headers: { 'x-forwarded-for': '9.9.9.9, 198.51.100.7' } };
+  assert.equal(resolveClientIp(req), '198.51.100.7', 'nunca a primeira entrada (forjada pelo atacante) — sempre a entrada que o proxy confiável realmente observou');
+  if (originalHops === undefined) delete process.env.TRUST_PROXY_HOPS; else process.env.TRUST_PROXY_HOPS = originalHops;
+});
+
+test('resolveClientIp (H3-proxy-E): 2 proxies confiáveis em cadeia — resolve o cliente real, mesmo com uma entrada forjada extra à esquerda', () => {
+  const originalHops = process.env.TRUST_PROXY_HOPS;
+  process.env.TRUST_PROXY_HOPS = '2';
+  delete require.cache[require.resolve('../auth/client-ip')];
+  const { resolveClientIp } = require('../auth/client-ip');
+  // Cliente -> Proxy A -> Proxy B -> Aplicação: remoteAddress é o IP do Proxy B; X-Forwarded-For tem 2
+  // entradas ("Cliente, ProxyA" — cada proxy acrescenta o endereço de quem se conectou a ele).
+  const reqOk = { socket: { remoteAddress: '10.0.0.20' }, headers: { 'x-forwarded-for': '203.0.113.5, 10.0.0.1' } };
+  assert.equal(resolveClientIp(reqOk), '203.0.113.5', 'com hops=2 e cadeia de 2 entradas, o cliente é a primeira (a mais à esquerda de fato observada pelos proxies confiáveis)');
+  // Uma entrada forjada extra à esquerda (o atacante tentando inserir mais uma camada falsa) desloca a
+  // posição calculada pela fórmula determinística — nunca escolhida arbitrariamente.
+  const reqForged = { socket: { remoteAddress: '10.0.0.20' }, headers: { 'x-forwarded-for': '9.9.9.9, 203.0.113.5, 10.0.0.1' } };
+  assert.equal(resolveClientIp(reqForged), '203.0.113.5', 'a entrada forjada extra não muda o cliente resolvido — a fórmula chain.length-hops sempre aponta para a entrada certa');
+  if (originalHops === undefined) delete process.env.TRUST_PROXY_HOPS; else process.env.TRUST_PROXY_HOPS = originalHops;
+});
+
+test('resolveClientIp (H3-proxy-F): cadeia mais curta que o número de saltos configurado nunca inventa um IP — cai para o endereço direto', () => {
+  const originalHops = process.env.TRUST_PROXY_HOPS;
+  process.env.TRUST_PROXY_HOPS = '3';
+  delete require.cache[require.resolve('../auth/client-ip')];
+  const { resolveClientIp } = require('../auth/client-ip');
+  const req = { socket: { remoteAddress: '10.0.0.10' }, headers: { 'x-forwarded-for': '198.51.100.7' } };
+  assert.equal(resolveClientIp(req), '10.0.0.10', 'configuração inconsistente (hops maior que a cadeia real) nunca inventa um IP — fallback seguro para o endereço direto da conexão');
+  if (originalHops === undefined) delete process.env.TRUST_PROXY_HOPS; else process.env.TRUST_PROXY_HOPS = originalHops;
+});
+
+test('resolveClientIp (H3-proxy-G): entrada resolvida que não é um IPv4/IPv6 sintaticamente válido nunca vira identidade de rate limit — cai para o endereço direto', () => {
+  const originalHops = process.env.TRUST_PROXY_HOPS;
+  process.env.TRUST_PROXY_HOPS = '1';
+  delete require.cache[require.resolve('../auth/client-ip')];
+  const { resolveClientIp, isValidIp } = require('../auth/client-ip');
+  assert.equal(isValidIp('198.51.100.7'), true);
+  assert.equal(isValidIp('2001:db8::1'), true);
+  assert.equal(isValidIp('nao-e-um-ip'), false);
+  assert.equal(isValidIp(''), false);
+  const req = { socket: { remoteAddress: '10.0.0.10' }, headers: { 'x-forwarded-for': 'nao-e-um-ip' } };
+  assert.equal(resolveClientIp(req), '10.0.0.10', 'uma entrada sintaticamente inválida na posição certa nunca é aceita como o IP do cliente');
   if (originalHops === undefined) delete process.env.TRUST_PROXY_HOPS; else process.env.TRUST_PROXY_HOPS = originalHops;
 });
 
@@ -1295,4 +1351,23 @@ test('resolveClientIp (H3-proxy-D): normaliza IPv4-mapped IPv6', () => {
   assert.equal(normalizeIp('2001:db8::1'), '2001:db8::1', 'IPv6 nativo (não IPv4-mapped) não deve ser alterado');
   const req = { socket: { remoteAddress: '::ffff:203.0.113.9' }, headers: {} };
   assert.equal(resolveClientIp(req), '203.0.113.9');
+});
+
+test('auditRateLimitAndBlock (H3, revisão técnica pós-PR #14, item 15): falha ao registrar RATE_LIMIT_TRIGGERED nunca impede a resposta 429 — a decisão de bloqueio é sempre prioritária, auditoria é secundária', async () => {
+  const { auditRateLimitAndBlock } = require('../server');
+  let writeHeadArgs, endArgs;
+  const fakeRes = {
+    writeHead(status, headers) { writeHeadArgs = [status, headers]; },
+    end(body) { endArgs = body; }
+  };
+  // `store.audit` deliberadamente quebrado (não é um array) — o helper de auditoria interno vai lançar
+  // ao tentar `.push()`. Simula QUALQUER falha na gravação da auditoria (inclusive um StoreConflictError
+  // concorrente real em produção) sem precisar de um backend Postgres neste teste — o comportamento
+  // esperado (nunca deixar a exceção escapar, sempre responder 429 do mesmo jeito) é o mesmo.
+  const brokenStore = { audit: null };
+  const limited = { allowed: false, retryAfterSeconds: 12, shouldAudit: true };
+  await assert.doesNotReject(() => auditRateLimitAndBlock(fakeRes, brokenStore, limited, 'teste-falha-auditoria', null), 'uma falha ao gravar a auditoria nunca deve virar uma rejeição não tratada');
+  assert.equal(writeHeadArgs[0], 429, 'a resposta 429 deve ser enviada mesmo quando a gravação da auditoria falha');
+  assert.equal(writeHeadArgs[1]['retry-after'], '12');
+  assert.match(endArgs, /Muitas tentativas/);
 });

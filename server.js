@@ -720,6 +720,33 @@ function rateLimited(res, retryAfterSeconds) {
   res.writeHead(429, { 'content-type': 'application/json; charset=utf-8', 'x-content-type-options': 'nosniff', 'retry-after': String(Math.max(1, retryAfterSeconds || 1)) });
   res.end(JSON.stringify({ error: 'Muitas tentativas. Tente novamente mais tarde.' }));
 }
+// Ator anônimo para o campo `responsible` da auditoria quando um bloqueio de rate limit ocorre ANTES de
+// qualquer identidade ser resolvida (ex.: bucket de IP do login, checado antes de resolveLoginIdentity())
+// — nunca um valor derivado do request em si.
+const ANONYMOUS_ACTOR = { name: 'anônimo (não autenticado)' };
+// Revisão técnica pós-PR #14 (item 13 do escopo H3): registra `RATE_LIMIT_TRIGGERED` na auditoria de
+// negócio — mas só na transição exata em que um bucket passa a bloquear (`limited.shouldAudit`,
+// calculado em auth/rate-limit.js a partir de `count === limit+1`, nunca em todo 429 subsequente dentro
+// da mesma janela — evita transformar uma rajada de milhares de requisições bloqueadas num flood da
+// tabela de auditoria). Nunca registra IP/e-mail/login_identifier/senha/OTP/token/segredo MFA em texto
+// puro — `category` é sempre um rótulo estático (nunca o valor real usado para derivar a chave do
+// bucket), e `responsible` é o nome da conta já resolvida quando disponível (mesma convenção já usada
+// pelos demais eventos de auditoria de autenticação, como LOGIN_FAILURE) ou um ator anônimo quando o
+// bloqueio ocorre antes de qualquer identidade ser resolvida. A decisão de bloquear (429) é SEMPRE
+// prioritária — uma falha ao gravar esta auditoria (inclusive um StoreConflictError concorrente) nunca
+// impede a resposta 429 nem "libera" a requisição; por isso todo erro é capturado e descartado aqui
+// dentro, nunca propagado (o mesmo motivo pelo qual login/MFA verify tiveram que passar a usar
+// commitStore() em vez de writeStore() direto — nada dentro de um `body(req).then(async input => ...)`
+// pode deixar uma exceção escapar sem resposta).
+async function auditRateLimitAndBlock(res, store, limited, category, actorUser) {
+  if (limited.shouldAudit) {
+    try {
+      audit(store, actorUser || ANONYMOUS_ACTOR, 'RATE_LIMIT_TRIGGERED', 'rate_limit', category, null, null, `Bloqueio de rate limit disparado (categoria: ${category})`);
+      await writeStore(store);
+    } catch { /* auditoria é secundária — nunca impede nem atrasa o bloqueio já decidido */ }
+  }
+  rateLimited(res, limited.retryAfterSeconds);
+}
 // Sprint 2, Fase 4B (revisão pós-PR #8, P1.2): `deletedAt` em `users` agora é consistentemente a
 // convenção de "usuário inativo" também na autenticação — uma sessão de um usuário com `deletedAt`
 // preenchido nunca é resolvida como válida aqui (mesmo padrão de soft-delete já aplicado a
@@ -980,14 +1007,25 @@ function handler(req, res) {
   // (`failed_login_count`/`locked_until`), nunca o substitui.
   if (req.method === 'POST' && url.pathname === '/api/auth/login') return body(req).then(async input => {
     const clientIp = resolveClientIp(req);
-    const identityRaw = String(input.login || input.email || '').toLowerCase();
-    const limited = await rateLimit.checkAll([
-      { policyName: 'loginIp', scope: 'login:ip', value: clientIp },
-      { policyName: 'loginIdentity', scope: 'login:identity', value: identityRaw },
-      { policyName: 'loginCombined', scope: 'login:combined', value: `${clientIp}|${identityRaw}` }
-    ]);
-    if (!limited.allowed) return rateLimited(res, limited.retryAfterSeconds);
+    // Revisão técnica pós-PR #14 (itens 9-12 do escopo): o bucket de IP é sempre consumido primeiro,
+    // ANTES de qualquer resolução de identidade — um bloqueio aqui responde exatamente igual esteja a
+    // conta identificada ou não. Só depois disso a identidade é resolvida, para computar uma chave de
+    // bucket CANÔNICA (o próprio `userId`, quando a conta resolve para exatamente um usuário ativo) —
+    // sem isso, `email` e `login_identifier` da MESMA conta alimentavam buckets HMAC diferentes,
+    // permitindo a um atacante dobrar (ou mais) o teto de tentativas apenas alternando qual identificador
+    // apresenta a cada requisição. Resolver a identidade aqui não muda o comportamento externo em nada —
+    // a mesma chamada já era necessária mais abaixo para autenticar; o resultado só passou a ser
+    // reaproveitado também para a chave de rate limit.
+    const limitedIp = await rateLimit.check('loginIp', 'login:ip', clientIp);
+    if (!limitedIp.allowed) return auditRateLimitAndBlock(res, store, limitedIp, 'login-ip', null);
     const found = resolveLoginIdentity(store, input);
+    const identityRaw = String(input.login || input.email || '').toLowerCase();
+    const canonicalIdentity = found ? `user:${found.id}` : identityRaw;
+    const limitedIdentity = await rateLimit.checkAll([
+      { policyName: 'loginIdentity', scope: 'login:identity', value: canonicalIdentity },
+      { policyName: 'loginCombined', scope: 'login:combined', value: `${clientIp}|${canonicalIdentity}` }
+    ]);
+    if (!limitedIdentity.allowed) return auditRateLimitAndBlock(res, store, limitedIdentity, 'login-identity', found);
     const genericInvalid = () => json(res,401,{error:'Credenciais inválidas'});
     if (!found || found.deletedAt) return genericInvalid();
     // Item 18 do escopo (anti-enumeração): conta bloqueada nunca recebe uma resposta HTTP/mensagem
@@ -1041,7 +1079,7 @@ function handler(req, res) {
       { policyName: 'mfaVerifyIp', scope: 'mfa-verify:ip', value: clientIp },
       { policyName: 'mfaVerifyChallenge', scope: 'mfa-verify:challenge', value: String(input.challenge || '') }
     ]);
-    if (!limitedMfa.allowed) return rateLimited(res, limitedMfa.retryAfterSeconds);
+    if (!limitedMfa.allowed) return auditRateLimitAndBlock(res, store, limitedMfa, 'mfa-verify', null);
     const genericInvalid = () => json(res,401,{error:'Segundo fator inválido'});
     const challenge = (store.authChallenges || []).find(c => c.id === input.challenge);
     if (!challenge || challenge.usedAt || new Date(challenge.expiresAt).getTime() < Date.now()) return genericInvalid();
@@ -1090,15 +1128,18 @@ function handler(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/auth/forgot-password') return body(req).then(async input => {
     const clientIp = resolveClientIp(req);
     const email = String(input.email || '').toLowerCase();
-    // H3: limite por IP e por identidade (hash do e-mail) — mesmo com resposta sempre genérica, o
-    // endpoint pode ser abusado para gerar tokens em massa/consumir banco; a checagem acontece ANTES de
-    // saber se o e-mail resolve para uma conta, nunca revelando existência pelo próprio rate limit.
-    const limitedForgot = await rateLimit.checkAll([
-      { policyName: 'forgotPasswordIp', scope: 'forgot-password:ip', value: clientIp },
-      { policyName: 'forgotPasswordIdentity', scope: 'forgot-password:identity', value: email }
-    ]);
-    if (!limitedForgot.allowed) return rateLimited(res, limitedForgot.retryAfterSeconds);
+    // H3: limite por IP e por identidade — mesmo com resposta sempre genérica, o endpoint pode ser
+    // abusado para gerar tokens em massa/consumir banco. O bucket de IP é consumido primeiro, sempre;
+    // só depois o e-mail é resolvido (revisão pós-PR #14, mesma ordem do login) para computar a chave de
+    // identidade CANÔNICA (`userId`, quando resolve para exatamente uma conta) — nunca revelando
+    // existência pelo próprio rate limit, e nunca permitindo dois e-mails que resolvem à mesma conta
+    // (não é o caso aqui, mas mantém a mesma disciplina) escaparem do teto.
+    const limitedIp = await rateLimit.check('forgotPasswordIp', 'forgot-password:ip', clientIp);
+    if (!limitedIp.allowed) return auditRateLimitAndBlock(res, store, limitedIp, 'forgot-password-ip', null);
     const matches = email ? store.users.filter(u => u.email.toLowerCase() === email && !u.deletedAt) : [];
+    const canonicalIdentity = matches.length === 1 ? `user:${matches[0].id}` : email;
+    const limitedIdentity = await rateLimit.check('forgotPasswordIdentity', 'forgot-password:identity', canonicalIdentity);
+    if (!limitedIdentity.allowed) return auditRateLimitAndBlock(res, store, limitedIdentity, 'forgot-password-identity', matches.length === 1 ? matches[0] : null);
     if (matches.length === 1) {
       const [found] = matches;
       issuePasswordResetToken(store, found);
@@ -1117,7 +1158,7 @@ function handler(req, res) {
       { policyName: 'resetPasswordIp', scope: 'reset-password:ip', value: clientIp },
       { policyName: 'resetPasswordToken', scope: 'reset-password:token', value: rawToken }
     ]);
-    if (!limitedReset.allowed) return rateLimited(res, limitedReset.retryAfterSeconds);
+    if (!limitedReset.allowed) return auditRateLimitAndBlock(res, store, limitedReset, 'reset-password', null);
     const genericInvalid = () => json(res,400,{error:'Token de redefinição inválido ou expirado'});
     const tokenHash = authCrypto.hashToken(String(input.token || ''));
     const record = (store.passwordResetTokens || []).find(t => t.tokenHash === tokenHash);
@@ -1155,7 +1196,7 @@ function handler(req, res) {
   })();
   if (req.method === 'POST' && url.pathname === '/api/auth/logout-all') return (async () => {
     const limitedLogoutAll = await rateLimit.check('logoutAllUser', 'logout-all:user', user.id);
-    if (!limitedLogoutAll.allowed) return rateLimited(res, limitedLogoutAll.retryAfterSeconds);
+    if (!limitedLogoutAll.allowed) return auditRateLimitAndBlock(res, store, limitedLogoutAll, 'logout-all', user);
     revokeAllUserSessions(store, user.id);
     audit(store,user,'LOGOUT_ALL','user',user.id,null,null,'Encerramento de todas as sessões do usuário');
     if (!(await commitStore(res,store))) return;
@@ -1181,7 +1222,7 @@ function handler(req, res) {
       { policyName: 'adminResetTokenOperator', scope: 'admin-reset-token:operator', value: user.id },
       { policyName: 'adminResetTokenTarget', scope: 'admin-reset-token:target', value: targetId }
     ]);
-    if (!limitedAdminReset.allowed) return rateLimited(res, limitedAdminReset.retryAfterSeconds);
+    if (!limitedAdminReset.allowed) return auditRateLimitAndBlock(res, store, limitedAdminReset, 'admin-reset-token', user);
     const target = store.users.find(u => u.id === targetId);
     if (!target || target.deletedAt) return json(res,404,{error:'Usuário não encontrado'});
     const { rawToken, record } = issuePasswordResetToken(store, target);
@@ -1193,7 +1234,7 @@ function handler(req, res) {
   // incrementa credentialsVersion (invalida sessões anteriores) e desliga temporaryPassword.
   if (req.method === 'POST' && url.pathname === '/api/auth/change-password') return body(req).then(async input => {
     const limitedChangePassword = await rateLimit.check('changePasswordUser', 'change-password:user', user.id);
-    if (!limitedChangePassword.allowed) return rateLimited(res, limitedChangePassword.retryAfterSeconds);
+    if (!limitedChangePassword.allowed) return auditRateLimitAndBlock(res, store, limitedChangePassword, 'change-password', user);
     if (!user.passwordHash || !authCrypto.verifyPassword(input.currentPassword, user.passwordHash)) return json(res,401,{error:'Senha atual inválida'});
     if (!authCrypto.isPasswordAcceptable(input.newPassword)) return json(res,422,{error:`A nova senha deve ter ao menos ${authCrypto.MIN_PASSWORD_LENGTH} caracteres e não pode ser trivial`});
     if (authCrypto.verifyPassword(input.newPassword, user.passwordHash)) return json(res,422,{error:'A nova senha não pode ser igual à senha atual/temporária'});
@@ -1214,7 +1255,7 @@ function handler(req, res) {
   // não há linha em app_users até a confirmação.
   if (req.method === 'POST' && url.pathname === '/api/auth/mfa/enroll') return (async () => {
     const limitedEnroll = await rateLimit.check('mfaEnrollUser', 'mfa-enroll:user', user.id);
-    if (!limitedEnroll.allowed) return rateLimited(res, limitedEnroll.retryAfterSeconds);
+    if (!limitedEnroll.allowed) return auditRateLimitAndBlock(res, store, limitedEnroll, 'mfa-enroll', user);
     if (user.mfaEnabled) return json(res,409,{error:'MFA já está ativo para este usuário'});
     const secret = authCrypto.generateTotpSecret();
     if (!Array.isArray(store.authChallenges)) store.authChallenges = [];
@@ -1225,14 +1266,17 @@ function handler(req, res) {
   })();
   if (req.method === 'POST' && url.pathname === '/api/auth/mfa/confirm') return body(req).then(async input => {
     const limitedConfirm = await rateLimit.check('mfaConfirmUser', 'mfa-confirm:user', user.id);
-    if (!limitedConfirm.allowed) return rateLimited(res, limitedConfirm.retryAfterSeconds);
+    if (!limitedConfirm.allowed) return auditRateLimitAndBlock(res, store, limitedConfirm, 'mfa-confirm', user);
     const genericInvalid = () => json(res,401,{error:'Código de confirmação inválido'});
     const challenge = (store.authChallenges || []).find(c => c.id === input.enrollmentId && c.userId === user.id && c.type === 'totp-enrollment');
     if (!challenge || challenge.usedAt || new Date(challenge.expiresAt).getTime() < Date.now() || !challenge.secretEncrypted) return genericInvalid();
     challenge.attempts = (challenge.attempts || 0) + 1;
-    if (challenge.attempts > 5) { challenge.usedAt = new Date().toISOString(); await writeStore(store); return genericInvalid(); }
+    // Revisão técnica pós-PR #14: mesma correção já aplicada a login/mfa-verify — commitStore() (nunca
+    // writeStore() direto) também aqui, pelo mesmo motivo (um StoreConflictError sob confirmação
+    // concorrente do mesmo enrolamento deixava a requisição sem resposta).
+    if (challenge.attempts > 5) { challenge.usedAt = new Date().toISOString(); if (!(await commitStore(res,store))) return; return genericInvalid(); }
     const secret = authCrypto.decryptSecret(challenge.secretEncrypted);
-    if (!authCrypto.verifyTotp(secret, input.code)) { await writeStore(store); return genericInvalid(); }
+    if (!authCrypto.verifyTotp(secret, input.code)) { if (!(await commitStore(res,store))) return; return genericInvalid(); }
     challenge.usedAt = new Date().toISOString();
     user.mfaEnabled = true;
     user.mfaMethod = 'totp';
@@ -1244,7 +1288,7 @@ function handler(req, res) {
   });
   if (req.method === 'POST' && url.pathname === '/api/auth/mfa/disable') return body(req).then(async input => {
     const limitedDisable = await rateLimit.check('mfaDisableUser', 'mfa-disable:user', user.id);
-    if (!limitedDisable.allowed) return rateLimited(res, limitedDisable.retryAfterSeconds);
+    if (!limitedDisable.allowed) return auditRateLimitAndBlock(res, store, limitedDisable, 'mfa-disable', user);
     if (!user.mfaEnabled) return json(res,409,{error:'MFA não está ativo para este usuário'});
     if (!user.passwordHash || !authCrypto.verifyPassword(input.password, user.passwordHash)) return json(res,401,{error:'Senha inválida'});
     user.mfaEnabled = false; user.mfaMethod = null; user.mfaSecretEncrypted = null; user.mfaEnrolledAt = null;
@@ -1407,7 +1451,7 @@ function handler(req, res) {
   if (req.method === 'GET' && url.pathname.startsWith('/api/legal/')) { const moduleName=url.pathname.split('/')[3]; if(!allowedInDepartment(user,'juridico','read')) return json(res,403,{error:'Sem permissão para o módulo Jurídico'}); if(!LEGAL_MODULES.has(moduleName)) return json(res,404,{error:'Módulo jurídico não encontrado'}); if(moduleName==='honorariosJudiciais'){const processRows=collection(store,'processos').filter(x=>!x.deletedAt&&x.source==='monday'&&scoped(user,x));return json(res,200,{module:moduleName,...judicialHonorariumPayload(processRows)});}const rows=collection(store,moduleName).filter(x=>!x.deletedAt&&x.source==='monday'&&scoped(user,x)); if(moduleName==='processos'&&url.searchParams.get('paginated')==='1')return json(res,200,{module:moduleName,...filterProcesses(rows,url)});if(moduleName==='honorarios'&&url.searchParams.get('paginated')==='1')return json(res,200,{module:moduleName,...filterHonorariums(rows,url)});return json(res,200,{module:moduleName,count:rows.length,records:rows}); }
   if (req.method === 'POST' && url.pathname === '/api/monday/sync') { if(!allowedInDepartment(user,'juridico','create')) return json(res,403,{error:'Sem permissão para sincronizar'}); return await body(req).then(async input=>{const modules=input.modules?.length?input.modules:Object.keys(MONDAY_BOARDS);store.mondayRuns=store.mondayRuns||[];const run={id:crypto.randomUUID(),startedAt:new Date().toISOString(),requestedBy:user.name,modules:[],status:'running'};store.mondayRuns.push(run);let failed=0;for(const moduleName of modules){const board=MONDAY_BOARDS[moduleName];if(!board)continue;try{const items=await fetchMondayBoard(board.id);const list=collection(store,moduleName);let created=0,updated=0;for(const raw of items){const normalized=normalizeMondayItem(raw,moduleName,board);const existing=list.find(x=>x.source==='monday'&&x.externalId===normalized.externalId);if(existing){const before=structuredClone(existing);Object.assign(existing,normalized,{id:existing.id,version:(existing.version||1)+1});updated++;}else{list.push({...normalized,version:1});created++;}}run.modules.push({module:moduleName,board:board.name,read:items.length,created,updated,status:'ok'});}catch(error){failed++;run.modules.push({module:moduleName,board:board.name,status:'error',error:error.message});}}run.status=failed?'partial':'completed';run.finishedAt=new Date().toISOString();audit(store,user,'SYNC','monday',run.id,null,run,'Sincronização somente leitura com preservação de dados anteriores');if(!(await commitStore(res,store)))return;return json(res,failed?207:200,run);}); }
   if (req.method === 'GET' && url.pathname === '/api/auth/requests') { if(!allowed(user,'*','approve')) return json(res,403,{error:'Somente aprovadores podem consultar solicitações'}); return json(res,200,store.registrationRequests); }
-  if (req.method === 'POST' && url.pathname.match(/^\/api\/auth\/requests\/[^/]+\/approve$/)) { if(!allowed(user,'*','approve')) return json(res,403,{error:'Somente aprovadores podem aprovar'}); const id=url.pathname.split('/')[4]; { const limitedApprove = await rateLimit.check('approveOperator','approve:operator',user.id); if (!limitedApprove.allowed) return rateLimited(res, limitedApprove.retryAfterSeconds); } const request=store.registrationRequests.find(r=>r.id===id&&r.status==='pending'); if(!request) return json(res,404,{error:'Solicitação não encontrada'}); request.status='approved';request.approvedAt=new Date().toISOString();request.approvedBy=user.name; // Sprint 2, Hardening H2 (item 27 do escopo; revisão pós-PR #13): cadastro aprovado nasce SEM
+  if (req.method === 'POST' && url.pathname.match(/^\/api\/auth\/requests\/[^/]+\/approve$/)) { if(!allowed(user,'*','approve')) return json(res,403,{error:'Somente aprovadores podem aprovar'}); const id=url.pathname.split('/')[4]; { const limitedApprove = await rateLimit.check('approveOperator','approve:operator',user.id); if (!limitedApprove.allowed) return auditRateLimitAndBlock(res, store, limitedApprove, 'approve-operator', user); } const request=store.registrationRequests.find(r=>r.id===id&&r.status==='pending'); if(!request) return json(res,404,{error:'Solicitação não encontrada'}); request.status='approved';request.approvedAt=new Date().toISOString();request.approvedBy=user.name; // Sprint 2, Hardening H2 (item 27 do escopo; revisão pós-PR #13): cadastro aprovado nasce SEM
 // senha/MFA utilizáveis (nenhuma credencial atribuída automaticamente) — o novo usuário só ganha acesso
 // após um token de primeiro acesso definir sua própria senha individual (POST /api/auth/reset-password),
 // emitido pelo fluxo administrativo (POST /api/auth/users/:id/reset-token) já que não há provedor de
@@ -1700,5 +1744,5 @@ if (require.main === module) {
     setInterval(()=>scheduledMondayTick().catch(error=>console.error('Monday scheduler:',error.message)),60000);
   }).catch(error => { console.error('Falha ao inicializar a persistência — processo não iniciado:', error.message); process.exit(1); });
 }
-module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, ORIGIN_TYPE_LABELS, STATUS_LABELS, CATEGORY_LABELS, legalDeadlineLabels, legalDeadlineConfirmationLabel, LEGAL_DEADLINE_TEXTUAL_RESPONSIBLE_FIELDS, filterCalendarEventsByWindow, canBeResponsibleForLegalDeadline, storage, migrateLegacyStore, validateAuthRuntimeConfig, resolveLoginIdentity, issuePasswordResetToken };
+module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, ORIGIN_TYPE_LABELS, STATUS_LABELS, CATEGORY_LABELS, legalDeadlineLabels, legalDeadlineConfirmationLabel, LEGAL_DEADLINE_TEXTUAL_RESPONSIBLE_FIELDS, filterCalendarEventsByWindow, canBeResponsibleForLegalDeadline, storage, migrateLegacyStore, validateAuthRuntimeConfig, resolveLoginIdentity, issuePasswordResetToken, auditRateLimitAndBlock };
 

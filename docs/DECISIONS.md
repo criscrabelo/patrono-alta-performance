@@ -1081,10 +1081,21 @@ detalhamento técnico completo — esta decisão não o duplica, apenas registra
    NUNCA é confiado diretamente (forjável por qualquer requisição que fale direto com a aplicação).
    Política explícita via `TRUST_PROXY_HOPS` (mesmo modelo numérico do `trust proxy` do Express/nginx):
    `0` (padrão) usa sempre `req.socket.remoteAddress`, ignorando XFF por completo; `N >= 1` resolve
-   deterministicamente a entrada `chain.length - 1 - N` da cadeia — nunca a primeira entrada da
-   esquerda (forjável por um atacante sem proxy nenhum), nunca escolhida arbitrariamente por uma cadeia
-   maior ou menor que o esperado. IPv4-mapped IPv6 (`::ffff:1.2.3.4`) é normalizado para não contar como
-   duas identidades diferentes. IP nunca é exposto em resposta HTTP.
+   deterministicamente a entrada `chain.length - N` da cadeia — nunca a primeira entrada da esquerda
+   (forjável por um atacante que já chega ao primeiro proxy confiável com um X-Forwarded-For
+   pré-existente), nunca escolhida arbitrariamente por uma cadeia maior ou menor que o esperado.
+   **Correção pós-revisão técnica (PR #14):** a fórmula original desta decisão registrava
+   `chain.length - 1 - N` — um salto deslocado para a esquerda que, no caso mais comum (1 proxy
+   confiável, cadeia de 1 entrada), caía incorretamente para o IP do próprio proxy em vez do cliente; e,
+   com um `X-Forwarded-For` pré-forjado pelo atacante antes de chegar ao proxy, selecionava a entrada
+   forjada em vez da que o proxy confiável de fato observou — reabrindo exatamente o bypass que esta
+   proteção deveria impedir. O próprio teste original partia da mesma premissa errada da implementação,
+   por isso o CI verde não pegava o bug. Corrigida para `chain.length - N` (sem o "-1" adicional) e
+   coberta por casos de teste explícitos para 1 e 2 proxies confiáveis, com e sem entrada forjada. A
+   entrada final escolhida também passou a ser validada como um IPv4/IPv6 sintaticamente válido
+   (`node:net.isIP()`) — uma entrada inválida na posição certa nunca vira identidade de rate limit.
+   IPv4-mapped IPv6 (`::ffff:1.2.3.4`) é normalizado para não contar como duas identidades diferentes.
+   IP nunca é exposto em resposta HTTP.
 6. **Toda chave de bucket é derivada (HMAC-SHA256, `RATE_LIMIT_HMAC_KEY`), nunca o dado bruto
    persistido** — minimização LGPD (item 30 do escopo): IP, e-mail/`login_identifier`, challenge id,
    `userId` e token de reset são sempre hasheados antes de virar `bucket_key`. Nunca senha, OTP, token de
@@ -1153,6 +1164,57 @@ detalhamento técnico completo — esta decisão não o duplica, apenas registra
 
 Esta decisão não altera D1/D4/D2-CLOSE/PROD-GATE-01/PROD-H1-01/PROD-H1B-01/PROD-H2-01 já homologadas —
 apenas registra o avanço específico do H3 dentro do gate de produção já aberto.
+
+### PROD-H3-01 — Adendo (revisão técnica pós-PR #14): correção do off-by-one em TRUST_PROXY_HOPS,
+### identidade canônica de rate limit e auditoria RATE_LIMIT_TRIGGERED
+
+**Status: IMPLEMENTADO / AGUARDANDO REVISÃO FINAL.** Correção de um blocker e duas lacunas identificados
+na revisão técnica humana do PR #14, antes de qualquer merge. Não reabre nem contradiz os 16 itens da
+decisão original acima — os complementa e corrige um deles (item 5).
+
+17. **BLOCKER corrigido — `TRUST_PROXY_HOPS` selecionava a posição errada da cadeia.** A fórmula
+    original (`chain.length - 1 - N`) estava desalinhada um salto para a esquerda. No cenário mais comum
+    (1 proxy confiável, cadeia de 1 entrada), a fórmula produzia um índice negativo e caía
+    incorretamente para `req.socket.remoteAddress` (o IP do PRÓPRIO PROXY) em vez do cliente real — todo
+    usuário passava a compartilhar a mesma identidade de rate limit (a do proxy). Pior: com um
+    `X-Forwarded-For` já pré-forjado pelo atacante antes de chegar ao proxy confiável (que ACRESCENTA,
+    nunca substitui, o endereço real que observou), a fórmula errada selecionava a entrada FORJADA em
+    vez da real — reabrindo exatamente o bypass de rate limiting que H3 existe para fechar. O próprio
+    teste original (`tests/core.test.js`) partia da mesma premissa errada da implementação, por isso o
+    CI verde do PR #14 não pegava o bug — só uma revisão técnica humana da semântica (não apenas da
+    cobertura de teste) identificou a inconsistência. Corrigida para `chain.length - N` (sem o "-1"
+    adicional), com testes explícitos para 1 e 2 proxies confiáveis, com e sem entrada forjada, cadeia
+    mais curta que o esperado (fallback seguro) e IPv4/IPv6 sintaticamente inválido na posição resolvida
+    (`node:net.isIP()`, nenhuma dependência nova) — nunca vira identidade legítima de rate limit.
+18. **Identidade canônica de rate limit por `userId`.** A chave de identidade/combinado do login e do
+    identity do forgot-password usava o valor BRUTO apresentado (`input.login || input.email`) — como
+    `email` e `login_identifier` são dois identificadores válidos para a MESMA conta (PROD-H2-01, item
+    16), eles geravam chaves HMAC diferentes, permitindo a um atacante até dobrar o teto de tentativas
+    apenas alternando qual identificador apresenta a cada requisição. Corrigido: a identidade é resolvida
+    ANTES de consumir os buckets de identidade/combinado (o bucket de IP continua sendo consumido
+    primeiro, sempre) e, quando resolve para exatamente uma conta ativa, a chave passa a ser
+    `user:${id}` — canônica para qualquer identificador que aponte para essa conta. Quando a conta não
+    resolve, o identificador normalizado apresentado continua sendo usado (não há conta real para
+    unificar). Resolver a identidade nesse ponto não altera o comportamento externo em nada — a mesma
+    resolução já era necessária mais abaixo para autenticar; anti-enumeração preservada (a resposta
+    nunca depende de qual ramo foi percorrido).
+19. **Auditoria `RATE_LIMIT_TRIGGERED` implementada** (pendente desde a decisão original, item 14 —
+    "nenhum evento próprio de rate limit foi implementado nesta rodada"). Registrada SOMENTE na
+    transição exata em que um bucket passa a bloquear (`count === limit + 1`, calculado a partir do
+    contador atômico já existente — nenhuma coluna/estado extra necessário) — nunca em todo 429
+    subsequente dentro da mesma janela, o que evitaria transformar uma rajada de milhares de requisições
+    bloqueadas num flood da própria tabela de auditoria. Nunca registra IP/e-mail/login_identifier/
+    senha/OTP/token/segredo MFA em texto puro — `category` é sempre um rótulo estático da rota (nunca o
+    valor real usado para derivar a chave do bucket), e o ator (`responsible`) é a conta já resolvida
+    quando disponível (mesma convenção de `LOGIN_FAILURE`) ou um ator anônimo explícito quando o
+    bloqueio ocorre antes de qualquer identidade ser resolvida (bucket de IP). A decisão de bloquear
+    (429) é SEMPRE prioritária — uma falha ao gravar esta auditoria (inclusive um `StoreConflictError`
+    concorrente) nunca impede a resposta 429 nem "libera" a requisição; todo erro é capturado e
+    descartado internamente (`auditRateLimitAndBlock()`, `server.js`), nunca propagado.
+20. **Esta correção não fecha nenhum critério adicional do Gate de Produção além dos já fechados pela
+    decisão original (PG-10/PG-11)** — apenas resolve um blocker de segurança e duas lacunas que
+    impediam H3 de ser considerado tecnicamente correto para revisão final. O gate como um todo
+    permanece **NO-GO PARA PRODUÇÃO**. H4–H11 não foram alterados.
 
 ---
 

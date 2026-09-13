@@ -201,6 +201,36 @@ if (!TEST_DATABASE_URL) {
     assert.equal(blocked.status, 429, 'trocar o X-Forwarded-For sem TRUST_PROXY_HOPS configurado não contorna o bucket de identidade');
   });
 
+  // Revisão técnica pós-PR #14 (itens 9-12 do escopo): antes desta correção, o bucket de identidade
+  // usava o valor BRUTO apresentado (`input.login || input.email`) — então `email` e `login_identifier`
+  // da MESMA conta geravam chaves HMAC diferentes, permitindo a um atacante até dobrar o teto de
+  // tentativas apenas alternando qual identificador apresenta a cada requisição. Corrigido para resolver
+  // a conta primeiro e usar `user:${found.id}` como chave canônica sempre que a conta resolve — email e
+  // login_identifier da mesma conta agora sempre caem no MESMO bucket.
+  test('[H3-identidade-canônica] email e login_identifier da MESMA conta compartilham o bucket de identidade — alternar entre os dois não dobra o teto de tentativas', async () => {
+    const ALIAS_EMAIL = 'h3.alias@coevo.local';
+    const ALIAS_LOGIN = 'usr-h3-alias';
+    const store = await readStore();
+    if (!store.users.some(u => u.id === ALIAS_LOGIN)) {
+      store.users.push({ id: ALIAS_LOGIN, name: 'H3 Alias', email: ALIAS_EMAIL, role: 'colaborador', department: 'Jurídico', mfa: false, loginIdentifier: ALIAS_LOGIN, passwordHash: authCrypto.hashPassword(process.env.COEVO_DEMO_PASSWORD), temporaryPassword: false, credentialsVersion: 1, mfaEnabled: false, failedLoginCount: 0 });
+      await writeStore(store);
+    }
+    // loginCombined: max 8/janela. Alterna entre email e login_identifier a cada tentativa — se o
+    // bucket não fosse canônico, cada forma teria seu próprio teto de 8 (até 16 tentativas totais antes
+    // de bloquear).
+    let lastStatus;
+    for (let i = 0; i < 8; i++) {
+      const payload = i % 2 === 0 ? { login: ALIAS_LOGIN, password: 'senha-errada-alias' } : { email: ALIAS_EMAIL, password: 'senha-errada-alias' };
+      const res = await api('POST', '/api/auth/login', { json: payload });
+      lastStatus = res.status;
+    }
+    assert.equal(lastStatus, 401, 'as 8 primeiras tentativas (alternando email/login_identifier) ainda devem ser aceitas pelo rate limit — só rejeitadas por senha errada');
+    const blockedByEmail = await api('POST', '/api/auth/login', { json: { email: ALIAS_EMAIL, password: 'senha-errada-alias' } });
+    assert.equal(blockedByEmail.status, 429, 'a 9ª tentativa (por e-mail) deve bloquear — o bucket combinado é o MESMO independentemente do identificador apresentado');
+    const blockedByLogin = await api('POST', '/api/auth/login', { json: { login: ALIAS_LOGIN, password: 'senha-errada-alias' } });
+    assert.equal(blockedByLogin.status, 429, 'o bloqueio vale para as duas formas de apresentar a identidade — não é possível contornar trocando de identificador');
+  });
+
   // --- 33/34. MULTI-INSTÂNCIA E RESTART -------------------------------------------------------------
   test('[H3-multi-instância] instância A consome tentativas; instância B continua do MESMO contador (não reinicia)', async () => {
     const instanceA = { serverModule, storage, api, server, baseUrl };
@@ -397,5 +427,37 @@ if (!TEST_DATABASE_URL) {
       await new Promise(resolve => started.server.close(resolve));
       await otherInstanceModule.storage.close();
     }
+  });
+
+  // --- 40. AUDITORIA RATE_LIMIT_TRIGGERED (item 13/14/16 da revisão técnica pós-PR #14) -------------
+  test('[H3-audit] primeiro bloqueio de um bucket gera RATE_LIMIT_TRIGGERED; bloqueios repetidos na mesma janela não geram flood; evento nunca contém e-mail bruto', async () => {
+    const email = 'h3.audit-forgot@coevo.local';
+    // Exaure o limite de identidade de forgot-password (max 3/15min) para um e-mail exclusivo deste
+    // teste — isolado de qualquer outro bucket já exercitado por outros testes deste arquivo (a
+    // contagem abaixo é sempre um INCREMENTO relativo, nunca um valor absoluto, então mesmo que outros
+    // testes já tenham gerado seus próprios eventos RATE_LIMIT_TRIGGERED em outras categorias, este
+    // teste continua válido).
+    for (let i = 0; i < 3; i++) await api('POST', '/api/auth/forgot-password', { json: { email } });
+    const countRateLimitEvents = store => store.audit.filter(e => e.action === 'RATE_LIMIT_TRIGGERED' && e.entityId === 'forgot-password-identity').length;
+
+    const before = await readStore();
+    const countBefore = countRateLimitEvents(before);
+
+    const blocked1 = await api('POST', '/api/auth/forgot-password', { json: { email } });
+    assert.equal(blocked1.status, 429);
+    const afterFirst = await readStore();
+    assert.equal(countRateLimitEvents(afterFirst), countBefore + 1, 'o PRIMEIRO bloqueio deste bucket/janela deve gerar exatamente um evento RATE_LIMIT_TRIGGERED');
+
+    const blocked2 = await api('POST', '/api/auth/forgot-password', { json: { email } });
+    assert.equal(blocked2.status, 429);
+    const afterSecond = await readStore();
+    assert.equal(countRateLimitEvents(afterSecond), countRateLimitEvents(afterFirst), 'bloqueios REPETIDOS dentro da mesma janela não devem gerar um novo evento a cada 429 — nunca um flood da tabela de auditoria');
+
+    const lastEvent = afterSecond.audit.filter(e => e.action === 'RATE_LIMIT_TRIGGERED' && e.entityId === 'forgot-password-identity').at(-1);
+    assert.equal(lastEvent.before, null);
+    assert.equal(lastEvent.after, null);
+    const serialized = JSON.stringify(lastEvent).toLowerCase();
+    assert.ok(!serialized.includes(email.toLowerCase()), 'o evento de auditoria nunca deve conter o e-mail bruto que disparou o bloqueio');
+    assert.ok(!serialized.includes(process.env.COEVO_DEMO_PASSWORD.toLowerCase()), 'o evento de auditoria nunca deve conter qualquer senha');
   });
 }

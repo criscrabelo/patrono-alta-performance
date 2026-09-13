@@ -610,9 +610,17 @@ bloqueio POR CONTA já fechado por H2 (`failed_login_count`/`locked_until`) — 
 - **Janela fixa determinística**, hora sempre do servidor Postgres (`now()`), nunca do cliente.
 - **Resolução segura de IP** (`auth/client-ip.js`, `resolveClientIp()`): `X-Forwarded-For` nunca confiado
   sem uma política explícita de proxy confiável (`TRUST_PROXY_HOPS`, mesmo modelo numérico do Express/
-  nginx — padrão `0` ignora XFF por completo). Resolução determinística mesmo com uma cadeia maior/menor
-  que o esperado; nunca escolhe arbitrariamente a primeira entrada. IPv4-mapped IPv6 normalizado. IP
-  nunca exposto em resposta HTTP.
+  nginx — padrão `0` ignora XFF por completo). Com `N` proxies confiáveis, o cliente é a entrada
+  `chain.length - N` da cadeia — nunca a primeira entrada da esquerda (forjável por um atacante que já
+  chega ao primeiro proxy confiável com um X-Forwarded-For pré-existente), nunca escolhida
+  arbitrariamente por uma cadeia maior/menor que o esperado. A entrada final é validada como um IPv4/
+  IPv6 sintaticamente correto (`node:net.isIP()`) antes de ser aceita. IPv4-mapped IPv6 normalizado. IP
+  nunca exposto em resposta HTTP. **Correção pós-revisão técnica (PR #14, `docs/DECISIONS.md`,
+  PROD-H3-01 adendo)**: a fórmula original (`chain.length - 1 - N`) estava desalinhada um salto para a
+  esquerda — no caso mais comum (1 proxy confiável), caía incorretamente no IP do próprio proxy em vez
+  do cliente, e com um X-Forwarded-For pré-forjado pelo atacante selecionava a entrada forjada em vez da
+  real observada pelo proxy confiável, reabrindo o próprio bypass que esta proteção deveria impedir. O
+  teste original partia da mesma premissa errada, por isso o CI verde não pegava o bug.
 - **Toda chave de bucket é derivada (HMAC-SHA256, `RATE_LIMIT_HMAC_KEY`)** — nunca IP/e-mail/
   `login_identifier`/token em texto puro persistido (minimização LGPD). Mesma disciplina de
   `MFA_ENCRYPTION_KEY`: obrigatória (≥32 caracteres) em produção, fail-fast no boot
@@ -623,6 +631,12 @@ bloqueio POR CONTA já fechado por H2 (`failed_login_count`/`locked_until`) — 
   5/15min), reset-token administrativo (operador 10/15min + usuário-alvo 3/15min), MFA enroll/confirm/
   disable, change-password, logout-all e aprovação de cadastro (por `userId` autenticado). Política
   centralizada (`POLICIES` em `auth/rate-limit.js`), nenhum número solto espalhado pelas rotas.
+- **Identidade canônica de rate limit por `userId`** (correção pós-revisão técnica, PR #14): o bucket de
+  IP é sempre consumido primeiro; só então a identidade é resolvida para computar a chave de identidade/
+  combinado — quando resolve para exatamente uma conta ativa, a chave é `user:${id}`, nunca o
+  identificador bruto apresentado. Sem isso, `email` e `login_identifier` da MESMA conta (H2 permite os
+  dois) alimentavam buckets diferentes, permitindo dobrar o teto de tentativas alternando qual
+  identificador é apresentado. Anti-enumeração preservada (a resolução não muda a resposta externa).
 - **429 genérico** ("Muitas tentativas. Tente novamente mais tarde.") com `Retry-After` quando aplicável
   — nunca revela contador, existência de conta ou motivo interno. Nenhum pacote de cabeçalhos
   `X-RateLimit-*` (fica para H4).
@@ -633,28 +647,36 @@ bloqueio POR CONTA já fechado por H2 (`failed_login_count`/`locked_until`) — 
   `storage.mode()==='postgres' && storage.getPool()!=null`) — nunca um segundo limitador em memória com
   garantias diferentes das de produção; produção já exige PostgreSQL por fail-fast desde H1A.
 - **Limpeza oportunística** evita crescimento indefinido da tabela sem exigir cron externo.
-- **Correção incidental na mesma rodada**: login e MFA verify usavam `writeStore()` direto (em vez de
-  `commitStore()`) no caminho de credencial incorreta — sob concorrência real contra a mesma conta
-  (exercitada pelo próprio teste de concorrência de H3), um `StoreConflictError` não tratado deixava a
-  requisição sem resposta em vez de devolver 401/409. Corrigido para `commitStore()`, mesma disciplina
-  já usada em todas as demais rotas de mutação.
+- **Auditoria `RATE_LIMIT_TRIGGERED`** (correção pós-revisão técnica, PR #14 — pendente desde a decisão
+  original): registrada apenas na transição exata em que um bucket passa a bloquear (`count === limit +
+  1`, derivado do próprio contador atômico — nenhum estado extra), nunca em todo 429 subsequente dentro
+  da mesma janela (evita flood da auditoria). Nunca contém IP/e-mail/login_identifier/senha/OTP/token/
+  segredo MFA em texto puro. Falha ao gravar nunca impede a resposta 429 (auditoria é secundária —
+  `auditRateLimitAndBlock()`, `server.js`, captura e descarta qualquer erro internamente).
+- **Correções incidentais na mesma rodada**: (1) login e MFA verify usavam `writeStore()` direto (em vez
+  de `commitStore()`) no caminho de credencial incorreta — sob concorrência real contra a mesma conta,
+  um `StoreConflictError` não tratado deixava a requisição sem resposta em vez de devolver 401/409;
+  corrigido para `commitStore()`. (2) mesmo padrão encontrado e corrigido em MFA confirm (enrolamento).
 
 **O que H3 NÃO fecha (deliberadamente fora desta rodada):** rate limiting na API geral fora das rotas de
 autenticação sensíveis; cabeçalhos `X-RateLimit-*` (H4); headers HTTP de hardening geral (H4); as 2
 vulnerabilidades altas conhecidas em `npm audit` (H9, inalteradas). Gate como um todo permanece **NO-GO
 PARA PRODUÇÃO**.
 
-**Testes:** 374/374 com Postgres real (352 anteriores + 4 novos testes em `tests/core.test.js` —
-resolução de IP/proxy e a validação simétrica de `RATE_LIMIT_HMAC_KEY` em
-`validateAuthRuntimeConfig()` — + 18 novos em `tests/h3-rate-limiting.test.js`), 0 falhando, nenhum
-teste removido.
+**Testes:** 381/381 com Postgres real (374 da primeira rodada + 1 novo teste unitário em
+`tests/core.test.js` — falha de auditoria nunca impede o bloqueio — + 7 novos testes de proxy
+substituindo os 2 anteriores com premissa incorreta + 2 novos em `tests/h3-rate-limiting.test.js` —
+identidade canônica por `userId` e auditoria `RATE_LIMIT_TRIGGERED`), 0 falhando, nenhum teste removido.
 Cobertura inclui: limites por IP/identidade/combinado no login; proteção por challenge e por IP no MFA
 verify; forgot-password (resposta genérica preservada, e-mail ambíguo sem first-match); reset-token
 administrativo (aprovador vs. operador sem permissão); reset-password (token inválido repetido vs. token
 válido de uso único); multi-instância (contador compartilhado via Postgres, não reiniciado por
 instância); restart do processo (bloqueio sobrevive); concorrência real (rajada simultânea nunca aceita
 mais requisições que a política permite); anti-bypass (troca de User-Agent, X-Forwarded-For sem proxy
-confiável configurado, restart, troca de instância).
+confiável configurado, restart, troca de instância); resolução de proxy corrigida (1 e 2 proxies, com e
+sem entrada forjada, cadeia curta, IP sintaticamente inválido); identidade canônica (email/
+login_identifier da mesma conta compartilham bucket); auditoria (`RATE_LIMIT_TRIGGERED` deduplicado,
+sem dado bruto, falha não impede bloqueio).
 
 **Por que "aguardando homologação" e não "concluído":** mesma razão do H1A/H1B/H2 — implementação
 testada e funcional, mas depende de revisão humana antes de qualquer autorização de uso.

@@ -699,8 +699,10 @@ Correção de 5 blockers identificados na revisão técnica humana do PR #13, an
     - Sem `TRUST_PROXY_HOPS` configurado, um `X-Forwarded-For` forjado é ignorado — usa sempre o
       endereço remoto real da conexão.
     - Com proxy confiável configurado (`TRUST_PROXY_HOPS=1`), o IP resolvido é a entrada correta da
-      cadeia (`chain.length - 1 - hops`) tanto para uma cadeia do tamanho esperado quanto para uma
-      maior — nunca escolhe arbitrariamente a primeira entrada.
+      cadeia (`chain.length - hops`) tanto para uma cadeia do tamanho esperado quanto para uma
+      maior — nunca escolhe arbitrariamente a primeira entrada. **Nota:** esta fórmula (e os testes
+      originais que a validavam) continha um bug off-by-one, corrigido só na revisão técnica pós-PR
+      #14 — ver a seção "QA — Adendo ao Hardening H3" abaixo para os testes corretos.
     - IPv4-mapped IPv6 (`::ffff:1.2.3.4`) é normalizado para `1.2.3.4`.
   - `RATE_LIMIT_HMAC_KEY`: mesmo padrão de teste já existente para `MFA_ENCRYPTION_KEY` — produção sem a
     chave falha; produção com chave curta (<32 caracteres) falha; produção com chave válida aceita; fora
@@ -767,5 +769,67 @@ Correção de 5 blockers identificados na revisão técnica humana do PR #13, an
      `resetAccountLockouts()` ao `test.beforeEach()` do arquivo — H2 não é o alvo deste arquivo (tem sua
      própria suíte em `tests/h2-auth-sessions.test.js`), então cada teste de H3 começa com as contas
      seedadas destravadas.
+- CI roda a mesma bateria (Node 20.x/22.x, Postgres real) sem nenhum teste pulado.
+- `npm audit`: inalterado (2 vulnerabilidades altas conhecidas — H9, não corrigidas nesta rodada).
+
+## QA — Adendo ao Hardening H3 (revisão técnica pós-PR #14)
+
+Correção de um blocker de segurança e duas lacunas identificados na revisão técnica humana do PR #14,
+antes do merge (`docs/DECISIONS.md`, PROD-H3-01, adendo; `docs/PRODUCTION_GATE.md`, seção 20).
+
+- **381 testes totais** com `TEST_DATABASE_URL` (374 anteriores + 7 novos substituindo os 2 antigos com
+  premissa incorreta em `tests/core.test.js` + 1 novo teste unitário em `tests/core.test.js` + 2 novos em
+  `tests/h3-rate-limiting.test.js`), 0 falhando, nenhum teste removido.
+- **BLOCKER corrigido: `TRUST_PROXY_HOPS` calculava a posição errada da cadeia.** A fórmula original
+  (`chain.length - 1 - hops`) estava desalinhada um salto para a esquerda — e o TESTE original também
+  partia da mesma premissa errada da implementação (`reqOk` esperava a primeira entrada de uma cadeia de
+  2 para `hops=1`, o que não corresponde a nenhuma topologia real de 1 proxy confiável), por isso o CI
+  verde do PR #14 não detectava o bug. No cenário mais comum (1 proxy confiável, cadeia de 1 entrada), a
+  fórmula produzia um índice negativo e caía incorretamente para `req.socket.remoteAddress` (o IP do
+  PRÓPRIO PROXY). Pior: com um `X-Forwarded-For` já pré-forjado pelo atacante antes de chegar ao proxy
+  confiável (que ACRESCENTA, nunca substitui, o endereço real que observou), a fórmula errada
+  selecionava a entrada FORJADA em vez da real — reabrindo o próprio bypass que H3 existe para fechar.
+  Corrigida para `chain.length - hops` (sem o "-1" adicional).
+- **7 testes de proxy reescritos/adicionados em `tests/core.test.js`** (substituindo os 2 testes
+  anteriores com premissa incorreta — H3-proxy-B/C combinado virou B e C separados, mais E/F/G novos):
+  - **H3-proxy-A** (inalterado): sem `TRUST_PROXY_HOPS`, X-Forwarded-For forjado é ignorado.
+  - **H3-proxy-B**: 1 proxy confiável, cadeia com só o IP do cliente (`remoteAddress` = IP do proxy,
+    XFF = IP do cliente) resolve corretamente o cliente — nunca o proxy.
+  - **H3-proxy-C**: 1 proxy confiável, X-Forwarded-For pré-forjado pelo atacante ("9.9.9.9") seguido da
+    entrada real acrescentada pelo proxy ("9.9.9.9, 198.51.100.7") resolve para a entrada REAL, nunca a
+    forjada.
+  - **H3-proxy-E**: 2 proxies confiáveis em cadeia — resolve o cliente real tanto na cadeia exata quanto
+    com uma entrada forjada extra à esquerda.
+  - **H3-proxy-F**: cadeia mais curta que `TRUST_PROXY_HOPS` configurado nunca inventa um IP — cai para
+    o endereço direto da conexão (fail-safe).
+  - **H3-proxy-G**: uma entrada resolvida que não é um IPv4/IPv6 sintaticamente válido (`node:net.isIP()`)
+    nunca vira identidade de rate limit — cai para o endereço direto.
+  - **H3-proxy-D** (inalterado): normaliza IPv4-mapped IPv6.
+- **1 teste unitário novo em `tests/core.test.js`**: `auditRateLimitAndBlock()` — uma falha ao gravar
+  `RATE_LIMIT_TRIGGERED` (simulada com um `store.audit` deliberadamente quebrado) nunca impede a resposta
+  429; testado sem precisar de um backend Postgres real (a decisão de bloqueio é sempre prioritária,
+  auditoria é secundária).
+- **2 testes novos em `tests/h3-rate-limiting.test.js`**:
+  - **[H3-identidade-canônica]**: cria um usuário com `email` e `login_identifier` próprios; alterna
+    entre as duas formas de apresentar a identidade a cada tentativa de login incorreta; confirma que o
+    bucket combinado (IP+identidade, limite 8) é o MESMO para as duas formas — a 9ª tentativa bloqueia
+    independentemente de qual identificador foi usado por último, provando que não é possível dobrar o
+    teto alternando entre `email` e `login_identifier` da mesma conta.
+  - **[H3-audit]**: exaure o limite de identidade de forgot-password para um e-mail dedicado; confirma
+    que o PRIMEIRO bloqueio gera exatamente um evento `RATE_LIMIT_TRIGGERED` (contagem relativa, nunca
+    absoluta — não interfere com eventos de outros testes); confirma que um SEGUNDO bloqueio na mesma
+    janela não gera um novo evento (dedup pelo próprio contador atômico); confirma que o evento nunca
+    contém o e-mail bruto nem a senha usada no teste.
+- **Correção de identidade canônica em `server.js`**: login e forgot-password passaram a resolver a
+  identidade (`resolveLoginIdentity()`/filtro por e-mail) ANTES de consumir os buckets de identidade/
+  combinado — quando resolve para exatamente uma conta, a chave de bucket passa a ser `user:${id}`
+  (canônica), nunca o identificador bruto apresentado. O bucket de IP continua sendo consumido primeiro,
+  sempre, independentemente da resolução de identidade — anti-enumeração preservada (resolver a
+  identidade não muda nenhuma resposta externa; a mesma resolução já era necessária mais abaixo para
+  autenticar).
+- **Segunda ocorrência do bug de `writeStore()` direto encontrada e corrigida**: o mesmo padrão já
+  corrigido em login/MFA verify (rodada anterior) também existia em MFA confirm (enrolamento) — sob
+  concorrência real contra o mesmo desafio de enrolamento, um `StoreConflictError` não tratado deixava a
+  requisição sem resposta. Corrigido para `commitStore()`.
 - CI roda a mesma bateria (Node 20.x/22.x, Postgres real) sem nenhum teste pulado.
 - `npm audit`: inalterado (2 vulnerabilidades altas conhecidas — H9, não corrigidas nesta rodada).

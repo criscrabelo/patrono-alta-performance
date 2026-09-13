@@ -429,3 +429,19 @@ administrativo, MFA enroll/confirm/disable, change-password, logout-all, aprova�
 Resposta 429 genérica, sem revelar contador/existência de conta/motivo interno. Complementar ao
 bloqueio POR CONTA já fechado por H2 (`failed_login_count`/`locked_until`) — nenhuma das duas camadas
 substitui a outra. Nenhum controle de autorização foi alterado. Gate como um todo permanece NO-GO.
+
+**Adendo ao H3 (revisão técnica pós-PR #14)** (`docs/DECISIONS.md`, PROD-H3-01, adendo;
+`docs/PRODUCTION_GATE.md`, seção 20): um blocker de segurança e duas lacunas corrigidos antes do merge —
+(1) **`TRUST_PROXY_HOPS` calculava a posição errada da cadeia** (`chain.length - 1 - N`, deslocada um
+salto): no cenário mais comum (1 proxy confiável) caía incorretamente no IP do próprio proxy, e com um
+`X-Forwarded-For` pré-forjado pelo atacante antes de chegar ao proxy, selecionava a entrada forjada em
+vez da real — reabrindo o bypass que esta proteção deveria impedir. O teste original partia da mesma
+premissa errada, por isso o CI verde não pegava o bug. Corrigida para `chain.length - N`, com validação
+adicional da entrada final via `node:net.isIP()`;
+(2) **identidade de rate limit passa a ser canônica por `userId`**: `email` e `login_identifier` da
+MESMA conta agora sempre alimentam o mesmo bucket de identidade/combinado — antes, alternar entre os
+dois permitia até dobrar o teto de tentativas de login;
+(3) **auditoria `RATE_LIMIT_TRIGGERED` implementada** (pendente desde a decisão original): registrada só
+na transição exata em que um bucket passa a bloquear (deduplicada pelo próprio contador atômico), nunca
+com dado bruto sensível, e uma falha ao gravá-la nunca impede o bloqueio. Gate como um todo permanece
+NO-GO.

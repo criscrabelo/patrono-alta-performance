@@ -86,20 +86,29 @@ const FAIL_CLOSED_RETRY_AFTER_SECONDS = 30;
 // `check(policyName, scope, value)` consome uma tentativa do bucket e devolve se está permitido.
 // `value` é o dado de origem (IP, login_identifier resolvido, challenge id, userId, hash de token) —
 // nunca persistido em texto puro; sempre passa por `hashIdentifier()` antes de virar `bucket_key`.
+// Item 13 da revisão técnica pós-PR #14: cada resultado bloqueado também informa `shouldAudit` — true
+// SOMENTE na transição exata em que o bucket passa a bloquear (`count === limit + 1`). Como `count` é
+// incrementado por uma única instrução SQL atômica (nunca duas requisições conseguem gravar o mesmo
+// `count`), essa condição por si só já deduplica o evento de auditoria: dentro da mesma janela, só a
+// requisição que efetivamente fez o contador cruzar o limite carrega `shouldAudit:true` — todas as
+// demais (`count` maior, já bloqueadas antes) carregam `false`, sem exigir nenhuma coluna/estado extra.
+// Um bloqueio por fail-closed (backend indisponível) nunca tem `count` real — `shouldAudit` é sempre
+// `false` nesse caso (não é um abuso genuíno sendo detectado, é uma falha de infraestrutura; ver `catch`
+// abaixo).
 async function check(policyName, scope, value) {
   const policy = POLICIES[policyName];
   if (!policy) throw new Error(`Política de rate limit desconhecida: ${policyName}`);
-  if (!backendAvailable()) return { allowed: true, retryAfterSeconds: 0 };
+  if (!backendAvailable()) return { allowed: true, retryAfterSeconds: 0, shouldAudit: false };
   const pool = storage.getPool();
   const bucketKey = hashIdentifier(scope, value);
   try {
     const result = await rateLimitsRepository.consumeAndCheck(pool, { bucketKey, scope, windowMs: policy.windowMs, limit: policy.max });
     maybeCleanup(pool);
-    if (result.allowed) return { allowed: true, retryAfterSeconds: 0 };
+    if (result.allowed) return { allowed: true, retryAfterSeconds: 0, shouldAudit: false };
     const retryAfterSeconds = Math.max(1, Math.ceil((new Date(result.blockedUntil).getTime() - Date.now()) / 1000));
-    return { allowed: false, retryAfterSeconds };
+    return { allowed: false, retryAfterSeconds, shouldAudit: result.count === policy.max + 1 };
   } catch {
-    return { allowed: false, retryAfterSeconds: FAIL_CLOSED_RETRY_AFTER_SECONDS };
+    return { allowed: false, retryAfterSeconds: FAIL_CLOSED_RETRY_AFTER_SECONDS, shouldAudit: false };
   }
 }
 
@@ -112,7 +121,7 @@ async function checkAll(checks) {
     const result = await check(policyName, scope, value);
     if (!result.allowed) return result;
   }
-  return { allowed: true, retryAfterSeconds: 0 };
+  return { allowed: true, retryAfterSeconds: 0, shouldAudit: false };
 }
 
 // Usado só por validateAuthRuntimeConfig() (server.js) no boot em produção — nunca aceita o valor
