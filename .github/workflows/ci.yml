@@ -64,6 +64,18 @@ jobs:
       - name: Instalação determinística das dependências
         run: npm ci
 
+      # Hardening H5 (docs/PRODUCTION_GATE.md, PG-21; docs/DECISIONS.md, PROD-H5-01):
+      # tests/h5-backup-restore-postgres.test.js chama pg_dump/pg_restore REAIS (nunca mock). Runners
+      # ubuntu-latest normalmente já trazem postgresql-client, mas a versão pode divergir da imagem
+      # postgres:16 do serviço acima — instala explicitamente o client 16 para nunca depender de
+      # coincidência entre o que o runner já tem e a versão real do serviço, evitando um falso backup
+      # "válido" produzido por uma ferramenta de versão incompatível (item 6 do escopo H5).
+      - name: Instalar postgresql-client 16 (pg_dump/pg_restore para os testes reais de backup/restore H5)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client-16
+          echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
+
       - name: npm test (unitários + integração HTTP real, incluindo backend PostgreSQL real)
         run: npm test
 

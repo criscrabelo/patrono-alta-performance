@@ -493,3 +493,28 @@ rejeita por inteiro — fail-closed, nunca trunca silenciosamente — qualquer e
 ou esquema diferente de `http:`/`https:`. Em produção, uma entrada malformada em `CORS_ALLOWED_ORIGINS`
 interrompe o boot explicitamente (`validateAuthRuntimeConfig()`); fora de produção é apenas descartada.
 Não altera PG-12/PG-13/PG-14, não reabre H3, não expande o escopo de H4.
+
+**H5 (Backup/Restore production-grade do PostgreSQL) implementado PARCIALMENTE — PG-21 permanece
+aberto** (`docs/DECISIONS.md`, PROD-H5-01; `docs/PRODUCTION_GATE.md`, seção 22;
+`docs/BACKUP_RESTORE_RUNBOOK.md`): backup real via `pg_dump -Fc` (`scripts/backup-postgres.js`,
+`npm run backup:postgres`), nunca dependente apenas do endpoint HTTP legado; manifesto com integridade
+(SHA-256), ambiente de origem, versão do PostgreSQL/migration/commit da aplicação; criptografia
+application-side OPCIONAL (AES-256-GCM, `BACKUP_ENCRYPTION_KEY`, independente de `COEVO_BACKUP_KEY`,
+com `encryptionKeyId` lógico — nunca a chave — preparando rotação futura). Storage adapter abstrato:
+`filesystem` só fora de produção (fail-fast se tentado em produção), `s3` (S3-compatible, via
+`@aws-sdk/client-s3`) único aceito em produção — nenhum bucket real foi criado nesta rodada (proibido
+pelo escopo). RPO=6h/RTO=4h definidos e comprovados por restore real (`tests/h5-backup-restore-postgres.test.js`,
+18 testes, `pg_dump`/`pg_restore` reais contra PostgreSQL real, nunca mock). Restore
+(`scripts/restore-postgres.js`, `npm run restore:postgres`) nunca assume banco "atual" implicitamente;
+verifica integridade (tamanho+SHA-256) ANTES de tocar o banco; bloqueia cross-environment restore por
+padrão (override explícito `RESTORE_ALLOW_CROSS_ENVIRONMENT=I_ACCEPT_THE_RISK`); exige confirmação forte
+para produção (`RESTORE_CONFIRM_PRODUCTION=YES_I_UNDERSTAND`); nunca sobrescreve banco populado sem
+`RESTORE_REPLACE=YES_REPLACE_TARGET_DATA` explícito; após restore bem-sucedido, revoga (trunca)
+`auth_sessions`/`auth_challenges`/`password_reset_tokens`/`rate_limit_buckets` no destino — dados
+efêmeros nunca restaurados cegamente, decisão de segurança deliberada (reautenticar é mais seguro que
+ressuscitar estado potencialmente comprometido). Evidência operacional durável em `backup_runs`/
+`restore_runs` (migration 008), nunca segredo. Mensagens de erro sanitizadas (`backup/sanitize.js`)
+antes de log/persistência — `pg_dump`/`pg_restore` podem incluir a connection string no erro.
+**PG-21 permanece explicitamente ABERTO**: a arquitetura e o restore real estão comprovados, mas o
+adapter `s3` nunca foi exercitado contra um bucket real (só testado com cliente S3 injetado) — sem
+infraestrutura provisionada nesta rodada. Gate como um todo permanece NO-GO.

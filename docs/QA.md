@@ -952,3 +952,67 @@ nativo.
 - Não altera PG-12/PG-13/PG-14, não reabre H3, não expande o escopo de H4.
 - CI roda a mesma bateria (Node 20.x/22.x, Postgres real) sem nenhum teste pulado.
 - `npm audit`: inalterado (2 vulnerabilidades altas conhecidas — H9, não corrigidas nesta rodada).
+
+## QA — Hardening H5 (Backup/Restore production-grade do PostgreSQL — implementado parcialmente, PG-21 aberto)
+
+- **458 testes totais** com `TEST_DATABASE_URL` (418 anteriores + 22 unitários de `backup/*` em
+  `tests/h5-backup-restore.test.js` + 18 de ponta a ponta real em
+  `tests/h5-backup-restore-postgres.test.js`), 0 falhando, nenhum teste removido. **343 testes passam +
+  7 pulados** sem `TEST_DATABASE_URL` (321+22 anteriores; os 7 pulados incluem os 6 cenários já gated de
+  rodadas anteriores mais o arquivo H5-postgres inteiro, que exige `pg_dump`/`pg_restore` reais — nunca
+  finge cobertura que não existe).
+- `tests/h5-backup-restore.test.js` (22 testes, roda em AMBOS os backends): `environment.js`
+  (APP_ENVIRONMENT explícita/inválida/derivada de NODE_ENV), `manifest.js` (campos obrigatórios,
+  sha256/sizeBytes inválidos), `crypto.js` (round-trip de criptografia AES-256-GCM, chave errada falha
+  por autenticação GCM, validação de tamanho mínimo de chave), `sanitize.js` (redação de connection
+  string/senha em mensagens de erro), storage adapters `filesystem` (round-trip, path traversal
+  bloqueado) e `s3` (round-trip com cliente S3 FAKE injetado — nunca rede/credenciais reais), e a
+  fábrica `storage-adapter.js` (produção recusa `filesystem`, aceita `s3`; provider desconhecido lança).
+- `tests/h5-backup-restore-postgres.test.js` (18 testes, gated por `TEST_DATABASE_URL`, **`pg_dump`/
+  `pg_restore` REAIS contra PostgreSQL real, nunca mock**):
+  - **[H5-real-A/B]**: backup real gera manifesto válido (sha256 correto, tamanho > 0, versão do
+    PostgreSQL/migration registradas) e uma linha `completed` em `backup_runs`.
+  - **[H5-real-C]**: restore real em banco isolado passa; dados (usuário, processo, Legal Deadline,
+    audit event) equivalem exatamente à origem; relações preservadas; `schema_migrations` no destino
+    aponta para a mesma migration do manifesto.
+  - **[H5-real-D]**: política pós-restore revoga (trunca) `auth_sessions`/`auth_challenges`/
+    `password_reset_tokens`/`rate_limit_buckets` no destino — a origem continua com esses dados intactos.
+  - **[H5-real-E]**: `restore_runs` registra evidência de auditoria no banco de DESTINO.
+  - **[H5-real-F/R]**: tempo de backup e restore observados são finitos e documentados (RPO/RTO nunca
+    aspiracionais).
+  - **[H5-real-G]**: SHA-256 adulterado no manifesto bloqueia o restore antes de qualquer ação no banco.
+  - **[H5-real-H/I]**: cross-environment restore (backup de `development`, alvo `staging`) é bloqueado
+    por padrão; com `RESTORE_ALLOW_CROSS_ENVIRONMENT=I_ACCEPT_THE_RISK` explícito, funciona.
+  - **[H5-real-J]**: restore para `production` sem `RESTORE_CONFIRM_PRODUCTION=YES_I_UNDERSTAND` falha.
+  - **[H5-real-K/L]**: restore sobre banco já populado falha sem `RESTORE_REPLACE=YES_REPLACE_TARGET_DATA`
+    explícito; funciona com a flag.
+  - **[H5-real-M]**: backup sem `DATABASE_URL` falha explicitamente.
+  - **[H5-real-N]**: backup em produção sem storage offsite real (`filesystem`) falha explicitamente.
+  - **[H5-real-O]**: `pg_dump` contra um servidor inalcançável nunca produz um backup `completed` (a
+    contagem de linhas `completed` em `backup_runs` permanece igual a antes da tentativa).
+  - **[H5-real-P]**: nenhum diretório temporário de backup/restore sobrevive após as execuções (sucesso
+    ou falha).
+  - **[H5-real-Q]**: o backup válido anterior continua presente no storage após uma tentativa que falha
+    depois dele.
+- **Bug encontrado e corrigido durante a escrita dos testes**: `backup/crypto.js#decryptFile()` lia o
+  layout do arquivo cifrado na ordem errada (assumia a TAG de autenticação GCM no final do arquivo,
+  quando `encryptFile()` a escreve logo após o IV, antes do ciphertext) — todo restore de um backup
+  cifrado falharia com "Unsupported state or unable to authenticate data". Corrigido antes de qualquer
+  uso real; coberto por `[H5-crypto-C]` (round-trip) e `[H5-crypto-D]` (chave errada falha).
+- **Bug encontrado e corrigido**: a chave do objeto do manifesto no storage era derivada de
+  `${objectKey}.manifest.json` (dependente da extensão `.dump`/`.dump.enc` do artefato de dados) em vez
+  de `${environment}/${backupId}.manifest.json` — o restore não conseguiria localizar o manifesto de um
+  backup cifrado sabendo apenas o `backupId`. Corrigido para uma chave de manifesto sempre independente
+  da extensão do artefato.
+- **Novas tabelas** (`migrations/008_h5_backup_restore_runs.sql`): `backup_runs`/`restore_runs` —
+  mesmo padrão arquitetural de `rate_limit_buckets` (H3), nunca um arquivo de estado local paralelo.
+- **Nova dependência**: `@aws-sdk/client-s3` (adapter `s3`) — `npm audit` confirma que não introduziu
+  vulnerabilidade nova.
+- Endpoints legados `POST /api/backup`/`POST /api/backup/restore` permanecem funcionais e com os
+  mesmos testes de rodadas anteriores — não foram alterados em comportamento, só em comentário.
+- CI: Node 20.x/22.x, PostgreSQL real — nenhum teste H5 crítico pulado no CI (o único gate é
+  `TEST_DATABASE_URL`, disponível no CI).
+- `npm audit`: inalterado (2 vulnerabilidades altas conhecidas — H9, não corrigidas nesta rodada).
+- **PG-21 permanece ABERTO** — ver `docs/PRODUCTION_GATE.md`, seção 22, e `docs/DECISIONS.md`,
+  PROD-H5-01, para a justificativa completa (storage offsite real nunca exercitado contra um bucket
+  real nesta rodada).
