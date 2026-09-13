@@ -652,7 +652,13 @@ bloqueio POR CONTA já fechado por H2 (`failed_login_count`/`locked_until`) — 
   1`, derivado do próprio contador atômico — nenhum estado extra), nunca em todo 429 subsequente dentro
   da mesma janela (evita flood da auditoria). Nunca contém IP/e-mail/login_identifier/senha/OTP/token/
   segredo MFA em texto puro. Falha ao gravar nunca impede a resposta 429 (auditoria é secundária —
-  `auditRateLimitAndBlock()`, `server.js`, captura e descarta qualquer erro internamente).
+  `auditRateLimitAndBlock()`, `server.js`, captura e descarta qualquer erro internamente). **Autoria
+  corrigida em revisão subsequente** (3ª rodada do PR #14, `docs/DECISIONS.md` PROD-H3-01, 2º adendo):
+  em `login`/`forgot-password`, a conta encontrada por e-mail/`login_identifier` é o ALVO da tentativa
+  (usado só para computar a chave canônica do bucket — nunca o autor da requisição não autenticada) e
+  passou a ser SEMPRE excluída de `responsible` nesses dois pontos, mesmo quando a conta resolve. Rotas
+  já autenticadas (`change-password`, `logout-all`, `admin-reset-token`, MFA enroll/confirm/disable,
+  aprovação de cadastro) continuam corretamente atribuindo o usuário autenticado como ator.
 - **Correções incidentais na mesma rodada**: (1) login e MFA verify usavam `writeStore()` direto (em vez
   de `commitStore()`) no caminho de credencial incorreta — sob concorrência real contra a mesma conta,
   um `StoreConflictError` não tratado deixava a requisição sem resposta em vez de devolver 401/409;
@@ -663,10 +669,11 @@ autenticação sensíveis; cabeçalhos `X-RateLimit-*` (H4); headers HTTP de har
 vulnerabilidades altas conhecidas em `npm audit` (H9, inalteradas). Gate como um todo permanece **NO-GO
 PARA PRODUÇÃO**.
 
-**Testes:** 381/381 com Postgres real (374 da primeira rodada + 1 novo teste unitário em
+**Testes:** 384/384 com Postgres real (374 da primeira rodada + 1 novo teste unitário em
 `tests/core.test.js` — falha de auditoria nunca impede o bloqueio — + 7 novos testes de proxy
-substituindo os 2 anteriores com premissa incorreta + 2 novos em `tests/h3-rate-limiting.test.js` —
-identidade canônica por `userId` e auditoria `RATE_LIMIT_TRIGGERED`), 0 falhando, nenhum teste removido.
+substituindo os 2 anteriores com premissa incorreta + 5 novos em `tests/h3-rate-limiting.test.js` —
+identidade canônica por `userId`, auditoria `RATE_LIMIT_TRIGGERED` e a correção de autoria da 3ª
+rodada), 0 falhando, nenhum teste removido.
 Cobertura inclui: limites por IP/identidade/combinado no login; proteção por challenge e por IP no MFA
 verify; forgot-password (resposta genérica preservada, e-mail ambíguo sem first-match); reset-token
 administrativo (aprovador vs. operador sem permissão); reset-password (token inválido repetido vs. token
@@ -676,7 +683,8 @@ mais requisições que a política permite); anti-bypass (troca de User-Agent, X
 confiável configurado, restart, troca de instância); resolução de proxy corrigida (1 e 2 proxies, com e
 sem entrada forjada, cadeia curta, IP sintaticamente inválido); identidade canônica (email/
 login_identifier da mesma conta compartilham bucket); auditoria (`RATE_LIMIT_TRIGGERED` deduplicado,
-sem dado bruto, falha não impede bloqueio).
+sem dado bruto, falha não impede bloqueio, autoria nunca atribui a conta-alvo em rotas públicas e
+atribui corretamente o usuário autenticado em rotas autenticadas).
 
 **Por que "aguardando homologação" e não "concluído":** mesma razão do H1A/H1B/H2 — implementação
 testada e funcional, mas depende de revisão humana antes de qualquer autorização de uso.

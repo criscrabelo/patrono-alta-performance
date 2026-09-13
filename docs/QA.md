@@ -833,3 +833,31 @@ antes do merge (`docs/DECISIONS.md`, PROD-H3-01, adendo; `docs/PRODUCTION_GATE.m
   requisição sem resposta. Corrigido para `commitStore()`.
 - CI roda a mesma bateria (Node 20.x/22.x, Postgres real) sem nenhum teste pulado.
 - `npm audit`: inalterado (2 vulnerabilidades altas conhecidas — H9, não corrigidas nesta rodada).
+
+## QA — Segundo adendo ao Hardening H3 (revisão técnica, 3ª rodada do PR #14)
+
+Correção de um P1 identificado na revisão técnica humana do PR #14, antes do merge (`docs/DECISIONS.md`,
+PROD-H3-01, 2º adendo; `docs/PRODUCTION_GATE.md`, seção 20).
+
+- **384 testes totais** com `TEST_DATABASE_URL` (381 anteriores + 3 novos em
+  `tests/h3-rate-limiting.test.js`), 0 falhando, nenhum teste removido.
+- **P1 corrigido: `RATE_LIMIT_TRIGGERED` atribuía o ALVO da tentativa como autor.** Em `login`
+  (bucket de identidade) e `forgot-password` (bucket de identidade), quando o e-mail/`login_identifier`
+  apresentado resolvia para uma conta real, essa conta era passada como `authenticatedActor` — e virava
+  `responsible` no evento de auditoria, atribuindo à conta potencialmente sob ataque a autoria da
+  própria tentativa contra ela mesma. Corrigido: os dois pontos afetados passam sempre `null` (ator
+  anônimo) — a conta encontrada continua sendo usada para computar a chave canônica do bucket, mas nunca
+  aparece como `responsible`.
+- **3 testes novos em `tests/h3-rate-limiting.test.js`**:
+  - **[H3-audit-autoria] login contra conta EXISTENTE**: exaure o limite de identidade para
+    `usr-h3-login` (conta real, seedada) até bloquear; confirma que nenhum evento
+    `RATE_LIMIT_TRIGGERED` gerado (`login-identity`/`login-ip`) tem `responsible` igual ao nome dessa
+    conta.
+  - **[H3-audit-autoria] forgot-password para conta EXISTENTE**: mesmo cenário para `usr-h3-forgot`
+    via `forgot-password` — confirma que o nome da conta-alvo nunca aparece como `responsible`.
+  - **[H3-audit-autoria] rota AUTENTICADA (change-password)**: loga como usuário real, exaure o limite
+    de `change-password` (10/15min) com senha atual incorreta até bloquear; confirma que o evento
+    `RATE_LIMIT_TRIGGERED` (`change-password`) atribui corretamente `responsible` ao nome do PRÓPRIO
+    usuário autenticado — provando que a correção não afeta rotas onde o ator é genuinamente conhecido.
+- CI roda a mesma bateria (Node 20.x/22.x, Postgres real) sem nenhum teste pulado.
+- `npm audit`: inalterado (2 vulnerabilidades altas conhecidas — H9, não corrigidas nesta rodada).

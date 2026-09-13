@@ -730,18 +730,27 @@ const ANONYMOUS_ACTOR = { name: 'anônimo (não autenticado)' };
 // da mesma janela — evita transformar uma rajada de milhares de requisições bloqueadas num flood da
 // tabela de auditoria). Nunca registra IP/e-mail/login_identifier/senha/OTP/token/segredo MFA em texto
 // puro — `category` é sempre um rótulo estático (nunca o valor real usado para derivar a chave do
-// bucket), e `responsible` é o nome da conta já resolvida quando disponível (mesma convenção já usada
-// pelos demais eventos de auditoria de autenticação, como LOGIN_FAILURE) ou um ator anônimo quando o
-// bloqueio ocorre antes de qualquer identidade ser resolvida. A decisão de bloquear (429) é SEMPRE
-// prioritária — uma falha ao gravar esta auditoria (inclusive um StoreConflictError concorrente) nunca
-// impede a resposta 429 nem "libera" a requisição; por isso todo erro é capturado e descartado aqui
-// dentro, nunca propagado (o mesmo motivo pelo qual login/MFA verify tiveram que passar a usar
-// commitStore() em vez de writeStore() direto — nada dentro de um `body(req).then(async input => ...)`
-// pode deixar uma exceção escapar sem resposta).
-async function auditRateLimitAndBlock(res, store, limited, category, actorUser) {
+// bucket).
+//
+// `authenticatedActor` (revisão técnica pós-2ª rodada de PR #14 — correção de um P1): só pode ser
+// passado quando a PRÓPRIA requisição bloqueada já está autenticada por sessão válida (ex.:
+// change-password, logout-all, admin-reset-token, mfa/enroll|confirm|disable, aprovação de cadastro) —
+// nesses casos o ator é genuinamente conhecido. NUNCA passar aqui a conta resolvida a partir do
+// e-mail/login_identifier/challenge/token apresentados em rotas públicas (login, mfa/verify,
+// forgot-password, reset-password): esse valor é o ALVO da tentativa (a conta potencialmente sob
+// ataque), não o autor da requisição — atribuir um bloqueio de rate limit a ele inverteria a autoria do
+// evento (o alvo passaria a "responsável" por uma tentativa de abuso contra a própria conta). Rotas
+// públicas sempre usam `null` aqui, o que resolve para `ANONYMOUS_ACTOR`.
+//
+// A decisão de bloquear (429) é SEMPRE prioritária — uma falha ao gravar esta auditoria (inclusive um
+// StoreConflictError concorrente) nunca impede a resposta 429 nem "libera" a requisição; por isso todo
+// erro é capturado e descartado aqui dentro, nunca propagado (o mesmo motivo pelo qual login/MFA verify
+// tiveram que passar a usar commitStore() em vez de writeStore() direto — nada dentro de um
+// `body(req).then(async input => ...)` pode deixar uma exceção escapar sem resposta).
+async function auditRateLimitAndBlock(res, store, limited, category, authenticatedActor) {
   if (limited.shouldAudit) {
     try {
-      audit(store, actorUser || ANONYMOUS_ACTOR, 'RATE_LIMIT_TRIGGERED', 'rate_limit', category, null, null, `Bloqueio de rate limit disparado (categoria: ${category})`);
+      audit(store, authenticatedActor || ANONYMOUS_ACTOR, 'RATE_LIMIT_TRIGGERED', 'rate_limit', category, null, null, `Bloqueio de rate limit disparado (categoria: ${category})`);
       await writeStore(store);
     } catch { /* auditoria é secundária — nunca impede nem atrasa o bloqueio já decidido */ }
   }
@@ -1025,7 +1034,10 @@ function handler(req, res) {
       { policyName: 'loginIdentity', scope: 'login:identity', value: canonicalIdentity },
       { policyName: 'loginCombined', scope: 'login:combined', value: `${clientIp}|${canonicalIdentity}` }
     ]);
-    if (!limitedIdentity.allowed) return auditRateLimitAndBlock(res, store, limitedIdentity, 'login-identity', found);
+    // `found`, quando existe, é o ALVO da tentativa de login (a conta potencialmente sob ataque) —
+    // nunca o autor da requisição não autenticada. Nunca passado como ator da auditoria (ver comentário
+    // de auditRateLimitAndBlock()).
+    if (!limitedIdentity.allowed) return auditRateLimitAndBlock(res, store, limitedIdentity, 'login-identity', null);
     const genericInvalid = () => json(res,401,{error:'Credenciais inválidas'});
     if (!found || found.deletedAt) return genericInvalid();
     // Item 18 do escopo (anti-enumeração): conta bloqueada nunca recebe uma resposta HTTP/mensagem
@@ -1139,7 +1151,10 @@ function handler(req, res) {
     const matches = email ? store.users.filter(u => u.email.toLowerCase() === email && !u.deletedAt) : [];
     const canonicalIdentity = matches.length === 1 ? `user:${matches[0].id}` : email;
     const limitedIdentity = await rateLimit.check('forgotPasswordIdentity', 'forgot-password:identity', canonicalIdentity);
-    if (!limitedIdentity.allowed) return auditRateLimitAndBlock(res, store, limitedIdentity, 'forgot-password-identity', matches.length === 1 ? matches[0] : null);
+    // `matches[0]`, quando resolve, é o ALVO do pedido de reset (a conta potencialmente sob ataque) —
+    // nunca o autor da requisição não autenticada. Nunca passado como ator da auditoria (ver comentário
+    // de auditRateLimitAndBlock()).
+    if (!limitedIdentity.allowed) return auditRateLimitAndBlock(res, store, limitedIdentity, 'forgot-password-identity', null);
     if (matches.length === 1) {
       const [found] = matches;
       issuePasswordResetToken(store, found);

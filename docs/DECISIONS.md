@@ -1205,16 +1205,48 @@ decisão original acima — os complementa e corrige um deles (item 5).
     subsequente dentro da mesma janela, o que evitaria transformar uma rajada de milhares de requisições
     bloqueadas num flood da própria tabela de auditoria. Nunca registra IP/e-mail/login_identifier/
     senha/OTP/token/segredo MFA em texto puro — `category` é sempre um rótulo estático da rota (nunca o
-    valor real usado para derivar a chave do bucket), e o ator (`responsible`) é a conta já resolvida
-    quando disponível (mesma convenção de `LOGIN_FAILURE`) ou um ator anônimo explícito quando o
-    bloqueio ocorre antes de qualquer identidade ser resolvida (bucket de IP). A decisão de bloquear
-    (429) é SEMPRE prioritária — uma falha ao gravar esta auditoria (inclusive um `StoreConflictError`
-    concorrente) nunca impede a resposta 429 nem "libera" a requisição; todo erro é capturado e
-    descartado internamente (`auditRateLimitAndBlock()`, `server.js`), nunca propagado.
+    valor real usado para derivar a chave do bucket). A decisão de bloquear (429) é SEMPRE prioritária —
+    uma falha ao gravar esta auditoria (inclusive um `StoreConflictError` concorrente) nunca impede a
+    resposta 429 nem "libera" a requisição; todo erro é capturado e descartado internamente
+    (`auditRateLimitAndBlock()`, `server.js`), nunca propagado. **A autoria (`responsible`) deste evento
+    foi corrigida em uma revisão subsequente — ver item 21.**
 20. **Esta correção não fecha nenhum critério adicional do Gate de Produção além dos já fechados pela
     decisão original (PG-10/PG-11)** — apenas resolve um blocker de segurança e duas lacunas que
     impediam H3 de ser considerado tecnicamente correto para revisão final. O gate como um todo
     permanece **NO-GO PARA PRODUÇÃO**. H4–H11 não foram alterados.
+
+### PROD-H3-01 — Segundo adendo (revisão técnica, 3ª rodada do PR #14): autoria de RATE_LIMIT_TRIGGERED
+### nunca atribui o alvo da tentativa como ator
+
+**Status: IMPLEMENTADO / AGUARDANDO REVISÃO FINAL.** Correção de um P1 identificado na revisão técnica
+humana do PR #14, antes de qualquer merge. Não reabre nem contradiz os itens anteriores — corrige a
+autoria descrita no item 19 acima.
+
+21. **P1 corrigido — `RATE_LIMIT_TRIGGERED` atribuía o ALVO da tentativa como se fosse o autor.** Em
+    `login` (bucket de identidade) e `forgot-password` (bucket de identidade), quando o e-mail/
+    `login_identifier` apresentado resolvia para uma conta real, essa conta era passada como
+    `authenticatedActor` para `auditRateLimitAndBlock()` — e virava `responsible` no evento de
+    auditoria. Isso é semanticamente incorreto: ALVO DA TENTATIVA (a conta potencialmente sob ataque,
+    resolvida apenas para computar a chave de bucket canônica — item 18) é diferente de AUTOR DA
+    TENTATIVA (que em rotas públicas/não autenticadas é sempre desconhecido). O escopo original desta
+    decisão já previa "`actorUserId`: somente quando já autenticado" — o bug divergia dessa regra.
+    Corrigido: os dois pontos afetados (`login-identity`, `forgot-password-identity`) passam sempre
+    `null` (resolve para o ator anônimo explícito) — a conta encontrada continua sendo usada para
+    computar a chave canônica do bucket (item 18, inalterado), mas nunca mais aparece como
+    `responsible` do bloqueio. Rotas que já passam por autenticação de sessão válida (`logout-all`,
+    `change-password`, `mfa/enroll`, `mfa/confirm`, `mfa/disable`, `admin-reset-token`, aprovação de
+    cadastro) continuam corretamente atribuindo o próprio usuário autenticado como ator — nelas não há
+    ambiguidade entre alvo e autor, o autor é genuinamente conhecido pela sessão. O parâmetro do helper
+    foi renomeado de `actorUser` para `authenticatedActor`, com a semântica documentada explicitamente
+    no próprio código: nunca inferir o ator a partir do alvo.
+22. **Nenhum dado sensível adicional foi registrado para compensar.** Não foi adicionado e-mail bruto,
+    `login_identifier` bruto, IP bruto, token, challenge ou segredo ao evento de auditoria para
+    "recuperar" a correlação com o alvo — mantém a mesma minimização já estabelecida (item 19). Uma
+    eventual necessidade futura de correlacionar o alvo de um bloqueio fica para uma decisão separada,
+    não implementada nesta rodada.
+23. **Esta correção não fecha nenhum critério adicional do Gate de Produção** — apenas corrige a autoria
+    de um evento de auditoria já registrado pela decisão original. O gate como um todo permanece
+    **NO-GO PARA PRODUÇÃO**. H4–H11 não foram alterados.
 
 ---
 

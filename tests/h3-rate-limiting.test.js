@@ -460,4 +460,50 @@ if (!TEST_DATABASE_URL) {
     assert.ok(!serialized.includes(email.toLowerCase()), 'o evento de auditoria nunca deve conter o e-mail bruto que disparou o bloqueio');
     assert.ok(!serialized.includes(process.env.COEVO_DEMO_PASSWORD.toLowerCase()), 'o evento de auditoria nunca deve conter qualquer senha');
   });
+
+  // --- 41. AUTORIA DA AUDITORIA (correção de P1 — revisão técnica, 3ª rodada do PR #14) -------------
+  // O ALVO de uma tentativa de login/forgot-password (a conta encontrada por e-mail/login_identifier)
+  // NUNCA pode ser confundido com o AUTOR da requisição — em rotas públicas/não autenticadas, o autor é
+  // sempre desconhecido/anônimo, mesmo quando o rate limit resolve a identidade da conta-alvo apenas
+  // para computar a chave de bucket canônica.
+  test('[H3-audit-autoria] login contra conta EXISTENTE que dispara 429 nunca atribui o evento à conta atacada', async () => {
+    // usr-h3-login é uma conta real, seedada em test.before() — exatamente o cenário em que o bug
+    // atribuía incorretamente o alvo como responsável.
+    for (let i = 0; i < 10; i++) await loginRaw(EMAILS.login, 'senha-errada-autoria');
+    const blocked = await loginRaw(EMAILS.login, process.env.COEVO_DEMO_PASSWORD);
+    assert.equal(blocked.status, 429);
+    const store = await readStore();
+    const events = store.audit.filter(e => e.action === 'RATE_LIMIT_TRIGGERED' && (e.entityId === 'login-identity' || e.entityId === 'login-ip'));
+    assert.ok(events.length > 0, 'o bloqueio deve ter gerado ao menos um evento RATE_LIMIT_TRIGGERED');
+    for (const event of events) {
+      assert.notEqual(event.responsible, 'H3 Login', 'o nome da conta ATACADA nunca deve aparecer como responsável pelo próprio bloqueio de rate limit');
+    }
+  });
+
+  test('[H3-audit-autoria] forgot-password para conta EXISTENTE que dispara 429 nunca atribui o evento à conta alvo', async () => {
+    // EMAILS.forgot resolve para usr-h3-forgot, uma conta real — cenário em que o bug atribuía
+    // incorretamente `matches[0]` (o alvo) como responsável.
+    for (let i = 0; i < 3; i++) await api('POST', '/api/auth/forgot-password', { json: { email: EMAILS.forgot } });
+    const blocked = await api('POST', '/api/auth/forgot-password', { json: { email: EMAILS.forgot } });
+    assert.equal(blocked.status, 429);
+    const store = await readStore();
+    const events = store.audit.filter(e => e.action === 'RATE_LIMIT_TRIGGERED' && (e.entityId === 'forgot-password-identity' || e.entityId === 'forgot-password-ip'));
+    assert.ok(events.length > 0, 'o bloqueio deve ter gerado ao menos um evento RATE_LIMIT_TRIGGERED');
+    for (const event of events) {
+      assert.notEqual(event.responsible, 'H3 Forgot', 'o nome da conta ALVO do pedido de reset nunca deve aparecer como responsável pelo próprio bloqueio de rate limit');
+    }
+  });
+
+  test('[H3-audit-autoria] rota AUTENTICADA (change-password) atribui corretamente o usuário autenticado como ator do bloqueio', async () => {
+    const token = await loginAs(EMAILS.login);
+    // changePasswordUser: max 10/15min — a checagem de rate limit acontece ANTES de validar a senha
+    // atual, então tentativas com senha atual errada ainda consomem o bucket normalmente.
+    for (let i = 0; i < 10; i++) await api('POST', '/api/auth/change-password', { token, json: { currentPassword: 'senha-atual-errada', newPassword: 'Nova#Senha123' } });
+    const blocked = await api('POST', '/api/auth/change-password', { token, json: { currentPassword: 'senha-atual-errada', newPassword: 'Nova#Senha123' } });
+    assert.equal(blocked.status, 429);
+    const store = await readStore();
+    const event = store.audit.filter(e => e.action === 'RATE_LIMIT_TRIGGERED' && e.entityId === 'change-password').at(-1);
+    assert.ok(event, 'o bloqueio de uma rota autenticada deve gerar RATE_LIMIT_TRIGGERED');
+    assert.equal(event.responsible, 'H3 Login', 'em uma rota JÁ AUTENTICADA, o ator conhecido (o próprio usuário logado) deve ser corretamente atribuído — diferente das rotas públicas, aqui não há ambiguidade entre alvo e autor');
+  });
 }

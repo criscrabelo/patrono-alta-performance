@@ -445,3 +445,16 @@ dois permitia até dobrar o teto de tentativas de login;
 na transição exata em que um bucket passa a bloquear (deduplicada pelo próprio contador atômico), nunca
 com dado bruto sensível, e uma falha ao gravá-la nunca impede o bloqueio. Gate como um todo permanece
 NO-GO.
+
+**Segundo adendo ao H3 (revisão técnica, 3ª rodada do PR #14)** (`docs/DECISIONS.md`, PROD-H3-01, 2º
+adendo): um P1 corrigido antes do merge — **`RATE_LIMIT_TRIGGERED` atribuía o ALVO da tentativa como se
+fosse o autor**. Em `login`/`forgot-password`, quando o e-mail/`login_identifier` apresentado resolvia
+para uma conta real (usada só para computar a chave canônica do bucket), essa conta virava
+`responsible` no evento — atribuindo a uma conta potencialmente sob ataque a autoria da própria
+tentativa contra ela mesma. Corrigido: `RATE_LIMIT_TRIGGERED` NUNCA atribui o usuário-alvo como ator em
+rotas públicas/não autenticadas (login, MFA verify, forgot-password, reset-password) — o ator
+permanece anônimo nesses casos, mesmo quando a identidade é resolvida para fins de bucket canônico.
+Ator identificado (`responsible` = o próprio usuário) só é usado em rotas que já passaram por
+autenticação de sessão válida (change-password, logout-all, admin-reset-token, MFA enroll/confirm/
+disable, aprovação de cadastro), onde o autor é genuinamente conhecido. Nenhum dado sensível adicional
+foi registrado para compensar. Gate como um todo permanece NO-GO.
