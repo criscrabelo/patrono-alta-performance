@@ -40,6 +40,12 @@ jobs:
           --health-retries 10
     env:
       TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/patrono_ci_test
+      # H2 (docs/DECISIONS.md, PROD-H2-01): chave de CI apenas, nunca usada em produção — necessária
+      # para que o backfill de MFA de desenvolvimento/teste (seedAuthFields()/backfillDevAuthFields())
+      # exercite o caminho real de cifragem em vez de degradar silenciosamente para "sem MFA".
+      MFA_ENCRYPTION_KEY: ci-only-mfa-encryption-key-not-a-real-secret-32chars
+      # Necessária para os testes de /api/backup (COEVO_BACKUP_KEY deve ter ao menos 32 caracteres).
+      COEVO_BACKUP_KEY: ci-only-backup-key-not-a-real-secret-32-characters
     steps:
       - name: Checkout
         uses: actions/checkout@v4

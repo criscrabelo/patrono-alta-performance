@@ -499,7 +499,18 @@ function seedAuthFields(role) {
   // precise passar pelo fluxo de troca obrigatória.
   const base = { passwordHash: authCrypto.hashPassword(DEV_SEED_PASSWORD), temporaryPassword: false, credentialsVersion: 1 };
   if (!requireMfa({ role })) return { ...base, mfaEnabled: false, mfaMethod: null, mfaSecretEncrypted: null };
-  return { ...base, mfaEnabled: true, mfaMethod: 'totp', mfaSecretEncrypted: authCrypto.encryptSecret(DEV_SEED_TOTP_SECRET), mfaEnrolledAt: new Date().toISOString() };
+  // `encryptSecret()` lança se MFA_ENCRYPTION_KEY estiver ausente/curta (fail-fast correto para uma
+  // tentativa real de enrolamento de MFA). Isto é só o seed de conveniência fora de produção, executado
+  // incondicionalmente na carga do módulo (não atrás de nenhuma rota) — nunca pode derrubar o processo
+  // inteiro (e, com ele, qualquer script/teste que só precise requerer `server.js`) por essa chave ainda
+  // não estar configurada neste ambiente. Sem a chave, o usuário seed simplesmente nasce sem MFA
+  // pré-configurado (continua exigindo o fluxo normal de enrolamento no primeiro login) — nunca grava o
+  // segredo sem cifrar como alternativa.
+  try {
+    return { ...base, mfaEnabled: true, mfaMethod: 'totp', mfaSecretEncrypted: authCrypto.encryptSecret(DEV_SEED_TOTP_SECRET), mfaEnrolledAt: new Date().toISOString() };
+  } catch {
+    return { ...base, mfaEnabled: false, mfaMethod: null, mfaSecretEncrypted: null };
+  }
 }
 const seed = {
   users: [
@@ -569,12 +580,18 @@ function backfillDevAuthFields(store) {
       candidate.credentialsVersion = candidate.credentialsVersion || 1;
       changed = true;
     }
+    // Mesma degradação graciosa de seedAuthFields(): sem MFA_ENCRYPTION_KEY configurada neste ambiente,
+    // o backfill simplesmente não pré-ativa MFA para o usuário legado/de teste (continua exigindo
+    // enrolamento normal), em vez de derrubar toda leitura da store por uma chave de conveniência ainda
+    // não configurada.
     if (requireMfa(candidate) && !candidate.mfaEnabled && !candidate.mfaSecretEncrypted) {
-      candidate.mfaEnabled = true;
-      candidate.mfaMethod = 'totp';
-      candidate.mfaSecretEncrypted = authCrypto.encryptSecret(DEV_SEED_TOTP_SECRET);
-      candidate.mfaEnrolledAt = candidate.mfaEnrolledAt || new Date().toISOString();
-      changed = true;
+      try {
+        candidate.mfaSecretEncrypted = authCrypto.encryptSecret(DEV_SEED_TOTP_SECRET);
+        candidate.mfaEnabled = true;
+        candidate.mfaMethod = 'totp';
+        candidate.mfaEnrolledAt = candidate.mfaEnrolledAt || new Date().toISOString();
+        changed = true;
+      } catch { /* MFA_ENCRYPTION_KEY ausente/curta — deixa o usuário sem MFA pré-configurado */ }
     }
     if (typeof candidate.failedLoginCount !== 'number') { candidate.failedLoginCount = 0; changed = true; }
   }
