@@ -545,6 +545,42 @@ flag `user.mfa` do cadastro. Testado em runtime: login como papel privilegiado s
 - **`/api/compliance` restrito a alçada global** (rodada 3, ADR-007) — nenhum papel departamental
   acessa até existir uma decisão de negócio sobre o módulo/escopo correto de Compliance.
 
+## Autorização esperada — Fase 4 do Sprint 2 (documental, ainda não implementada)
+
+**Nenhum RBAC novo foi implementado nesta rodada** — a Fase 4A (`docs/DECISIONS.md`, seção 1.2) é
+estritamente documental. Esta seção registra o **princípio de autorização esperado** para quando a Fase
+4B (implementação funcional) for autorizada, para que a implementação futura não invente uma regra nova
+de autorização fora do que já rege toda a plataforma:
+
+**Princípio único, sem exceção:** um usuário só vê um item de "Minha Semana", um compromisso na
+visualização complementar de Google Calendar, ou um Legal Deadline atribuído a um `responsibleUserId`,
+**se e somente se** já puder ver a entidade canônica correspondente pelas regras já vigentes —
+`scoped()` (incluindo `companyId`/`speId`), `allowedInDepartment()`, `allowedContent()` (quando a ação
+for de mutação), `hasGlobalScope()`. Nenhuma dessas superfícies pode se tornar um caminho de autorização
+paralelo ou mais permissivo que o já existente para o próprio Legal Deadline/Agenda Event.
+
+- **Minha Semana** (D4.10, homologada): reaproveita a mesma defesa em profundidade já usada por
+  `scopedLegalDeadlineRows()` (Fase 2/3) — escopo sobre o Legal Deadline **e** sobre o Legal Process
+  relacionado. Filtrar por `responsibleUserId === usuário logado` é um filtro **adicional** sobre o
+  conjunto já autorizado, nunca um caminho que amplie o que o usuário pode ver.
+- **Google Calendar** (D4.1, homologada — Opção B, leitura apenas): a visualização complementar de
+  compromissos do próprio Google Calendar do usuário é estritamente pessoal (o usuário só vê os próprios
+  compromissos, via consentimento OAuth individual) — não há espelhamento de Legal Deadline nem
+  sincronização "em nome do sistema" nesta opção. Se uma futura Opção C (espelhamento com escrita) vier a
+  ser homologada, o mesmo princípio se aplica: só pode incluir registros aos quais o usuário logado já
+  teria acesso via a API do Patrono.
+- **`responsibleUserId`** (D4.2/D4.3, homologadas): ser responsável por um Legal Deadline não concede
+  acesso a ele fora do escopo já vigente — um usuário atribuído como responsável, mas fora do próprio
+  `department`/`companyId`/`speId` do registro, continua sem acesso (o campo é sobre atribuição de
+  trabalho, não sobre autorização adicional). `allowedContent()`/`allowedInDepartment()` continuam sendo
+  os gates de mutação; `responsibleUserId` nunca os substitui.
+- **Administrador técnico:** continua sem acesso a conteúdo jurídico automático em nenhuma das
+  superfícies acima — mesmo padrão já testado em toda a Fase 1–3 (`scoped()` nega por ausência de
+  `department`/alçada global).
+
+As decisões de negócio para estas três superfícies já foram homologadas (Fase 4A), mas nenhuma dessas
+regras foi implementada ainda — ficam registradas como restrição de design obrigatória para a Fase 4B.
+
 ## Catálogo de testes de permissão
 
 - **Unitários** (`tests/core.test.js`): `scoped()` (incluindo os casos sintéticos de companyId/speId, e o

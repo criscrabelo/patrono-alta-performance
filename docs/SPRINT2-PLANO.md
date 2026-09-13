@@ -6,13 +6,22 @@
 > exclusivamente `legalDeadlines`/`isLegalDeadlineOverdue()`, nunca mais DATA/CITAÇÃO/PROTOCOLO/
 > `processDate()` do Monday), listagem/filtro (`GET /api/entities/legalDeadlines?paginated=1`) e
 > detalhe/histórico (`GET /api/entities/legalDeadlines/:id/detail`).
-> **FASE 3 IMPLEMENTADA NESTA RODADA** — slice mínimo de Agenda (`GET /api/agenda-items`) e Atenção
+> **FASE 3 IMPLEMENTADA** — slice mínimo de Agenda (`GET /api/agenda-items`) e Atenção
 > (`GET /api/attention`), combinando Legal Deadline (fonte canônica exclusiva de prazo) com os eventos
 > manuais pré-existentes de `store.agenda`, sem duplicar nem persistir cópia do prazo — ver seção
-> "Fase 3" abaixo. **FASE 4 CONTINUA NÃO INICIADA** — Google Calendar, automações, cálculo automático de
-> prazo e homologação formal não foram tocados; nenhuma autorização adicional foi dada além da Fase 3.
-> Escopo estritamente limitado ao que já está previsto em `docs/MASTER_HANDOFF.md` §24 (Sprint 2 —
-> piloto). Nenhuma alteração foi feita no MASTER_HANDOFF.
+> "Fase 3" abaixo.
+> **FASE 4A (documental) HOMOLOGADA** — Google Calendar (Opção B, leitura apenas), responsável do Legal
+> Deadline (`responsibleUserId` opcional), "Minha Semana" (semana civil `America/Sao_Paulo`), labels de
+> `originType`/`status`, e visibilidade de `cumprido`/`cancelado`/`suspenso` na Agenda operacional foram
+> **homologados pela Cristiane em 12/09/2026** — `docs/DECISIONS.md`, seção 1.2 (`D4.1`–`D4.15`).
+> **FASE 4B (implementação funcional) NÃO INICIADA** — esta rodada continua **estritamente documental**:
+> **nenhum código foi alterado** (`server.js`, `dashboard-service.js`, `dashboard-model.js`, frontend e
+> persistência permanecem exatamente como consolidados ao final da Fase 3, commit `a425c2e`). A matriz
+> GO/NO-GO (`docs/DECISIONS.md`, D4.13) resulta em **GO DOCUMENTAL** — as decisões de negócio necessárias
+> estão fechadas, mas isso não autoriza deploy, produção, escrita externa, nem marca a Fase 4B como
+> implementada; a implementação funcional deve ocorrer em PR(s) separado(s). Escopo estritamente limitado
+> ao que já está previsto em `docs/MASTER_HANDOFF.md` §24 (Sprint 2 — piloto). Nenhuma alteração foi
+> feita no MASTER_HANDOFF.
 
 ## Escopo autorizado (MASTER_HANDOFF §24, §23)
 
@@ -44,9 +53,11 @@ além do já previsto acima.
 | 2 | Tela de detalhe de Legal Deadline (histórico via auditoria existente — `store.audit` por `entityId`/`correlationId`) | Engenharia + UX | Fase 1 concluída | Histórico exibido em ordem cronológica, sem sobrescrever estado anterior; nenhuma entidade nova de histórico criada (reaproveita auditoria existente, conforme instruído) | ✅ **Implementado (API)** — `GET /api/entities/legalDeadlines/:id/detail`: processo relacionado, atraso derivado, histórico via `store.audit` + `sanitizeAuditEventForUser()`. Sem tela nova de UI nesta rodada — o piloto consome via API/widgets genéricos existentes |
 | 2 | Semântica de tela/copy: "Confirmado pelo Jurídico" onde hoje poderia haver ambiguidade; garantir que nenhuma tela sugira "comprovação documental validada" sem `evidenceReference` (D1.4) | UX + Jurídico (revisão de copy) | D1.4 homologada | Revisão de copy aprovada pelo Jurídico; nenhuma string de UI viola a regra de linguagem da D1.4 | ⏳ Não iniciada — nenhuma tela nova foi criada nesta rodada; segue pendente quando houver UI dedicada |
 | 3 | Slice mínimo de Agenda/Atenção consumindo o mesmo registro de `legalDeadlines` (sem criar cópia) | Engenharia | Fases 1–2 concluídas | Agenda/Atenção exibem o mesmo `id` de Legal Deadline, nunca uma cópia; QA §30 casos 2 e 6 tornam-se exercitáveis | ✅ **Implementado** — `GET /api/agenda-items` (Agenda) e `GET /api/attention` (Atenção), ambos view-only, reaproveitando `scopedLegalDeadlineRows()`/`isLegalDeadlineOverdue()`/`civilDateAfterDays()` |
-| 3 | Google Calendar (se ativado no piloto) como visualização de leitura apenas | Engenharia + TI | Fase 3 (Agenda/Atenção) | Nenhuma escrita no Calendar; nenhuma leitura do Calendar cria/altera Legal Deadline | ⏳ Não iniciada — fora do escopo desta rodada, aguardando autorização própria |
+| 3 | Google Calendar (se ativado no piloto) como visualização de leitura apenas | Engenharia + TI | Fase 3 (Agenda/Atenção) | Nenhuma escrita no Calendar; nenhuma leitura do Calendar cria/altera Legal Deadline | ⏳ Não implementada — **decisão HOMOLOGADA em `docs/DECISIONS.md`, D4.1: Opção B (leitura apenas)**; implementação fica para a Fase 4B, em PR separado |
 | 4 | Testes de permissão específicos de Legal Deadline com `originType` (TI vs. Jurídico; administrador técnico vs. conteúdo) | Engenharia (QA) | Fases 1–2 concluídas | Casos 8 e 9 da seção QA (abaixo) passam via HTTP real, reaproveitando `allowedInDepartment()`/`allowedContent()` já existentes — nenhum mecanismo de autorização novo | ✅ **Implementado** — Fase 1 já cobria TI/administrador para CRUD; Fase 2 estende a mesma cobertura para dashboard/listagem/detalhe |
-| 4 | Homologação formal com Gestora + Jurídico (MASTER_HANDOFF §32) | Negócio + Jurídico | Fases 1–3 concluídas, CI verde | Checklist de homologação do piloto jurídico aprovado | ⏳ Não iniciada |
+| 4A | Rodada documental: fechar decisões de negócio/UX antes da Fase 4B (Calendar, Minha Semana, responsável, copy, homologação) | Negócio + Jurídico + Engenharia | Fases 1–3 concluídas | `docs/DECISIONS.md` seção 1.2 (D4.1–D4.15) registrada, com cada decisão marcada HOMOLOGADO/PENDENTE/FORA DE ESCOPO — nenhuma homologação fingida | ✅ **Implementada e homologada** — D4.1, D4.2, D4.3, D4.5, D4.6, D4.10, D4.11, D4.15 homologadas pela Cristiane em 12/09/2026; puramente documental, nenhum código alterado |
+| 4B | Implementação funcional da Fase 4 (Google Calendar Opção B, `responsibleUserId`, Minha Semana) | Engenharia | Fase 4A homologada (✅ concluída) | Matriz GO/NO-GO de `docs/DECISIONS.md` (D4.13) em GO para os itens implementados; testes correspondentes | ⏳ **Não iniciada** — matriz GO/NO-GO em **GO DOCUMENTAL** (D4.13); implementação a ser feita em PR(s) separado(s), sem deploy/produção/escrita externa autorizados por esta homologação |
+| 4 | Homologação formal com Gestora + Jurídico (MASTER_HANDOFF §32) | Negócio + Jurídico | Fases 1–3 concluídas, CI verde | Checklist de homologação do piloto jurídico aprovado (`docs/DECISIONS.md`, D4.12) | ⏳ Não iniciada — checklist técnico proposto (D4.12); itens 1–23 já satisfeitos/homologados, mas a homologação formal do piloto (ato de negócio, §32) em si continua não realizada nesta rodada |
 
 ## Status do Legal Deadline — HOMOLOGADO e IMPLEMENTADO (Fase 1)
 
@@ -93,32 +104,70 @@ cópia de Legal Deadline é criada ou persistida.
   visão "meus itens da semana" exigiria inventar esse campo, fora do slice mínimo autorizado. Fica
   documentada como pendente para quando essa base existir.
 
-## QA — Fases 1, 2 e 3 implementadas; Fase 4 segue planejada
+## Fase 4A — implementada e HOMOLOGADA (rodada documental de decisões)
+
+**Estritamente documental — nenhum código foi alterado, em nenhuma das duas passagens desta Fase 4A.**
+Fecha as decisões de produto/negócio/UX necessárias antes de qualquer implementação funcional da Fase
+4B. Todas as decisões estão registradas em `docs/DECISIONS.md`, seção 1.2 ("Sprint 2 — Fase 4 —
+Decisões de Negócio"), com IDs `D4.1` a `D4.15`.
+
+Resumo do que já estava **implicitamente fechado** (reafirmado, não decidido nesta rodada):
+- Google Calendar nunca é fonte de prazo jurídico (D1, MASTER_HANDOFF §10) — D4.1 decidiu apenas **se e
+  como** a integração de visualização é ativada, não se ela pode virar fonte.
+- "Confirmado pelo Jurídico" já tem semântica homologada pela D1.4 — D4.4 apenas formaliza os casos de
+  borda (legado, INTERNAL_CONTROL, suspenso/cumprido/cancelado/reaberto) explicitamente pedidos.
+- Nenhuma automação jurídica na Fase 4, mesmo na implementação futura (D4.9) — já é regra vigente (D1,
+  MASTER_HANDOFF §13/§14, Anexo A).
+- Fallback de indisponibilidade do Calendar (D4.8) — herda a regra global já homologada de "falha de
+  fonte preserva o último dado válido, nunca zero" (Anexo A, regras 3 e 14), já aplicada ao Monday.
+
+**Decisões HOMOLOGADAS pela Cristiane em 12/09/2026** (segunda passagem desta Fase 4A): D4.1 (Google
+Calendar — **Opção B, leitura apenas**; Opção C fica registrada como possibilidade futura, sujeita a
+nova decisão formal), D4.2/D4.3 (`responsibleUserId` opcional, referenciando usuário existente e ativo,
+1 responsável principal, sem herança automática), D4.5 (label "Prazo processual"/"Controle interno"),
+D4.6 (labels de status/derivados em português), D4.10 ("Minha Semana" = semana civil, segunda a domingo,
+`America/Sao_Paulo`), D4.11 (usuário inativo como responsável → "Responsável inativo", histórico nunca
+apagado), D4.15 (`cumprido`/`cancelado`/`suspenso` não aparecem por padrão na Agenda operacional,
+permanecem em histórico/filtro/detalhe). D4.7 fica **fora de escopo funcional do piloto atual** (Opção B
+não escreve eventos no Calendar).
+
+**Matriz GO/NO-GO (D4.13): GO DOCUMENTAL para a Fase 4B.** Isso significa apenas que as decisões de
+negócio necessárias foram fechadas — não autoriza deploy, produção, escrita externa (a Opção B homologada
+é leitura apenas), nem marca a Fase 4B como implementada. A implementação funcional deve ser feita em
+PR(s) separado(s).
+
+## QA — Fases 1, 2 e 3 implementadas; Fase 4A (documental) fechada; Fase 4B segue planejada
 
 Ver `docs/QA.md`, seção "QA do Sprint 2 — Legal Deadline com D1 homologada": os casos que dependiam
 apenas do modelo de dados (originType/status/reabertura/atraso, isolamento Jurídico×TI, administrador
 técnico, múltiplos prazos, novo fato gerador, mass assignment, processo manual/fora de escopo) foram
 implementados como testes reais na Fase 1. Na Fase 2, os casos de dashboard/listagem/detalhe/histórico
 (correção dos widgets, filtros, detalhe com histórico, regressão DATA/CITAÇÃO sem Legal Deadline) também
-passaram a ser testes reais. Nesta Fase 3, os casos de Agenda/Atenção (item aparece na agenda/atenção
+passaram a ser testes reais. Na Fase 3, os casos de Agenda/Atenção (item aparece na agenda/atenção
 correta, não duplicidade, reflexo de alteração canônica, reabertura refletindo overdue, escopo por
 companyId/SPE) também passaram a ser testes reais (`tests/core.test.js`,
-`tests/security-integration.test.js`). Os casos que dependem de Google Calendar continuam apenas
-planejados, para a Fase 4.
+`tests/security-integration.test.js`). Nesta Fase 4A, nenhum teste de código foi adicionado (rodada
+documental) — ver `docs/QA.md`, seção "QA planejado — Fase 4", para os cenários de aceite futuros da
+Fase 4B, ainda não executados.
 
 ## Dependências entre fases
 
 Fase 1 (modelo de dados: `originType` + `status`) — **concluída** — desbloqueou a Fase 2. Fase 2
 (dashboard, listagem/filtro, detalhe/histórico) — **concluída**. Fase 3 (Agenda/Atenção) dependia de
 Fases 1 e 2 estarem concluídas, pois consome o mesmo `legalDeadlines` já filtrável/exibível —
-**concluída nesta rodada**. Fase 4 (Google Calendar, automações, homologação formal) é sempre a última —
-**ainda não iniciada**.
+**concluída**. Fase 4A (decisões/homologação documental) — **concluída e homologada** (D4.1, D4.2, D4.3,
+D4.5, D4.6, D4.10, D4.11, D4.15 — Cristiane, 12/09/2026), desbloqueando a Fase 4B (Google Calendar Opção
+B, `responsibleUserId`, Minha Semana) — **ainda não iniciada**; matriz GO/NO-GO em **GO DOCUMENTAL**
+(D4.13), aguardando implementação em PR(s) separado(s).
 
-## Riscos e bloqueios conhecidos antes de iniciar a Fase 4
+## Riscos e bloqueios conhecidos antes de iniciar a Fase 4B
 
-- Nenhum bloqueio técnico identificado para a Fase 4 — o modelo de dados (Fase 1) e o consumo canônico
-  via dashboard/listagem/detalhe/Agenda/Atenção (Fases 2–3) estão implementados e testados (196 testes,
-  todos passando).
+- Nenhum bloqueio **técnico nem de decisão de negócio** identificado para iniciar a Fase 4B — o modelo
+  de dados (Fase 1), o consumo canônico via dashboard/listagem/detalhe/Agenda/Atenção (Fases 2–3) estão
+  implementados e testados (196 testes, todos passando), e as decisões de negócio necessárias (D4.1,
+  D4.2, D4.3, D4.5, D4.6, D4.10, D4.11, D4.15) foram homologadas (Fase 4A). O que falta é exclusivamente
+  a **implementação funcional** (código, testes, CI), a ser feita em PR(s) separado(s) — GO DOCUMENTAL
+  não é deploy nem produção autorizados.
 - O levantamento de código não conseguiu confirmar, para os boards além de `processos`, se existe
   qualquer coluna de data relevante — isso não bloqueia o Sprint 2 (D1.2 já restringe o piloto a
   `processos`), mas deve ser revisitado se o Jurídico identificar necessidade de expandir o escopo de
@@ -130,5 +179,8 @@ Fases 1 e 2 estarem concluídas, pois consome o mesmo `legalDeadlines` já filtr
 
 ---
 
-**Fases 1, 2 e 3 implementadas.** Fase 4 continua não iniciada — implementação exige nova autorização
-explícita.
+**Fases 1, 2 e 3 implementadas. Fase 4A (documental) implementada e HOMOLOGADA** — decisões de negócio
+registradas em `docs/DECISIONS.md`, seção 1.2 (D4.1–D4.15), homologadas pela Cristiane em 12/09/2026;
+matriz GO/NO-GO em GO DOCUMENTAL (D4.13). **Fase 4B (implementação funcional) continua não iniciada** —
+exige nova autorização explícita para começar a implementação, em PR(s) separado(s); GO DOCUMENTAL não
+autoriza deploy, produção nem escrita externa.
