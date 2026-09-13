@@ -436,6 +436,24 @@ function scopedLegalDeadlineRows(store, user) {
     })
     .filter(Boolean);
 }
+// Comitê Jurídico (prontidão para o Comitê, docs/LEGAL_COMMITTEE_READINESS.md): mesma projeção usada por
+// agenda/atenção/minha-semana, reaproveitada para a tela dedicada de Prazos (`GET
+// /api/entities/legalDeadlines?paginated=1`) — nunca duplica a regra de atraso/rótulo, apenas agrega o
+// mesmo `process`/`responsibleInfo`/`legalDeadlineLabels` já usados alhures a cada linha da listagem.
+function enrichedLegalDeadlineRows(store, user) {
+  return scopedLegalDeadlineRows(store, user).map(({ item, relatedProcess }) => {
+    const dataIntegrity = legalDeadlineIntegrityFlag(item);
+    return {
+      ...item,
+      process: { id: relatedProcess.id, title: relatedProcess.title || null },
+      overdue: isLegalDeadlineOverdue(item),
+      dataIntegrity,
+      ...responsibleInfo(store, item),
+      ...legalDeadlineLabels(item),
+      confirmationLabel: legalDeadlineConfirmationLabel(dataIntegrity)
+    };
+  });
+}
 // Agenda mínima (Fase 3, item 5): ViewModel de apresentação — nunca persiste cópia de date/status/
 // origin/originType. `target` aponta para o detalhe canônico já existente (Fase 2); nenhuma edição de
 // Legal Deadline acontece por esta via.
@@ -1891,7 +1909,7 @@ const created={id:newUserId,name:request.name,email:request.email,role:request.r
   // GET /api/legal/:module?paginated=1 (filterProcesses/filterHonorariums). O array simples (sem
   // `paginated=1`, ou para qualquer outro `type`) continua exatamente como antes, para não quebrar
   // nenhum chamador existente.
-  if (req.method === 'GET' && url.pathname.startsWith('/api/entities/')) { const type=url.pathname.split('/')[3]; const module=entityModule(type); if(!module || !allowedInDepartment(user,module,'read')) return json(res,403,{error:'Sem permissão'}); let rows=collection(store,type).filter(x=>!x.deletedAt && scoped(user,x)); if(type==='legalDeadlines'){ rows=scopedLegalDeadlineRows(store,user).map(row=>row.item); if(url.searchParams.get('paginated')==='1') return json(res,200,filterLegalDeadlines(rows,url)); } return json(res,200,rows); }
+  if (req.method === 'GET' && url.pathname.startsWith('/api/entities/')) { const type=url.pathname.split('/')[3]; const module=entityModule(type); if(!module || !allowedInDepartment(user,module,'read')) return json(res,403,{error:'Sem permissão'}); let rows=collection(store,type).filter(x=>!x.deletedAt && scoped(user,x)); if(type==='legalDeadlines'){ rows=scopedLegalDeadlineRows(store,user).map(row=>row.item); if(url.searchParams.get('paginated')==='1') return json(res,200,filterLegalDeadlines(enrichedLegalDeadlineRows(store,user),url)); } return json(res,200,rows); }
   // P0 corrigido (rodada 6, itens 1 e 3): allowedContent() combina o isolamento departamental
   // (allowedInDepartment) com a negação explícita de `administrador` em módulos de CONTEÚDO de negócio
   // — sem isso, um líder de TI passava em allowed(user,'juridico','create') (item 1), e `administrador`
