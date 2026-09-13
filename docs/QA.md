@@ -496,3 +496,21 @@ para o piloto atual):
 reais nesta rodada** (`tests/core.test.js`/`tests/security-integration.test.js`), todos passando. Os
 cenários 1–5 (Google Calendar Opção B) foram testados no nível de adapter — a leitura real depende de
 credenciais de OAuth ainda não provisionadas neste ambiente (blocker técnico, `docs/INTEGRATIONS.md`).
+
+## QA final — encerramento do Sprint 2
+
+Rodada estritamente documental (`docs/DECISIONS.md`, D2-CLOSE) — nenhum teste foi adicionado ou removido
+aqui; esta seção apenas consolida o estado de QA já registrado nas Fases 1–4B para o encerramento formal.
+
+- **Total: 254 testes**, 0 falhando, na master consolidada após o PR #8
+  (`3eff813a6e5a9996a10164b33f10d00c087161c2`).
+- **Node 20.x:** verde. **Node 22.x:** verde — confirmado antes do merge final do PR #8.
+- **P0/P1 abertos:** 0.
+- **Gaps aceitos** (não são falhas de teste — comportamento explicitamente não implementado, registrado):
+  Agenda Events manuais fora de Minha Semana; ausência de "desatribuir" `responsibleUserId`; Google
+  Calendar real não ativado.
+- **Item não testado por dependência externa:** leitura real de compromissos do Google Calendar (fluxo de
+  consentimento OAuth, dados reais de um usuário) — não executado end-to-end nesta rodada por ausência de
+  credenciais de OAuth (`GOOGLE_CALENDAR_CLIENT_ID`/`GOOGLE_CALENDAR_CLIENT_SECRET`) neste ambiente. O
+  adapter e o contrato read-only (status `not_configured`/`unavailable`, ausência de método de escrita,
+  ausência de token exposto, filtro pela janela civil de "Minha Semana") **foram** testados.

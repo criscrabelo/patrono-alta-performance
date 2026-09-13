@@ -125,4 +125,17 @@ indisponibilidade do Calendar nunca afeta os itens de Legal Deadline na mesma re
 4. Corrigir, no Sprint 2, o uso de coluna bruta de data do Monday (`processDate()` em
    `dashboard-service.js`) em widgets de "prazo" do dashboard `legal` — deve passar a consultar
    `legalDeadlines`, nunca uma coluna de data do board `processos` diretamente (ver
-   `docs/DATA_MODEL.md`, seção "D1 homologada").
+   `docs/DATA_MODEL.md`, seção "D1 homologada"). **Concluído na Fase 2.**
+
+## Status final das integrações ao encerrar o Sprint 2
+
+- **Monday.com:** ativo no piloto como fonte operacional/transitória de `processos`. Somente leitura,
+  sem escrita externa, sem mudança de papel — permanece exatamente como descrito acima.
+- **Google Calendar:** adapter somente leitura implementado (`GET /api/calendar/status`,
+  `GET /api/calendar/events`), integrado a `GET /api/my-week` com filtro pela mesma janela civil de
+  Minha Semana. **Integração real bloqueada** por ausência de credenciais de OAuth do Google e de
+  mecanismo seguro de armazenamento de token por usuário neste ambiente — não resolvido nesta rodada,
+  registrado como blocker técnico (não uma decisão de produto).
+- **Google Drive, Clicksign, CV, Sienge e demais plataformas:** não integrados — mantém-se o status real
+  já documentado acima ("Aguardando credencial" na UI, sem dados simulados). Nenhuma integração nova foi
+  ativada nesta rodada de encerramento.

@@ -210,5 +210,167 @@ estritamente dentro do escopo homologado na Fase 4A.
 
 **Fases 1, 2, 3 e 4A implementadas. Fase 4B (implementação funcional) implementada** — `responsibleUserId`,
 "Minha Semana", D4.15 na Agenda operacional e adapter somente leitura do Google Calendar, conforme
-homologado em `docs/DECISIONS.md` (D4.1–D4.15). Nenhum deploy, produção ou escrita externa foi realizado
-por esta implementação; aguarda revisão antes de qualquer merge/deploy.
+homologado em `docs/DECISIONS.md` (D4.1–D4.15). **Concluída e mergeada na master via PR #8** (squash
+`3eff813a6e5a9996a10164b33f10d00c087161c2`). Nenhum deploy, produção ou escrita externa foi realizado por
+esta implementação — continuam fora de escopo, não pendentes de revisão.
+
+---
+
+## Encerramento do Sprint 2
+
+**Data:** 13/09/2026
+**SHA base (master consolidada):** `3eff813a6e5a9996a10164b33f10d00c087161c2` (squash do PR #8, head
+aprovado `d2f7ac8afc3c9a38b809bc5d6215942a33d47e1e`)
+**Decisão de encerramento:** `docs/DECISIONS.md`, seção 1.3, D2-CLOSE (HOMOLOGADO)
+
+### PRs / fases consolidadas
+
+| Fase | PR | Status |
+|---|---|---|
+| Fase 1 — modelagem e integridade do Legal Deadline | PR #4 | CONCLUÍDA |
+| Fase 2 — consumo canônico, listagem, detalhe, filtros, histórico, dashboard | PR #5 | CONCLUÍDA |
+| Fase 3 — Agenda/Atenção sobre Legal Deadline canônico | PR #6 | CONCLUÍDA |
+| Fase 4A — decisões e homologação documental | PR #7 | CONCLUÍDA |
+| Fase 4B — responsável, Minha Semana, D4.15, labels/copy, Calendar adapter read-only | PR #8 | CONCLUÍDA NO ESCOPO HOMOLOGADO |
+
+### Status final do Sprint 2
+
+**SPRINT 2: CONCLUÍDO NO ESCOPO HOMOLOGADO** — não simplesmente "concluído", porque há gaps
+deliberadamente aceitos e um blocker de dependência externa (ver abaixo). Nenhum desses pontos é uma
+falha de execução: cada um foi identificado, decidido e registrado explicitamente, nunca resolvido por
+suposição.
+
+### O que foi entregue (síntese; detalhe em cada Fase acima e em `docs/DATA_MODEL.md`)
+
+- Legal Deadline como entidade canônica; Legal Process 1:N Legal Deadlines.
+- `originType` obrigatório (enum fechado: `JUDICIAL_PROCESSUAL`/`INTERNAL_CONTROL`).
+- `status` fechado: `ativo`/`suspenso`/`cumprido`/`cancelado`.
+- Atraso (`overdue`) derivado, nunca persistido; reabertura preserva o mesmo `id` e exige `reason`.
+- Auditoria `before`/`after` em toda alteração de Legal Deadline, incluindo reatribuição de responsável.
+- Monday permanece somente leitura/transitório — nunca cria Legal Deadline; `DATA`/`CITAÇÃO` do board
+  nunca são tratados como prazo jurídico.
+- Agenda e Atenção são views — nunca duplicam Legal Deadline em uma coleção paralela.
+- `responsibleUserId` opcional, validado por existência + elegibilidade (`canBeResponsibleForLegalDeadline()`
+  — RBAC (`allowedContent('juridico','read')`) + `scoped()` sobre o Legal Deadline e o processo relacionado).
+- `technical admin != content superuser`; TI segregado do conteúdo jurídico; `companyId`/`speId`
+  preservados como defesa em profundidade.
+- Usuário com `deletedAt` não autentica (sessão existente e novo login, ambos negados); histórico de
+  responsável nunca é apagado quando o usuário se torna inativo (D4.11 — `responsibleInactive: true`).
+- "Minha Semana" (`GET /api/my-week`) como view pura; semana civil segunda-domingo, `America/Sao_Paulo`.
+- D4.15 aplicado: `cumprido`/`cancelado`/`suspenso` fora da Agenda operacional por padrão, acessíveis via
+  `includeInactive=1`/listagem/detalhe.
+- Labels de apresentação (D4.5/D4.6) e "Confirmado pelo Jurídico" (D4.4) aplicados conforme regra —
+  nunca para `requires_review`.
+- Google Calendar: adapter somente leitura; sem escrita; sem mirroring de Legal Deadline; não cria Legal
+  Deadline/Task; não altera a Agenda canônica; eventos filtrados pela mesma janela civil de Minha Semana.
+- **254 testes passando** (101 unitários em `tests/core.test.js` + 153 HTTP/integração em
+  `tests/security-integration.test.js`), 0 falhando, CI verde em Node 20.x e Node 22.x antes do merge
+  final do PR #8.
+
+### Gaps aceitos ao encerrar o Sprint 2
+
+| Gap | Motivo | Classificação |
+|---|---|---|
+| A. Agenda Events manuais não entram em "Minha Semana" | `store.agenda.owner` é texto livre, sem `user.id` canônico — inferir por nome seria a mesma "substituição textual" vedada para `responsibleUserId` | DIFERIDO / DEPENDE DE DECISÃO DE MODELO |
+| B. Desatribuição de `responsibleUserId` por `null` | Comportamento não homologado (D4.2/D4.3 só cobrem atribuição/reatribuição) | DIFERIDO / DEPENDE DE DECISÃO DE NEGÓCIO |
+| C. Google Calendar real (leitura efetiva de compromissos) | Ausência de credenciais OAuth do Google e de mecanismo seguro de armazenamento de token por usuário neste ambiente | BLOQUEADO POR DEPENDÊNCIA EXTERNA/TÉCNICA |
+
+### O que NÃO é gap do Sprint 2 (fora de escopo / gate de produção futuro)
+
+Os itens abaixo nunca foram prometidos pelo escopo homologado do Sprint 2 e não devem ser lidos como
+falha de entrega — são pré-condições de um eventual gate de produção, tratadas separadamente:
+
+- Deploy e produção;
+- Migração para PostgreSQL / persistência production-grade;
+- Hardening amplo de produção (rate limiting global, CSP completa, CSRF amplo);
+- Incident response formal;
+- Retenção/legal hold;
+- Vulnerabilidade conhecida de `pptxgenjs` (dependência de terceiros, não código deste Sprint);
+- Revogação imediata de sessão (fora do soft-delete de usuário implementado nesta Fase 4B).
+
+### Riscos residuais
+
+| Risco | Severidade | Status | Mitigação | Próximo passo |
+|---|---|---|---|---|
+| Google Calendar sem OAuth real | Média (funcionalidade incompleta, não segurança) | Bloqueado por dependência externa | Adapter/contrato read-only já implementado e testado; nenhuma simulação insegura | Provisionar credenciais OAuth + mecanismo seguro de token por usuário |
+| Agenda Event com `owner` textual | Baixa (gap de UX/produto, não de segurança) | Diferido | Minha Semana cobre apenas Legal Deadline por ora | Decisão de modelo: campo canônico de atribuição em `store.agenda` |
+| `responsibleUserId` sem operação de desatribuição | Baixa | Diferido | PATCH rejeita explicitamente em vez de inventar comportamento | Homologação de negócio sobre semântica de "remover responsável" |
+| JSON store (`data/store.json`) não é production-grade | Alta para produção, aceitável para piloto | Fora de escopo do Sprint 2 | Isolamento por `COEVO_DATA_DIR` em testes; nenhuma mudança de persistência nesta rodada | Migração PostgreSQL (ADR-001, já preparado como caminho) — gate de produção |
+| Gestão de sessão/revogação imediata | Média para produção | Fora de escopo do Sprint 2 (soft-delete de usuário cobre inatividade, não revogação de token específico) | `getUser()`/login negam usuário `deletedAt` | Mecanismo de revogação de sessão ativa — gate de produção |
+| Hardening HTTP/security headers amplo | Média para produção | Fora de escopo do Sprint 2 | — | Gate de produção |
+| Retenção/legal hold | Média para produção | Fora de escopo do Sprint 2 | — | Gate de produção |
+| Dependência futura de produção (todos os itens acima combinados) | — | Bloqueado até gate de produção | Nenhuma declaração de "pronto para produção" foi feita | Gate de produção separado, com autorização própria |
+
+### Testes e evidências
+
+- **Total: 254 testes** — 101 unitários (`tests/core.test.js`) + 153 HTTP/integração
+  (`tests/security-integration.test.js`).
+- CI verde (Node 20.x e Node 22.x) confirmado antes do merge final do PR #8 (head
+  `d2f7ac8afc3c9a38b809bc5d6215942a33d47e1e`, squash `3eff813a6e5a9996a10164b33f10d00c087161c2`).
+- Nenhuma regressão conhecida; nenhum P0/P1 aberto no encerramento.
+- Google Calendar real **não foi executado end-to-end** por ausência de OAuth real — o adapter e o
+  contrato read-only (status, ausência de escrita, ausência de token exposto, filtro de janela civil)
+  foram testados.
+
+### Critérios de aceite do Sprint 2
+
+- [x] Legal Deadline canônico
+- [x] `originType`
+- [x] `status`
+- [x] Atraso derivado
+- [x] Reabertura (mesmo `id`, `reason` obrigatório)
+- [x] Auditoria (`before`/`after`)
+- [x] Listagem/filtro
+- [x] Detalhe/histórico
+- [x] Dashboard sem raw Monday date como prazo
+- [x] Agenda
+- [x] Atenção
+- [x] `responsibleUserId`
+- [x] Minha Semana
+- [x] D4.15
+- [x] Labels/copy
+- [x] `companyId`/`speId`
+- [x] TI segregado
+- [x] Administrador técnico segregado
+- [x] Calendar read-only
+- [x] Calendar sem escrita
+- [x] Calendar não cria prazo
+- [x] 254 testes
+- [x] CI verde
+- [x] Documentação consolidada
+- [x] Nenhum P0/P1 aberto
+
+### GO / NO-GO do Sprint
+
+**GO PARA ENCERRAMENTO DO SPRINT 2.**
+
+**NO-GO PARA PRODUÇÃO** — o Sprint está concluído funcionalmente no escopo homologado, mas produção
+depende de um gate técnico/de negócio separado (persistência production-grade, hardening de segurança,
+gestão de sessão, retenção/legal hold, OAuth real do Calendar, entre outros listados acima). Nenhuma
+declaração deste documento autoriza deploy ou produção.
+
+### Transição para o próximo Sprint (proposta de priorização — não há prioridade formal pré-existente)
+
+**P0/P1 antes de produção (proposta de priorização):**
+- Persistência production-grade (migração PostgreSQL, ADR-001);
+- Autenticação/gestão de sessão (revogação ativa, para além do soft-delete de usuário);
+- Security headers / hardening HTTP;
+- Rate limiting global;
+- Incident response;
+- Retenção/legal hold;
+- Vulnerabilidade conhecida de `pptxgenjs`.
+
+**Produto (proposta de priorização):**
+- Modelo canônico de atribuição para Agenda Event (destrava o gap A);
+- Desatribuição de `responsibleUserId` (destrava o gap B, sujeito a homologação de negócio);
+- OAuth real do Google Calendar (destrava o gap C);
+- Armazenamento seguro de token por usuário (pré-requisito do item anterior).
+
+**Sprint 3 NÃO foi iniciado por este documento** — nenhum código, branch funcional ou arquitetura nova foi
+criada; as frentes acima são apenas propostas de priorização para autorização futura e separada.
+
+---
+
+**Sprint 2: CONCLUÍDO NO ESCOPO HOMOLOGADO.** Fases 1–4B entregues e mergeadas na master. Gaps aceitos e
+blocker externo (Google Calendar real) permanecem registrados. Produção não está autorizada por este
+documento — depende de gate separado. Sprint 3 não foi iniciado.

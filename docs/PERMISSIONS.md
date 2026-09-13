@@ -600,3 +600,23 @@ na Fase 4B seguindo este princípio à risca — nenhuma delas ganhou uma regra 
 
 Ver `docs/QA.md` para o mapeamento completo contra os 10 casos obrigatórios do MVP/Piloto Jurídico
 (§30) e o resultado da execução mais recente.
+
+## Estado final de autorização ao encerrar o Sprint 2
+
+- `responsibleUserId` **nunca amplia autorização** — testado explicitamente na atribuição (POST/PATCH
+  rejeitam companyId/speId/departamento incompatível, TI e administrador técnico) e na visualização
+  (Minha Semana/Agenda/Atenção nunca revelam um item fora do escopo já vigente do usuário).
+- "Minha Semana" **é pessoal** — reflete apenas os Legal Deadlines atribuídos ao próprio usuário logado;
+  alçada global de negócio (diretoria) não a transforma em "responsável por todos os prazos".
+- **TI não acessa conteúdo jurídico** em nenhuma das superfícies da Fase 4B (Minha Semana, Agenda D4.15,
+  Calendar), mesma segregação departamental já vigente desde as Fases 1–3.
+- **`technical admin` não é `content superuser`** — `allowedContent()` continua negando administrador
+  técnico em qualquer módulo de conteúdo de negócio, incluindo a elegibilidade para ser responsável por
+  um Legal Deadline.
+- **Google Calendar é por identidade individual** — a leitura (quando ativada) pertence ao usuário
+  conectado; nenhuma alçada global de negócio dá acesso ao Calendar pessoal de outro usuário (sem estado
+  de conexão persistido nesta rodada, não há caminho de código que misture contas).
+
+Nenhuma regra de autorização nova foi introduzida fora do que já está descrito nas seções acima —
+`responsibleUserId`/Minha Semana/Calendar reaproveitam integralmente `scoped()`/`allowedContent()`/
+`allowedInDepartment()` já existentes.
