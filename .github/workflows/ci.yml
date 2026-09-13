@@ -46,6 +46,11 @@ jobs:
       MFA_ENCRYPTION_KEY: ci-only-mfa-encryption-key-not-a-real-secret-32chars
       # Necessária para os testes de /api/backup (COEVO_BACKUP_KEY deve ter ao menos 32 caracteres).
       COEVO_BACKUP_KEY: ci-only-backup-key-not-a-real-secret-32-characters
+      # H3 (docs/DECISIONS.md, PROD-H3-01): chave de CI apenas, nunca usada em produção — necessária
+      # para derivar as chaves de bucket de rate limiting (HMAC-SHA256). Sem ela, os testes ainda
+      # rodariam (fallback de desenvolvimento fora de produção), mas de forma menos representativa do
+      # caminho real de produção — mesma disciplina já aplicada a MFA_ENCRYPTION_KEY/COEVO_BACKUP_KEY.
+      RATE_LIMIT_HMAC_KEY: ci-only-rate-limit-hmac-key-not-a-real-secret-32chars
     steps:
       - name: Checkout
         uses: actions/checkout@v4

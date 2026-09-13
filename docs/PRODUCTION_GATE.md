@@ -80,8 +80,8 @@ e um checklist mínimo de LGPD. Não cobre: desenho de novas funcionalidades de 
 | PG-07 | Sessão/Auth | ~~Senha única compartilhada (`COEVO_DEMO_PASSWORD`) para todos os usuários~~ **FECHADO por H2** — senha individual por usuário (`scrypt`, salt próprio), fluxo de troca/reset com token de uso único | Sem responsabilização individual real por login; qualquer vazamento afeta todos | ~~**P0**~~ **FECHADO** | ~~SIM~~ NÃO (fechado) | Senha/hash por usuário (bcrypt/argon2), fluxo de cadastro/redefinição real | Login exige credencial própria por usuário, hash armazenado com salt | H2 |
 | PG-08 | Sessão/Auth | ~~Código de MFA único compartilhado (`COEVO_MFA_CODE`)~~ **FECHADO por H2** — TOTP individual (RFC 6238) por usuário, segredo cifrado em repouso (AES-256-GCM), nunca ativo antes da confirmação do enrolamento | MFA não é MFA real — mesmo segundo fator para todos os usuários | ~~**P0**~~ **FECHADO** | ~~SIM~~ NÃO (fechado) | MFA individual por usuário, com fator separado e mecanismo aprovado para produção | Cada usuário tem segredo/fator de MFA próprio, não reutilizável entre contas | H2 |
 | PG-09 | Sessão/Auth | ~~Nenhuma política de senha~~ **FECHADO por H2** — comprimento mínimo (10), rejeita trivial/repetida/sequencial, nunca texto puro, sem rotação obrigatória sem causa (só em troca/reset/comprometimento/decisão administrativa) | N/A hoje (não há senha por usuário); vira obrigatório ao resolver PG-07 | ~~**P1**~~ **FECHADO** | ~~SIM~~ NÃO (fechado) | Definir política mínima de senha ao implementar PG-07 | Política documentada e validada no cadastro/redefinição | PG-07 |
-| PG-10 | Sessão/Auth | Sem proteção a força bruta GLOBAL (por IP) em `/api/auth/login`/`/api/auth/mfa/verify` — H2 fechou apenas o bloqueio POR CONTA (`failed_login_count`/`locked_until`, ver seção 19); rate limiting por IP/global continua pendente | Enumeração de credenciais/código por tentativa exaustiva distribuída entre contas/IPs | **P0** | SIM | Rate limiting + bloqueio progressivo por IP | N tentativas falhas em janela de tempo bloqueiam/atrasam novas tentativas por IP, além do bloqueio por conta já implementado | H3 |
-| PG-11 | Rate limiting | Nenhuma rota tem rate limiting (login, API geral, integrações) | Abuso, DoS de aplicação, força bruta | **P0** | SIM | Rate limiting global + reforçado em rotas sensíveis (login/MFA) | Rajada acima do limite recebe 429, sem afetar outros usuários | H3 |
+| PG-10 | Sessão/Auth | ~~Sem proteção a força bruta GLOBAL (por IP) em `/api/auth/login`/`/api/auth/mfa/verify`~~ **FECHADO por H3** (ver seção 20) — rate limiting distribuído por IP/identidade/combinado (PostgreSQL, sobrevive a restart/múltiplas instâncias), complementar ao bloqueio POR CONTA já fechado por H2 | Enumeração de credenciais/código por tentativa exaustiva distribuída entre contas/IPs | ~~**P0**~~ **FECHADO** | ~~SIM~~ NÃO (fechado) | Rate limiting + bloqueio progressivo por IP | N tentativas falhas em janela de tempo bloqueiam/atrasam novas tentativas por IP, além do bloqueio por conta já implementado | H3 |
+| PG-11 | Rate limiting | ~~Nenhuma rota tem rate limiting (login, API geral, integrações)~~ **FECHADO por H3** — login, MFA verify, forgot/reset-password, reset-token administrativo, enroll/confirm/disable de MFA, change-password, logout-all e aprovação de cadastro protegidos; API geral (fora das rotas de autenticação sensíveis) permanece sem rate limiting, fora do escopo mínimo desta rodada | Abuso, DoS de aplicação, força bruta | ~~**P0**~~ **FECHADO** (para as rotas sensíveis de autenticação — ver seção 20) | NÃO (fechado para o escopo mínimo) | Rate limiting global + reforçado em rotas sensíveis (login/MFA) | Rajada acima do limite recebe 429, sem afetar outros usuários | H3 |
 | PG-12 | HTTP hardening | Ausência de CSP/HSTS/X-Frame-Options/Referrer-Policy/Permissions-Policy | Clickjacking, XSS com maior impacto, downgrade de protocolo | **P1** | SIM | Adicionar headers de hardening padrão (helmet-like, sem framework novo se possível) | Headers presentes e validados em resposta HTTP real | H4 |
 | PG-13 | HTTP hardening | CORS não configurado explicitamente (same-origin implícito) | Comportamento não documentado; risco se um domínio de app separado for introduzido | **P2** | NÃO (aceitável enquanto for same-origin) | Documentar e, se necessário, configurar allowlist explícita | Política de CORS documentada e testada | H4 |
 | PG-14 | HTTP hardening | Sem CSRF explícito (mitigado estruturalmente por Bearer token sem cookie) | Baixo hoje; se sessão migrar para cookie (PG-04), CSRF volta a ser relevante | **P2** | NÃO hoje / SIM se migrar para cookie | Reavaliar ao mudar modelo de sessão | Sem alteração enquanto o modelo for Bearer token puro | H2 (condicional) |
@@ -119,6 +119,13 @@ e um checklist mínimo de LGPD. Não cobre: desenho de novas funcionalidades de 
 - **P2 = 5** — inalterado.
 - **Fechados = 9** — PG-01, PG-02, PG-03, PG-04, PG-05, PG-06, PG-07, PG-08, PG-09.
 
+**Contagem após o Hardening H3 (ver seção 20) — PG-10/PG-11 fechados:**
+
+- **P0 aberto = 4** — PG-19, PG-20, PG-21, PG-22 (PG-10/PG-11 fechados).
+- **P1 aberto = 5** — inalterado (PG-12, PG-15, PG-17, PG-23, PG-24).
+- **P2 = 5** — inalterado.
+- **Fechados = 11** — PG-01, PG-02, PG-03, PG-04, PG-05, PG-06, PG-07, PG-08, PG-09, PG-10, PG-11.
+
 PG-01/PG-02 são exibidos como dois achados por clareza de causa raiz (persistência sem transação e sem
 lock são sintomas distintos do mesmo problema), mas compartilham a mesma correção (H1) — contados
 separadamente na tabela e nesta soma, não duplicados fora dela. PG-24 foi reclassificado de P2 para P1
@@ -134,7 +141,7 @@ própria classificação declarada.
 | Persistência | **FECHADO por H1A** — PostgreSQL conectado ao runtime quando `DATABASE_URL` configurada, transacional e testado sob concorrência real (ver seção 17); fallback local (JSON) só fora de produção | NÃO (fechado) | ~~PostgreSQL conectado ao runtime, testado sob concorrência~~ atendido |
 | Sessões | **FECHADO por H2** — persistida em `auth_sessions` (Postgres), sobrevive a restart/múltiplas instâncias, logout/logout-all revogam no servidor (ver seção 19) | NÃO (fechado) | ~~Sessão persistida + logout/revogação funcionais~~ atendido |
 | Autenticação (credenciais) | **FECHADO por H2** — senha individual (hash próprio) + MFA individual (TOTP, RFC 6238) por usuário, senha temporária força troca, reset por token de uso único (ver seção 19) | NÃO (fechado) | ~~Credencial e MFA por usuário~~ atendido |
-| Rate limiting | Bloqueio POR CONTA fechado por H2 (`failed_login_count`/`locked_until`); rate limiting GLOBAL/por IP continua inexistente | SIM | Rate limiting em rotas sensíveis e na API geral |
+| Rate limiting | **FECHADO por H3** (para rotas sensíveis de autenticação) — rate limiting distribuído (PostgreSQL) por IP/identidade/combinado em login, MFA, forgot/reset-password, reset-token administrativo, enroll/confirm/disable de MFA, change-password, logout-all, aprovação de cadastro; bloqueio POR CONTA já fechado por H2 (`failed_login_count`/`locked_until`) permanece complementar (ver seção 20) | NÃO (fechado para o escopo mínimo) | ~~Rate limiting em rotas sensíveis~~ atendido; API geral fora de rotas de autenticação sensíveis fica para uma rodada futura, se priorizada |
 | Headers HTTP | Só `nosniff` | SIM | CSP/HSTS/X-Frame-Options/Referrer-Policy/Permissions-Policy presentes |
 | CSRF | Mitigado estruturalmente (Bearer, sem cookie) | NÃO (hoje) | Reavaliar se o modelo de sessão mudar |
 | Secrets | Server-side only, sem vazamento identificado | NÃO | Manter prática atual + revisão contínua |
@@ -583,17 +590,117 @@ PROD-H2-01, adendo). Nenhum item abaixo fecha um critério adicional do gate al�
 Testes: 352/352 com Postgres real (342 anteriores + 10 novos cenários cobrindo os 5 itens acima, em
 `tests/core.test.js` e `tests/h2-auth-sessions.test.js`), 0 falhando, nenhum teste removido.
 
+## 20. Status do Hardening H3 (IMPLEMENTADO — AGUARDANDO HOMOLOGAÇÃO)
+
+**Decisão relacionada:** `docs/DECISIONS.md`, PROD-H3-01.
+
+**Fecha:** PG-10 (fração de rate limiting por IP/global) e PG-11 (ausência de rate limiting em qualquer
+rota). **Não fecha** PG-19, PG-20, PG-21, PG-22 (P0 restantes) nem qualquer P1/P2.
+
+**Arquitetura implementada (H3):** proteção distribuída contra abuso/força bruta, complementar ao
+bloqueio POR CONTA já fechado por H2 (`failed_login_count`/`locked_until`) — nunca o substitui.
+
+- **Estado compartilhado via PostgreSQL**, nunca `new Map()` em memória — `migrations/
+  007_h3_rate_limiting.sql` (aditiva, não altera 001-006) cria `rate_limit_buckets`
+  (`bucket_key`/`scope`/`window_started_at`/`count`/`blocked_until`/`updated_at`). Camada isolada
+  (`auth/rate-limit.js`, `storage/repositories/rate-limits-repository.js`), deliberadamente fora da
+  ponte relacional de H1B/H2 — acessa o pool Postgres diretamente (`storage.getPool()`), porque o
+  incremento atômico por linha sob concorrência exige uma única instrução SQL
+  (`INSERT ... ON CONFLICT DO UPDATE`), não uma CAS de documento inteiro.
+- **Janela fixa determinística**, hora sempre do servidor Postgres (`now()`), nunca do cliente.
+- **Resolução segura de IP** (`auth/client-ip.js`, `resolveClientIp()`): `X-Forwarded-For` nunca confiado
+  sem uma política explícita de proxy confiável (`TRUST_PROXY_HOPS`, mesmo modelo numérico do Express/
+  nginx — padrão `0` ignora XFF por completo). Com `N` proxies confiáveis, o cliente é a entrada
+  `chain.length - N` da cadeia — nunca a primeira entrada da esquerda (forjável por um atacante que já
+  chega ao primeiro proxy confiável com um X-Forwarded-For pré-existente), nunca escolhida
+  arbitrariamente por uma cadeia maior/menor que o esperado. A entrada final é validada como um IPv4/
+  IPv6 sintaticamente correto (`node:net.isIP()`) antes de ser aceita. IPv4-mapped IPv6 normalizado. IP
+  nunca exposto em resposta HTTP. **Correção pós-revisão técnica (PR #14, `docs/DECISIONS.md`,
+  PROD-H3-01 adendo)**: a fórmula original (`chain.length - 1 - N`) estava desalinhada um salto para a
+  esquerda — no caso mais comum (1 proxy confiável), caía incorretamente no IP do próprio proxy em vez
+  do cliente, e com um X-Forwarded-For pré-forjado pelo atacante selecionava a entrada forjada em vez da
+  real observada pelo proxy confiável, reabrindo o próprio bypass que esta proteção deveria impedir. O
+  teste original partia da mesma premissa errada, por isso o CI verde não pegava o bug.
+- **Toda chave de bucket é derivada (HMAC-SHA256, `RATE_LIMIT_HMAC_KEY`)** — nunca IP/e-mail/
+  `login_identifier`/token em texto puro persistido (minimização LGPD). Mesma disciplina de
+  `MFA_ENCRYPTION_KEY`: obrigatória (≥32 caracteres) em produção, fail-fast no boot
+  (`validateAuthRuntimeConfig()`).
+- **Rotas protegidas**: login (IP 30/10min + identidade 10/10min + combinado 8/10min), MFA verify (IP
+  30/10min + challenge 10/10min, preservando o `attempts` por challenge já existente de H2),
+  forgot-password (IP 10/15min + identidade 3/15min), reset-password (IP 10/15min + hash do token
+  5/15min), reset-token administrativo (operador 10/15min + usuário-alvo 3/15min), MFA enroll/confirm/
+  disable, change-password, logout-all e aprovação de cadastro (por `userId` autenticado). Política
+  centralizada (`POLICIES` em `auth/rate-limit.js`), nenhum número solto espalhado pelas rotas.
+- **Identidade canônica de rate limit por `userId`** (correção pós-revisão técnica, PR #14): o bucket de
+  IP é sempre consumido primeiro; só então a identidade é resolvida para computar a chave de identidade/
+  combinado — quando resolve para exatamente uma conta ativa, a chave é `user:${id}`, nunca o
+  identificador bruto apresentado. Sem isso, `email` e `login_identifier` da MESMA conta (H2 permite os
+  dois) alimentavam buckets diferentes, permitindo dobrar o teto de tentativas alternando qual
+  identificador é apresentado. Anti-enumeração preservada (a resolução não muda a resposta externa).
+- **429 genérico** ("Muitas tentativas. Tente novamente mais tarde.") com `Retry-After` quando aplicável
+  — nunca revela contador, existência de conta ou motivo interno. Nenhum pacote de cabeçalhos
+  `X-RateLimit-*` (fica para H4).
+- **Fail-closed controlado**: falha do backend Postgres do limitador bloqueia (429) em vez de permitir
+  passagem livre ou derrubar o processo. **Fail-closed em produção**: schema sem a migration
+  `007_h3_rate_limiting`/tabela `rate_limit_buckets` impede o boot (`schemaReady:false`).
+- **Fora de produção, fallback JSON desativa H3 por completo** (`rateLimit.backendAvailable()` verifica
+  `storage.mode()==='postgres' && storage.getPool()!=null`) — nunca um segundo limitador em memória com
+  garantias diferentes das de produção; produção já exige PostgreSQL por fail-fast desde H1A.
+- **Limpeza oportunística** evita crescimento indefinido da tabela sem exigir cron externo.
+- **Auditoria `RATE_LIMIT_TRIGGERED`** (correção pós-revisão técnica, PR #14 — pendente desde a decisão
+  original): registrada apenas na transição exata em que um bucket passa a bloquear (`count === limit +
+  1`, derivado do próprio contador atômico — nenhum estado extra), nunca em todo 429 subsequente dentro
+  da mesma janela (evita flood da auditoria). Nunca contém IP/e-mail/login_identifier/senha/OTP/token/
+  segredo MFA em texto puro. Falha ao gravar nunca impede a resposta 429 (auditoria é secundária —
+  `auditRateLimitAndBlock()`, `server.js`, captura e descarta qualquer erro internamente). **Autoria
+  corrigida em revisão subsequente** (3ª rodada do PR #14, `docs/DECISIONS.md` PROD-H3-01, 2º adendo):
+  em `login`/`forgot-password`, a conta encontrada por e-mail/`login_identifier` é o ALVO da tentativa
+  (usado só para computar a chave canônica do bucket — nunca o autor da requisição não autenticada) e
+  passou a ser SEMPRE excluída de `responsible` nesses dois pontos, mesmo quando a conta resolve. Rotas
+  já autenticadas (`change-password`, `logout-all`, `admin-reset-token`, MFA enroll/confirm/disable,
+  aprovação de cadastro) continuam corretamente atribuindo o usuário autenticado como ator.
+- **Correções incidentais na mesma rodada**: (1) login e MFA verify usavam `writeStore()` direto (em vez
+  de `commitStore()`) no caminho de credencial incorreta — sob concorrência real contra a mesma conta,
+  um `StoreConflictError` não tratado deixava a requisição sem resposta em vez de devolver 401/409;
+  corrigido para `commitStore()`. (2) mesmo padrão encontrado e corrigido em MFA confirm (enrolamento).
+
+**O que H3 NÃO fecha (deliberadamente fora desta rodada):** rate limiting na API geral fora das rotas de
+autenticação sensíveis; cabeçalhos `X-RateLimit-*` (H4); headers HTTP de hardening geral (H4); as 2
+vulnerabilidades altas conhecidas em `npm audit` (H9, inalteradas). Gate como um todo permanece **NO-GO
+PARA PRODUÇÃO**.
+
+**Testes:** 384/384 com Postgres real (374 da primeira rodada + 1 novo teste unitário em
+`tests/core.test.js` — falha de auditoria nunca impede o bloqueio — + 7 novos testes de proxy
+substituindo os 2 anteriores com premissa incorreta + 5 novos em `tests/h3-rate-limiting.test.js` —
+identidade canônica por `userId`, auditoria `RATE_LIMIT_TRIGGERED` e a correção de autoria da 3ª
+rodada), 0 falhando, nenhum teste removido.
+Cobertura inclui: limites por IP/identidade/combinado no login; proteção por challenge e por IP no MFA
+verify; forgot-password (resposta genérica preservada, e-mail ambíguo sem first-match); reset-token
+administrativo (aprovador vs. operador sem permissão); reset-password (token inválido repetido vs. token
+válido de uso único); multi-instância (contador compartilhado via Postgres, não reiniciado por
+instância); restart do processo (bloqueio sobrevive); concorrência real (rajada simultânea nunca aceita
+mais requisições que a política permite); anti-bypass (troca de User-Agent, X-Forwarded-For sem proxy
+confiável configurado, restart, troca de instância); resolução de proxy corrigida (1 e 2 proxies, com e
+sem entrada forjada, cadeia curta, IP sintaticamente inválido); identidade canônica (email/
+login_identifier da mesma conta compartilham bucket); auditoria (`RATE_LIMIT_TRIGGERED` deduplicado,
+sem dado bruto, falha não impede bloqueio, autoria nunca atribui a conta-alvo em rotas públicas e
+atribui corretamente o usuário autenticado em rotas autenticadas).
+
+**Por que "aguardando homologação" e não "concluído":** mesma razão do H1A/H1B/H2 — implementação
+testada e funcional, mas depende de revisão humana antes de qualquer autorização de uso.
+
 ## 16. Decisão final atual
 
 **NO-GO PARA PRODUÇÃO** — inalterado por esta rodada de hardening.
 
-Após o H1A/H1B/H2: **6 P0 abertos** (rate limiting global/por IP — H3, ausência de retenção/legal hold,
-ausência de incident response, backup/restore de produção não validado — H5, ausência de infraestrutura
-de deploy como código), **5 P1 abertos**, **5 P2** — 16 achados abertos, **9 fechados** (PG-01 a PG-09,
-ver seções 17/18/19). Na matriz da seção 5, as linhas "Persistência", "Sessões" e "Autenticação
-(credenciais)" deixam de bloquear; os demais 9 gates bloqueantes permanecem. Nenhum waiver foi emitido.
+Após o H1A/H1B/H2/H3: **4 P0 abertos** (ausência de retenção/legal hold — H8, ausência de incident
+response — H7, backup/restore de produção não validado — H5, ausência de infraestrutura de deploy como
+código — H11), **5 P1 abertos**, **5 P2** — 14 achados abertos, **11 fechados** (PG-01 a PG-11, ver
+seções 17/18/19/20). Na matriz da seção 5, as linhas "Persistência", "Sessões", "Autenticação
+(credenciais)" e "Rate limiting" deixam de bloquear; os demais 7 gates bloqueantes permanecem. Nenhum
+waiver foi emitido.
 O Sprint 2 permanece concluído no escopo homologado (`docs/DECISIONS.md`, D2-CLOSE) — este documento não
 o reabre nem contradiz; apenas formaliza que produção é um gate técnico/de negócio separado, ainda não
 atendido, e que
-o H1A/H1B/H2 avançaram critérios específicos de persistência/sessão/autenticação sem declarar o gate
-inteiro atendido.
+o H1A/H1B/H2/H3 avançaram critérios específicos de persistência/sessão/autenticação/rate limiting sem
+declarar o gate inteiro atendido.

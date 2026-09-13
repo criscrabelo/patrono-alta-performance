@@ -75,8 +75,17 @@ if (!TEST_DATABASE_URL) {
   test.after(async () => {
     await new Promise(resolve => server.close(resolve));
     const cleanup = new Pool({ connectionString: TEST_DATABASE_URL });
-    await cleanup.query('DROP TABLE IF EXISTS auth_sessions, auth_challenges, password_reset_tokens, legal_deadlines, legal_processes, audit_log, app_users, data_migrations, app_store CASCADE');
+    await cleanup.query('DROP TABLE IF EXISTS rate_limit_buckets, auth_sessions, auth_challenges, password_reset_tokens, legal_deadlines, legal_processes, audit_log, app_users, data_migrations, app_store CASCADE');
     await cleanup.end();
+  });
+
+  // Sprint 2, Hardening H3 (docs/DECISIONS.md, PROD-H3-01): zera os buckets de rate limit antes de cada
+  // teste — este arquivo faz login repetidas vezes (uso legítimo de teste), não deve ser afetado pelos
+  // novos limites (H3 tem sua própria suíte dedicada em tests/h3-rate-limiting.test.js).
+  test.beforeEach(async () => {
+    const pool = new Pool({ connectionString: TEST_DATABASE_URL });
+    await pool.query('DELETE FROM rate_limit_buckets');
+    await pool.end();
   });
 
   async function api(method, pathname, { token, json } = {}) {

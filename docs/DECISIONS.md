@@ -1045,6 +1045,209 @@ original acima — os complementa.
     considerado tecnicamente correto para revisão. O gate como um todo permanece **NO-GO PARA
     PRODUÇÃO**. H3–H11 não foram alterados.
 
+## 1.8. Hardening H3 — Decisão PROD-H3-01
+
+### PROD-H3-01 — Rate limiting global e proteção contra abuso distribuída
+
+**Status: IMPLEMENTADO / AGUARDANDO HOMOLOGAÇÃO** (ver `docs/PRODUCTION_GATE.md`, seção 20, para o
+detalhamento técnico completo — esta decisão não o duplica, apenas registra o que foi decidido).
+
+**Conteúdo da decisão:**
+
+1. **Limitador nunca em memória (`new Map()`) como fonte canônica.** Um limitador em processo perde todo
+   estado a cada restart e não funciona com múltiplas instâncias — permitiria bypass trivial alternando
+   processo/instância, exatamente o vetor de abuso que H3 existe para fechar. Estado compartilhado via
+   **PostgreSQL** (preferência explícita do escopo desta rodada sobre Redis — nenhuma dependência nova
+   adicionada).
+2. **Nova tabela `rate_limit_buckets`** (`migrations/007_h3_rate_limiting.sql`, aditiva — não altera
+   001-006): `bucket_key` (sempre um HMAC-SHA256 derivado, nunca o dado bruto), `scope`,
+   `window_started_at`, `count`, `blocked_until`, `updated_at`.
+3. **Camada isolada, deliberadamente FORA da ponte relacional H1B/H2** (`storage/index.js`, que faz CAS
+   por versão do DOCUMENTO inteiro) — `auth/rate-limit.js` e
+   `storage/repositories/rate-limits-repository.js` acessam o pool Postgres diretamente (nova função
+   `storage.getPool()`). Um incremento atômico por LINHA sob concorrência real (duas requisições
+   simultâneas no mesmo bucket nunca podem ambas ler `count=7` e gravar `count=8` quando o limite seria
+   8) exige uma única instrução SQL atômica (`INSERT ... ON CONFLICT DO UPDATE`, computando também
+   `blocked_until` no mesmo `SET` — nunca uma segunda consulta à tabela dentro do mesmo comando, que sob
+   o snapshot de uma CTE gravável do Postgres não enxergaria a linha recém-inserida na primeira gravação
+   de uma chave nova), sem transação explícita nem lock manual — nenhuma lógica de limite espalhada
+   manualmente pelas rotas de `server.js`.
+4. **Janela fixa determinística** — cada linha representa uma janela ativa por `bucket_key`; a mesma
+   instrução SQL reinicia a janela (count=1) se expirada, ou incrementa, sempre usando `now()` do
+   servidor Postgres (nunca um timestamp fornecido pelo cliente). Preferida sobre uma janela deslizante
+   ou um algoritmo de token bucket mais elaborado — atende ao pedido explícito de não implementar um
+   algoritmo excessivamente complexo, mantendo garantia real de atomicidade sob concorrência.
+5. **Resolução segura de IP do cliente** (`auth/client-ip.js`, `resolveClientIp()`) — `X-Forwarded-For`
+   NUNCA é confiado diretamente (forjável por qualquer requisição que fale direto com a aplicação).
+   Política explícita via `TRUST_PROXY_HOPS` (mesmo modelo numérico do `trust proxy` do Express/nginx):
+   `0` (padrão) usa sempre `req.socket.remoteAddress`, ignorando XFF por completo; `N >= 1` resolve
+   deterministicamente a entrada `chain.length - N` da cadeia — nunca a primeira entrada da esquerda
+   (forjável por um atacante que já chega ao primeiro proxy confiável com um X-Forwarded-For
+   pré-existente), nunca escolhida arbitrariamente por uma cadeia maior ou menor que o esperado.
+   **Correção pós-revisão técnica (PR #14):** a fórmula original desta decisão registrava
+   `chain.length - 1 - N` — um salto deslocado para a esquerda que, no caso mais comum (1 proxy
+   confiável, cadeia de 1 entrada), caía incorretamente para o IP do próprio proxy em vez do cliente; e,
+   com um `X-Forwarded-For` pré-forjado pelo atacante antes de chegar ao proxy, selecionava a entrada
+   forjada em vez da que o proxy confiável de fato observou — reabrindo exatamente o bypass que esta
+   proteção deveria impedir. O próprio teste original partia da mesma premissa errada da implementação,
+   por isso o CI verde não pegava o bug. Corrigida para `chain.length - N` (sem o "-1" adicional) e
+   coberta por casos de teste explícitos para 1 e 2 proxies confiáveis, com e sem entrada forjada. A
+   entrada final escolhida também passou a ser validada como um IPv4/IPv6 sintaticamente válido
+   (`node:net.isIP()`) — uma entrada inválida na posição certa nunca vira identidade de rate limit.
+   IPv4-mapped IPv6 (`::ffff:1.2.3.4`) é normalizado para não contar como duas identidades diferentes.
+   IP nunca é exposto em resposta HTTP.
+6. **Toda chave de bucket é derivada (HMAC-SHA256, `RATE_LIMIT_HMAC_KEY`), nunca o dado bruto
+   persistido** — minimização LGPD (item 30 do escopo): IP, e-mail/`login_identifier`, challenge id,
+   `userId` e token de reset são sempre hasheados antes de virar `bucket_key`. Nunca senha, OTP, token de
+   reset ou segredo MFA em qualquer bucket. `RATE_LIMIT_HMAC_KEY` segue exatamente o mesmo padrão de
+   `MFA_ENCRYPTION_KEY` (PROD-H2-01): obrigatória (≥32 caracteres) em produção
+   (`validateAuthRuntimeConfig()`, fail-fast no boot), cai para um valor fixo de desenvolvimento fora de
+   produção.
+7. **Buckets avaliados e política inicial conservadora** (centralizada em `POLICIES`, nunca números
+   soltos espalhados pelas rotas): login por IP (30/10min), por identidade (10/10min) e por IP+identidade
+   combinado (8/10min) — um atacante não pode testar muitas senhas para uma conta trocando de IP, nem
+   muitas contas a partir de um IP, nem escapar alternando só uma das duas dimensões. MFA verify por IP
+   (30/10min) e por challenge (10/10min) — o `attempts` já existente por challenge (H2) é preservado
+   integralmente; H3 acrescenta a proteção por ORIGEM por cima. Forgot-password por IP (10/15min) e por
+   identidade derivada do e-mail (3/15min) — mesmo com resposta sempre genérica, o endpoint pode ser
+   abusado para gerar tokens em massa. Reset-password por IP (10/15min) e por hash do token apresentado
+   (5/15min) — nunca o token bruto como chave persistida. Reset-token administrativo por operador
+   (10/15min) e por usuário-alvo (3/15min) — nunca permite geração em massa de tokens para o mesmo
+   alvo. Também avaliados e protegidos: change-password, logout-all, mfa/enroll, mfa/confirm,
+   mfa/disable, aprovação de cadastro — todos por usuário autenticado (`userId`), nunca só por IP. Nenhum
+   conflito com regra de negócio existente foi identificado nesta rodada; caso surja em homologação, a
+   política é ajustada e registrada aqui, nunca imposta silenciosamente por cima de uma regra já
+   homologada.
+8. **Resposta 429 genérica** ("Muitas tentativas. Tente novamente mais tarde.") em todo bloqueio — nunca
+   revela o contador, se a identidade existe, o limite interno específico ou o motivo exato do bloqueio.
+   `Retry-After` refletindo o bloqueio real quando disponível. Nenhum pacote completo de cabeçalhos de
+   rate limit (`X-RateLimit-*`) foi adicionado — fica para H4, para não misturar hardening HTTP geral
+   nesta rodada.
+9. **Fail-closed controlado.** Se a consulta ao backend Postgres do limitador falhar (conexão caiu,
+   timeout), a rota de autenticação responde 429 (bloqueado) com um `Retry-After` curto e fixo — nunca
+   permite tentativas ilimitadas por uma falha de infraestrutura, e nunca derruba a aplicação inteira por
+   uma falha pontual do limitador.
+10. **Limpeza oportunística** (baixa probabilidade a cada consumo real) remove linhas cuja janela/
+    bloqueio expiraram há mais tempo do que qualquer janela configurada precisaria manter — nunca exige
+    um cron externo obrigatório, nunca cresce indefinidamente.
+11. **Fora de produção, o fallback JSON desativa H3 por completo** (decisão explícita — alternativa B do
+    item 47 do escopo: "produção exige PostgreSQL; dev/test pode usar implementação local claramente
+    marcada como não production-grade" foi simplificada para "H3 fica inerte fora do PostgreSQL", em vez
+    de construir um segundo limitador em memória com garantias diferentes do runtime real de produção).
+    `rateLimit.backendAvailable()` verifica `storage.mode() === 'postgres' && storage.getPool() != null`;
+    quando falso, toda checagem retorna `allowed:true` — nunca contamina produção, que já exige
+    PostgreSQL por fail-fast desde H1A.
+12. **Fail-closed em produção**: `storage/postgres-store.js` (`REQUIRED_MIGRATIONS`/
+    `REQUIRED_CORE_TABLES`) passa a exigir a migration `007_h3_rate_limiting` e a tabela
+    `rate_limit_buckets` — sem elas, `schemaReady:false` e `init()` falha explicitamente, nunca cai
+    silenciosamente para um limitador em memória.
+13. **H2 (`failed_login_count`/`locked_until`, bloqueio POR CONTA) permanece completamente intocado** —
+    H3 é a camada COMPLEMENTAR de proteção por ORIGEM/abuso distribuído (IP, identidade resolvida antes
+    de autenticar, ou a combinação dos dois); nenhuma das duas substitui a outra.
+14. **Auditoria de rate limit não registrada como evento próprio nesta rodada** — os eventos de
+    auditoria já existentes (`LOGIN_FAILURE`, `MFA_FAILURE`, etc.) continuam sendo a fonte de auditoria
+    de negócio; um bloqueio de rate limit em si é observável operacionalmente pela própria tabela
+    `rate_limit_buckets` (nunca exposta por nenhuma rota) e pela resposta HTTP 429, sem duplicar em
+    `store.audit` um evento que não é uma ação de negócio de um usuário identificado.
+15. **Correção incidental descoberta durante a implementação, corrigida na mesma rodada**: o handler de
+    login e de verificação de MFA usavam `writeStore()` diretamente (em vez de `commitStore()`) no
+    caminho de senha/código incorreto — sob concorrência real contra a MESMA conta (exatamente o cenário
+    que o teste de concorrência de H3 exercita), um `StoreConflictError` não tratado nesse ponto virava
+    uma rejeição de promise não capturada pelo `try/catch` do roteador (que não alcança um `return
+    promise` sem `await`), deixando a requisição sem resposta indefinidamente em vez de devolver
+    401/409. Corrigido para usar `commitStore()` (mesma disciplina já aplicada em todas as demais rotas
+    de mutação) nos dois pontos afetados — nenhuma outra rota tinha esse padrão.
+16. **Esta decisão não fecha o Gate de Produção nem declara H3 integralmente concluído** — apenas os
+    critérios PG-10 (fração de rate limiting por IP/global) e PG-11 de `docs/PRODUCTION_GATE.md` são
+    fechados (ver seção 20). O gate como um todo permanece **NO-GO PARA PRODUÇÃO**. H4–H11 não foram
+    alterados por esta decisão.
+
+Esta decisão não altera D1/D4/D2-CLOSE/PROD-GATE-01/PROD-H1-01/PROD-H1B-01/PROD-H2-01 já homologadas —
+apenas registra o avanço específico do H3 dentro do gate de produção já aberto.
+
+### PROD-H3-01 — Adendo (revisão técnica pós-PR #14): correção do off-by-one em TRUST_PROXY_HOPS,
+### identidade canônica de rate limit e auditoria RATE_LIMIT_TRIGGERED
+
+**Status: IMPLEMENTADO / AGUARDANDO REVISÃO FINAL.** Correção de um blocker e duas lacunas identificados
+na revisão técnica humana do PR #14, antes de qualquer merge. Não reabre nem contradiz os 16 itens da
+decisão original acima — os complementa e corrige um deles (item 5).
+
+17. **BLOCKER corrigido — `TRUST_PROXY_HOPS` selecionava a posição errada da cadeia.** A fórmula
+    original (`chain.length - 1 - N`) estava desalinhada um salto para a esquerda. No cenário mais comum
+    (1 proxy confiável, cadeia de 1 entrada), a fórmula produzia um índice negativo e caía
+    incorretamente para `req.socket.remoteAddress` (o IP do PRÓPRIO PROXY) em vez do cliente real — todo
+    usuário passava a compartilhar a mesma identidade de rate limit (a do proxy). Pior: com um
+    `X-Forwarded-For` já pré-forjado pelo atacante antes de chegar ao proxy confiável (que ACRESCENTA,
+    nunca substitui, o endereço real que observou), a fórmula errada selecionava a entrada FORJADA em
+    vez da real — reabrindo exatamente o bypass de rate limiting que H3 existe para fechar. O próprio
+    teste original (`tests/core.test.js`) partia da mesma premissa errada da implementação, por isso o
+    CI verde do PR #14 não pegava o bug — só uma revisão técnica humana da semântica (não apenas da
+    cobertura de teste) identificou a inconsistência. Corrigida para `chain.length - N` (sem o "-1"
+    adicional), com testes explícitos para 1 e 2 proxies confiáveis, com e sem entrada forjada, cadeia
+    mais curta que o esperado (fallback seguro) e IPv4/IPv6 sintaticamente inválido na posição resolvida
+    (`node:net.isIP()`, nenhuma dependência nova) — nunca vira identidade legítima de rate limit.
+18. **Identidade canônica de rate limit por `userId`.** A chave de identidade/combinado do login e do
+    identity do forgot-password usava o valor BRUTO apresentado (`input.login || input.email`) — como
+    `email` e `login_identifier` são dois identificadores válidos para a MESMA conta (PROD-H2-01, item
+    16), eles geravam chaves HMAC diferentes, permitindo a um atacante até dobrar o teto de tentativas
+    apenas alternando qual identificador apresenta a cada requisição. Corrigido: a identidade é resolvida
+    ANTES de consumir os buckets de identidade/combinado (o bucket de IP continua sendo consumido
+    primeiro, sempre) e, quando resolve para exatamente uma conta ativa, a chave passa a ser
+    `user:${id}` — canônica para qualquer identificador que aponte para essa conta. Quando a conta não
+    resolve, o identificador normalizado apresentado continua sendo usado (não há conta real para
+    unificar). Resolver a identidade nesse ponto não altera o comportamento externo em nada — a mesma
+    resolução já era necessária mais abaixo para autenticar; anti-enumeração preservada (a resposta
+    nunca depende de qual ramo foi percorrido).
+19. **Auditoria `RATE_LIMIT_TRIGGERED` implementada** (pendente desde a decisão original, item 14 —
+    "nenhum evento próprio de rate limit foi implementado nesta rodada"). Registrada SOMENTE na
+    transição exata em que um bucket passa a bloquear (`count === limit + 1`, calculado a partir do
+    contador atômico já existente — nenhuma coluna/estado extra necessário) — nunca em todo 429
+    subsequente dentro da mesma janela, o que evitaria transformar uma rajada de milhares de requisições
+    bloqueadas num flood da própria tabela de auditoria. Nunca registra IP/e-mail/login_identifier/
+    senha/OTP/token/segredo MFA em texto puro — `category` é sempre um rótulo estático da rota (nunca o
+    valor real usado para derivar a chave do bucket). A decisão de bloquear (429) é SEMPRE prioritária —
+    uma falha ao gravar esta auditoria (inclusive um `StoreConflictError` concorrente) nunca impede a
+    resposta 429 nem "libera" a requisição; todo erro é capturado e descartado internamente
+    (`auditRateLimitAndBlock()`, `server.js`), nunca propagado. **A autoria (`responsible`) deste evento
+    foi corrigida em uma revisão subsequente — ver item 21.**
+20. **Esta correção não fecha nenhum critério adicional do Gate de Produção além dos já fechados pela
+    decisão original (PG-10/PG-11)** — apenas resolve um blocker de segurança e duas lacunas que
+    impediam H3 de ser considerado tecnicamente correto para revisão final. O gate como um todo
+    permanece **NO-GO PARA PRODUÇÃO**. H4–H11 não foram alterados.
+
+### PROD-H3-01 — Segundo adendo (revisão técnica, 3ª rodada do PR #14): autoria de RATE_LIMIT_TRIGGERED
+### nunca atribui o alvo da tentativa como ator
+
+**Status: IMPLEMENTADO / AGUARDANDO REVISÃO FINAL.** Correção de um P1 identificado na revisão técnica
+humana do PR #14, antes de qualquer merge. Não reabre nem contradiz os itens anteriores — corrige a
+autoria descrita no item 19 acima.
+
+21. **P1 corrigido — `RATE_LIMIT_TRIGGERED` atribuía o ALVO da tentativa como se fosse o autor.** Em
+    `login` (bucket de identidade) e `forgot-password` (bucket de identidade), quando o e-mail/
+    `login_identifier` apresentado resolvia para uma conta real, essa conta era passada como
+    `authenticatedActor` para `auditRateLimitAndBlock()` — e virava `responsible` no evento de
+    auditoria. Isso é semanticamente incorreto: ALVO DA TENTATIVA (a conta potencialmente sob ataque,
+    resolvida apenas para computar a chave de bucket canônica — item 18) é diferente de AUTOR DA
+    TENTATIVA (que em rotas públicas/não autenticadas é sempre desconhecido). O escopo original desta
+    decisão já previa "`actorUserId`: somente quando já autenticado" — o bug divergia dessa regra.
+    Corrigido: os dois pontos afetados (`login-identity`, `forgot-password-identity`) passam sempre
+    `null` (resolve para o ator anônimo explícito) — a conta encontrada continua sendo usada para
+    computar a chave canônica do bucket (item 18, inalterado), mas nunca mais aparece como
+    `responsible` do bloqueio. Rotas que já passam por autenticação de sessão válida (`logout-all`,
+    `change-password`, `mfa/enroll`, `mfa/confirm`, `mfa/disable`, `admin-reset-token`, aprovação de
+    cadastro) continuam corretamente atribuindo o próprio usuário autenticado como ator — nelas não há
+    ambiguidade entre alvo e autor, o autor é genuinamente conhecido pela sessão. O parâmetro do helper
+    foi renomeado de `actorUser` para `authenticatedActor`, com a semântica documentada explicitamente
+    no próprio código: nunca inferir o ator a partir do alvo.
+22. **Nenhum dado sensível adicional foi registrado para compensar.** Não foi adicionado e-mail bruto,
+    `login_identifier` bruto, IP bruto, token, challenge ou segredo ao evento de auditoria para
+    "recuperar" a correlação com o alvo — mantém a mesma minimização já estabelecida (item 19). Uma
+    eventual necessidade futura de correlacionar o alvo de um bloqueio fica para uma decisão separada,
+    não implementada nesta rodada.
+23. **Esta correção não fecha nenhum critério adicional do Gate de Produção** — apenas corrige a autoria
+    de um evento de auditoria já registrado pela decisão original. O gate como um todo permanece
+    **NO-GO PARA PRODUÇÃO**. H4–H11 não foram alterados.
+
 ---
 
 ## 2. ADRs de Engenharia — Fase 0 (Sprint 1)
