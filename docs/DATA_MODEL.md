@@ -145,7 +145,56 @@ colaborador Jurídico) veem apenas os metadados técnicos (ação, responsável,
 
 Nenhuma tela nova de UI foi construída nesta Fase 2 — listagem/filtro/detalhe existem como capacidade de
 API; a semântica de copy "Confirmado pelo Jurídico" (D1.4) permanece pendente para quando houver uma tela
-dedicada. Agenda/Atenção e Google Calendar não foram tocados (Fase 3, não iniciada).
+dedicada.
+
+## Sprint 2, Fase 3 — implementada (Agenda/Atenção mínima)
+
+Slice mínimo de Agenda/Atenção, consumindo **somente** entidades canônicas já existentes. `Legal
+Deadline` continua sendo a única fonte de verdade de prazo jurídico — Agenda/Atenção nunca se tornam
+source of truth, apenas camada de visualização/orquestração (princípio canônico da Fase 3).
+
+**`GET /api/agenda-items`** — combina, sem persistir nada novo:
+- Itens de `legalDeadlines`, montados por `legalDeadlineAgendaItems()` sobre `scopedLegalDeadlineRows()`
+  (mesmo helper de defesa em profundidade da Fase 2 — escopo checado sobre o prazo **e** sobre o
+  Legal Process relacionado, nunca só sobre o campo gravado no prazo). Cada item traz `entityType:
+  'legalDeadline'`, `entityId`, `processId`, `process:{id,title}`, `date`, `origin`, `originType`,
+  `status`, `overdue` (via `isLegalDeadlineOverdue()`), `dataIntegrity` (via `legalDeadlineIntegrityFlag()`)
+  e `target` (a mesma URL de detalhe da Fase 2 — `/api/entities/legalDeadlines/:id/detail`).
+- Itens de `store.agenda`, a entidade de compromissos manuais **pré-existente** (título, prioridade,
+  responsável, classificação — já com seu próprio `GET`/`POST /api/agenda`, module `'agenda'`). A Fase 3
+  não a substitui nem a redefine: `agendaEventItems()` apenas a inclui como mais uma fonte na mesma view
+  combinada, com `entityType: 'agendaEvent'`.
+- Cada fonte só entra na resposta se o usuário tiver o módulo correspondente
+  (`allowedInDepartment(user,'juridico','read')` para Legal Deadline, `allowed(user,'agenda','read')`
+  para os eventos manuais) — um usuário de TI, por exemplo, nunca recebe itens `legalDeadline`.
+- Ordenação determinística (`sortAgendaItems()`): `date` → `entityType` → `entityId`, comparação
+  lexicográfica de string `YYYY-MM-DD` (mesmo padrão civil já usado em todo o Sprint 2, sem conversão
+  para `Date`/UTC).
+
+**`GET /api/attention`** — só Legal Deadline (`legalDeadlineAttentionItems()`), com três categorias de
+**apresentação** (nunca persistidas, nunca um quinto valor de `status` — o enum `ativo`/`suspenso`/
+`cumprido`/`cancelado` da Fase 1 não muda):
+- `OVERDUE` — via `isLegalDeadlineOverdue()`, reutilizada tal como está (nenhuma segunda regra de
+  atraso).
+- `UPCOMING` — `status === 'ativo'` e `date` dentro da janela de `civilDateAfterDays(30)` (a mesma
+  janela de 30 dias já usada no dashboard `legal` da Fase 2 — nenhum segundo conceito de "próximo").
+- `REQUIRES_REVIEW` — via `legalDeadlineIntegrityFlag()` (Fase 2), para registros legados sem
+  `originType`/`status`. Um registro assim nunca também aparece como `OVERDUE`/`UPCOMING` (sem
+  `status==='ativo'` confiável, `isLegalDeadlineOverdue()` já retorna `false`).
+
+**Sem duplicação:** nenhuma coleção nova foi criada (`agendaDeadline`, `agendaLegalDeadline`,
+`copiedDeadline`, `deadlineSnapshot` ou equivalente). As duas rotas são `GET` puros — nada é criado,
+alterado ou migrado por elas; se o `date`/`status` do Legal Deadline mudar via `PATCH` (Fase 1), a
+próxima chamada às views já reflete o novo estado, sem nenhum segundo registro persistido.
+
+**JUDICIAL_PROCESSUAL × INTERNAL_CONTROL:** ambos aparecem na Agenda/Atenção com `originType` preservado
+tal como está no registro — a API nunca converte um no outro nem infere um rótulo de "prazo processual"
+para `INTERNAL_CONTROL`; essa distinção de apresentação fica a cargo de quem consome a resposta.
+
+**Não implementado nesta Fase 3** (fora do escopo autorizado): Google Calendar, automações/reminders/
+notificações, cálculo automático de prazo, criação automática de Task a partir de Legal Deadline, e
+"Minha Semana" (sem um campo confiável de responsável/atribuição por usuário em Legal Deadline hoje,
+essa visão exigiria inventar esse campo — fica documentada como pendente, não forçada nesta rodada).
 
 ### Registros legados anteriores à D1 — sem backfill automático
 

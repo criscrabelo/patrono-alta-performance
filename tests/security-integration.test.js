@@ -1634,3 +1634,302 @@ test('[HTTP] dashboard "legal": deny-by-default também por speId — usuário d
   const after = await api('GET', '/api/dashboards/legal', { token: tokenSpeX });
   assert.equal(after.body.widgets['active-processes'].data.value, activeBefore, 'usuário da SPE X não vê a contagem aumentar com um processo de outra SPE (SPE Y)');
 });
+
+// ============================================================================================
+// Sprint 2, Fase 3 — testes HTTP (Agenda/Atenção mínima, Legal Deadline como fonte canônica).
+// Nenhum teste anterior foi removido — os 168 anteriores continuam.
+// ============================================================================================
+
+test('[HTTP] GET /api/agenda-items: líder Jurídico vê itens autorizados (Legal Deadline + evento manual de agenda)', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Prazo para Agenda', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(created.status, 201);
+  const evento = await api('POST', '/api/agenda', { token, json: { title: 'Reunião de Agenda Fase 3', date: '2026-12-05' } });
+  assert.equal(evento.status, 201);
+
+  const res = await api('GET', '/api/agenda-items', { token });
+  assert.equal(res.status, 200);
+  assert.ok(res.body.items.some(item => item.entityType === 'legalDeadline' && item.entityId === created.body.id), 'Legal Deadline aparece na Agenda');
+  assert.ok(res.body.items.some(item => item.entityType === 'agendaEvent' && item.entityId === evento.body.id), 'evento manual de agenda também aparece, como fonte independente');
+});
+
+test('[HTTP] GET /api/agenda-items: líder de TI não vê agenda jurídica (nenhum item legalDeadline)', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  await api('POST', '/api/entities/legalDeadlines', { token: tokenJuridico, json: { processId: 'proc-juridico-teste', origin: 'Prazo restrito ao Jurídico (Fase 3)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+
+  const tokenTi = await loginAs(EMAILS.liderTi);
+  const res = await api('GET', '/api/agenda-items', { token: tokenTi });
+  assert.equal(res.status, 200);
+  assert.ok(!res.body.items.some(item => item.entityType === 'legalDeadline'), 'TI nunca vê item de Legal Deadline na Agenda combinada');
+});
+
+test('[HTTP] GET /api/agenda-items e /api/attention: administrador técnico não vê conteúdo jurídico', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  await api('POST', '/api/entities/legalDeadlines', { token: tokenJuridico, json: { processId: 'proc-juridico-teste', origin: 'Prazo para teste de administrador (Fase 3)', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL' } });
+
+  const tokenAdministrador = await loginAs(EMAILS.administrador);
+  const agendaItems = await api('GET', '/api/agenda-items', { token: tokenAdministrador });
+  assert.equal(agendaItems.status, 200, 'administrador passa no gate de módulo (gestão técnica), mas...');
+  assert.ok(!agendaItems.body.items.some(item => item.entityType === 'legalDeadline'), '...nenhum item de Legal Deadline aparece — scoped() nega por ausência de escopo global/departamental');
+
+  const attention = await api('GET', '/api/attention', { token: tokenAdministrador });
+  assert.equal(attention.status, 200);
+  assert.deepEqual(attention.body.items, []);
+  assert.deepEqual(attention.body.summary, { overdue: 0, upcoming: 0, requiresReview: 0 });
+});
+
+test('[HTTP] GET /api/agenda-items: diretoria vê o consolidado conforme alçada global', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token: tokenJuridico, json: { processId: 'proc-juridico-teste', origin: 'Prazo visível à diretoria (Fase 3)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(created.status, 201);
+
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  const res = await api('GET', '/api/agenda-items', { token: tokenDiretoria });
+  assert.equal(res.status, 200);
+  assert.ok(res.body.items.some(item => item.entityType === 'legalDeadline' && item.entityId === created.body.id), 'diretoria (alçada global) vê o Legal Deadline do Jurídico normalmente');
+});
+
+test('[HTTP] GET /api/agenda-items e /api/attention: companyId fora de escopo não aparece', async () => {
+  const store = readStore();
+  store.users.push(
+    { id: 'usr-teste-fase3-empresa-a', name: 'Líder Fase3 Empresa A', email: 'lider.fase3.empresa.a@coevo.local', role: 'lider', department: 'Jurídico', companyId: 'fase3-empresa-a', mfa: false }
+  );
+  store.records.processos.push({ id: 'proc-fase3-empresa-b', source: 'monday', department: 'Jurídico', companyId: 'fase3-empresa-b', title: 'Processo Fase 3 Empresa B', deletedAt: null });
+  writeStore(store);
+
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token: tokenDiretoria, json: { processId: 'proc-fase3-empresa-b', origin: 'Prazo empresa B (Fase 3)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', companyId: 'fase3-empresa-b', department: 'Jurídico' } });
+  assert.equal(created.status, 201);
+
+  const tokenEmpresaA = await loginAs('lider.fase3.empresa.a@coevo.local');
+  const agendaItems = await api('GET', '/api/agenda-items', { token: tokenEmpresaA });
+  assert.ok(!agendaItems.body.items.some(item => item.entityId === created.body.id), 'usuário da empresa A não vê Legal Deadline da empresa B na Agenda');
+  const attention = await api('GET', '/api/attention', { token: tokenEmpresaA });
+  assert.ok(!attention.body.items.some(item => item.entityId === created.body.id), 'nem em Atenção');
+});
+
+test('[HTTP] GET /api/agenda-items e /api/attention: speId fora de escopo não aparece', async () => {
+  const store = readStore();
+  store.users.push({ id: 'usr-teste-fase3-spe-x', name: 'Líder Fase3 SPE X', email: 'lider.fase3.spe.x@coevo.local', role: 'lider', department: 'Jurídico', speId: 'fase3-spe-x', mfa: false });
+  store.records.processos.push({ id: 'proc-fase3-spe-y', source: 'monday', department: 'Jurídico', speId: 'fase3-spe-y', title: 'Processo Fase 3 SPE Y', deletedAt: null });
+  writeStore(store);
+
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token: tokenDiretoria, json: { processId: 'proc-fase3-spe-y', origin: 'Prazo SPE Y (Fase 3)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', speId: 'fase3-spe-y', department: 'Jurídico' } });
+  assert.equal(created.status, 201);
+
+  const tokenSpeX = await loginAs('lider.fase3.spe.x@coevo.local');
+  const agendaItems = await api('GET', '/api/agenda-items', { token: tokenSpeX });
+  assert.ok(!agendaItems.body.items.some(item => item.entityId === created.body.id), 'usuário da SPE X não vê Legal Deadline da SPE Y na Agenda');
+  const attention = await api('GET', '/api/attention', { token: tokenSpeX });
+  assert.ok(!attention.body.items.some(item => item.entityId === created.body.id));
+});
+
+test('[HTTP] GET /api/attention: contagem de summary não vaza item fora de escopo (comparação antes/depois por usuário)', async () => {
+  const store = readStore();
+  store.users.push({ id: 'usr-teste-fase3-attention-a', name: 'Líder Fase3 Attention A', email: 'lider.fase3.attention.a@coevo.local', role: 'lider', department: 'Jurídico', companyId: 'fase3-attention-a', mfa: false });
+  writeStore(store);
+
+  const tokenA = await loginAs('lider.fase3.attention.a@coevo.local');
+  const before = await api('GET', '/api/attention', { token: tokenA });
+  assert.equal(before.status, 200);
+  const overdueBefore = before.body.summary.overdue;
+
+  // Cria um Legal Deadline vencido em OUTRA empresa (diretoria tem alçada global para criar/relacionar).
+  const store2 = readStore();
+  store2.records.processos.push({ id: 'proc-fase3-attention-b', source: 'monday', department: 'Jurídico', companyId: 'fase3-attention-b', title: 'Processo Fase 3 Attention B', deletedAt: null });
+  writeStore(store2);
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  await api('POST', '/api/entities/legalDeadlines', { token: tokenDiretoria, json: { processId: 'proc-fase3-attention-b', origin: 'Vencido empresa B (Fase 3)', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL', companyId: 'fase3-attention-b', department: 'Jurídico' } });
+
+  const after = await api('GET', '/api/attention', { token: tokenA });
+  assert.equal(after.body.summary.overdue, overdueBefore, 'summary.overdue do usuário da empresa A não aumenta com o prazo vencido de outra empresa');
+});
+
+test('[HTTP] item de Legal Deadline na Agenda referencia o detalhe correto (target aponta para o mesmo registro)', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Prazo com target (Fase 3)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  const agendaItems = await api('GET', '/api/agenda-items', { token });
+  const item = agendaItems.body.items.find(i => i.entityId === created.body.id);
+  assert.ok(item, 'item deve existir na Agenda');
+  assert.equal(item.target, `/api/entities/legalDeadlines/${created.body.id}/detail`);
+
+  const detail = await api('GET', item.target, { token });
+  assert.equal(detail.status, 200);
+  assert.equal(detail.body.id, created.body.id, 'o target da Agenda leva exatamente ao mesmo Legal Deadline, via o endpoint de detalhe já existente');
+});
+
+test('[HTTP] processo relacionado fora de escopo bloqueia o item de Agenda/Atenção mesmo com o prazo no escopo do usuário', async () => {
+  // Cenário de defesa em profundidade (item 13 do plano): um Legal Deadline com department/companyId
+  // "corretos" no próprio registro, mas cujo processo relacionado foi movido/arquivado para fora do
+  // escopo do usuário, nunca deve aparecer — nem na Agenda, nem em Atenção.
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token: tokenJuridico, json: { processId: 'proc-juridico-teste', origin: 'Prazo com processo depois arquivado (Fase 3)', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(created.status, 201);
+
+  const store = readStore();
+  const process = store.records.processos.find(p => p.id === 'proc-juridico-teste');
+  process.deletedAt = new Date().toISOString();
+  writeStore(store);
+
+  try {
+    const agendaItems = await api('GET', '/api/agenda-items', { token: tokenJuridico });
+    assert.ok(!agendaItems.body.items.some(item => item.entityId === created.body.id), 'processo relacionado arquivado bloqueia o item mesmo com o prazo tecnicamente no escopo do usuário');
+    const attention = await api('GET', '/api/attention', { token: tokenJuridico });
+    assert.ok(!attention.body.items.some(item => item.entityId === created.body.id));
+  } finally {
+    const restore = readStore();
+    const restoredProcess = restore.records.processos.find(p => p.id === 'proc-juridico-teste');
+    restoredProcess.deletedAt = null;
+    writeStore(restore);
+  }
+});
+
+test('[HTTP] processo sem Legal Deadline não gera prazo na Agenda/Atenção', async () => {
+  const store = readStore();
+  store.records.processos.push({ id: 'proc-fase3-sem-prazo', source: 'monday', department: 'Jurídico', title: 'Processo Fase 3 sem prazo', deletedAt: null });
+  writeStore(store);
+
+  const token = await loginAs(EMAILS.liderJuridico);
+  const agendaItems = await api('GET', '/api/agenda-items', { token });
+  assert.ok(!agendaItems.body.items.some(item => item.processId === 'proc-fase3-sem-prazo'), 'processo sem nenhum Legal Deadline não aparece como prazo na Agenda');
+});
+
+test('[HTTP] regressão obrigatória: DATA/CITAÇÃO do processo Monday nunca aparecem como prazo na Agenda/Atenção', async () => {
+  const store = readStore();
+  store.records.processos.push({
+    id: 'proc-fase3-data-bruta', source: 'monday', department: 'Jurídico', title: 'Processo Fase 3 com DATA/CITAÇÃO',
+    columnsByTitle: { DATA: '2026-09-01', 'CITAÇÃO/PROTOCOLO': '2026-09-02' }, deletedAt: null
+  });
+  writeStore(store);
+
+  const token = await loginAs(EMAILS.liderJuridico);
+  const agendaItems = await api('GET', '/api/agenda-items', { token });
+  const attention = await api('GET', '/api/attention', { token });
+  const flatten = JSON.stringify(agendaItems.body) + JSON.stringify(attention.body);
+  assert.ok(!flatten.includes('2026-09-01') && !flatten.includes('2026-09-02'), 'DATA/CITAÇÃO do processo nunca aparecem como prazo, mesmo sem nenhum Legal Deadline cadastrado');
+});
+
+test('[HTTP] INTERNAL_CONTROL nunca recebe label/campo de prazo processual na Agenda', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Controle interno (Fase 3)', date: '2026-12-01', originType: 'INTERNAL_CONTROL' } });
+  assert.equal(created.status, 201);
+
+  const agendaItems = await api('GET', '/api/agenda-items', { token });
+  const item = agendaItems.body.items.find(i => i.entityId === created.body.id);
+  assert.ok(item);
+  assert.equal(item.originType, 'INTERNAL_CONTROL', 'originType é preservado tal como está — a camada de apresentação decide o rótulo, nunca a API o converte');
+});
+
+test('[HTTP] requires_review não é tratado como confirmado — registro legado sem originType/status aparece sinalizado, nunca como Legal Deadline válido', async () => {
+  const store = readStore();
+  store.records.legalDeadlines.push({ id: 'ld-fase3-legado', processId: 'proc-juridico-teste', origin: 'Registro legado pré-D1 (Fase 3)', date: '2020-01-01', department: 'Jurídico', version: 1, createdAt: new Date().toISOString(), createdBy: 'seed' });
+  writeStore(store);
+
+  const token = await loginAs(EMAILS.liderJuridico);
+  const agendaItems = await api('GET', '/api/agenda-items', { token });
+  const item = agendaItems.body.items.find(i => i.entityId === 'ld-fase3-legado');
+  assert.ok(item, 'registro legado ainda aparece na Agenda (não é ocultado silenciosamente)');
+  assert.equal(item.dataIntegrity, 'requires_review');
+  assert.equal(item.originType, undefined, 'nenhum originType foi inferido');
+
+  const attention = await api('GET', '/api/attention', { token });
+  const attentionItem = attention.body.items.find(i => i.entityId === 'ld-fase3-legado');
+  assert.ok(attentionItem, 'registro legado aparece em Atenção');
+  assert.equal(attentionItem.category, 'REQUIRES_REVIEW', 'nunca tratado como vencido/próximo/confirmado — apenas sinalizado para revisão');
+});
+
+test('[HTTP] GET /api/attention: suspended/completed/cancelled nunca aparecem como OVERDUE, mesmo com data passada', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const suspenso = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Suspenso vencido (Fase 3)', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  await api('PATCH', `/api/entities/legalDeadlines/${suspenso.body.id}`, { token, json: { status: 'suspenso' } });
+  const cumprido = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Cumprido vencido (Fase 3)', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  await api('PATCH', `/api/entities/legalDeadlines/${cumprido.body.id}`, { token, json: { status: 'cumprido' } });
+  const cancelado = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Cancelado vencido (Fase 3)', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  await api('PATCH', `/api/entities/legalDeadlines/${cancelado.body.id}`, { token, json: { status: 'cancelado' } });
+
+  const attention = await api('GET', '/api/attention', { token });
+  for (const id of [suspenso.body.id, cumprido.body.id, cancelado.body.id]) {
+    const item = attention.body.items.find(i => i.entityId === id);
+    assert.ok(!item, `Legal Deadline ${id} (suspenso/cumprido/cancelado) nunca aparece em Atenção como vencido`);
+  }
+});
+
+test('[HTTP] GET /api/agenda-items e /api/attention não criam nem alteram nada (idempotentes)', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const before = readStore();
+  const legalCountBefore = before.records.legalDeadlines.length;
+  const agendaCountBefore = (before.agenda || []).length;
+
+  await api('GET', '/api/agenda-items', { token });
+  await api('GET', '/api/attention', { token });
+  await api('GET', '/api/agenda-items', { token });
+
+  const after = readStore();
+  assert.equal(after.records.legalDeadlines.length, legalCountBefore, 'GET não cria nenhum Legal Deadline');
+  assert.equal((after.agenda || []).length, agendaCountBefore, 'GET não cria nenhum evento de agenda');
+});
+
+// --- Testes de regressão obrigatórios (itens 27, 28 e 29 do plano da Fase 3) ---
+
+test('[HTTP] não duplicidade: chamadas repetidas de Agenda/Atenção/detalhe nunca criam um segundo Legal Deadline', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Prazo único (não duplicidade)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(created.status, 201);
+  const id = created.body.id;
+
+  await api('GET', '/api/agenda-items', { token });
+  await api('GET', '/api/attention', { token });
+  await api('GET', `/api/entities/legalDeadlines/${id}/detail`, { token });
+  await api('GET', '/api/agenda-items', { token });
+
+  const store = readStore();
+  const matching = store.records.legalDeadlines.filter(item => item.origin === 'Prazo único (não duplicidade)');
+  assert.equal(matching.length, 1, 'continua existindo apenas 1 Legal Deadline persistido — nenhuma view criou um novo registro de prazo');
+});
+
+test('[HTTP] Agenda é view, não source of truth: alteração da date no Legal Deadline reflete na Agenda sem criar segundo item', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Prazo com data alterada (Fase 3)', date: '2026-09-20', originType: 'JUDICIAL_PROCESSUAL' } });
+  const id = created.body.id;
+
+  const before = await api('GET', '/api/agenda-items', { token });
+  const itemBefore = before.body.items.find(i => i.entityId === id);
+  assert.equal(itemBefore.date, '2026-09-20');
+
+  const patched = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { date: '2026-09-25' } });
+  assert.equal(patched.status, 200);
+
+  const after = await api('GET', '/api/agenda-items', { token });
+  const itemsAfter = after.body.items.filter(i => i.entityId === id);
+  assert.equal(itemsAfter.length, 1, 'nenhum segundo item foi persistido pela alteração');
+  assert.equal(itemsAfter[0].date, '2026-09-25', 'a Agenda reflete o novo estado a partir da entidade canônica');
+
+  const store = readStore();
+  assert.equal(store.records.legalDeadlines.filter(item => item.id === id).length, 1);
+});
+
+test('[HTTP] reabertura: suspenso não aparece como overdue; após reabertura com reason, Agenda/Atenção passam a refletir overdue no mesmo id', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Prazo para reabertura (Fase 3)', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  const id = created.body.id;
+
+  const suspended = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { status: 'suspenso', reason: 'Suspensão para o teste de Fase 3' } });
+  assert.equal(suspended.status, 200);
+
+  const attentionSuspenso = await api('GET', '/api/attention', { token });
+  assert.ok(!attentionSuspenso.body.items.some(i => i.entityId === id), 'suspenso não aparece em Atenção como vencido, mesmo com data passada');
+
+  const reopened = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { status: 'ativo', reason: 'Reabertura para o teste de Fase 3' } });
+  assert.equal(reopened.status, 200);
+  assert.equal(reopened.body.id, id, 'reabertura preserva o mesmo id');
+
+  const attentionReaberto = await api('GET', '/api/attention', { token });
+  const item = attentionReaberto.body.items.find(i => i.entityId === id);
+  assert.ok(item, 'após a reabertura, o mesmo Legal Deadline volta a aparecer em Atenção');
+  assert.equal(item.category, 'OVERDUE', 'como a data já passou, a reabertura reflete overdue imediatamente — sem lógica duplicada');
+
+  const agendaItems = await api('GET', '/api/agenda-items', { token });
+  const agendaItem = agendaItems.body.items.find(i => i.entityId === id);
+  assert.equal(agendaItem.overdue, true);
+});
