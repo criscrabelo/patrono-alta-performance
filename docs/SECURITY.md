@@ -555,3 +555,23 @@ original nem dispara um segundo alerta (anti-recursão testada explicitamente). 
 explicitamente ABERTO**: o lado da aplicação está implementado e testado com evidência real, mas nenhum
 agregador/coletor de logs de produção nem destino de alerta real foram configurados ou exercitados
 nesta rodada — sem infraestrutura provisionada (depende de H11). Gate como um todo permanece NO-GO.
+
+**H7 (Incident Response) implementado PARCIALMENTE — PG-20 permanece aberto** (`docs/DECISIONS.md`,
+PROD-H7-01; `docs/PRODUCTION_GATE.md`, seção 24; `docs/INCIDENT_RESPONSE.md`): processo operacional de
+resposta a incidentes — severidade (SEV-1..SEV-4) com critérios objetivos, 13 categorias, 6 papéis
+funcionais (nunca nomes pessoais hardcoded), lifecycle de 11 estados, checklist de 18 itens, modelo de
+registro (`incidentId` formato `INC-YYYYMMDD-XXXXXXXX`, gerado via `crypto.randomBytes`), 5 runbooks
+específicos (auth/dados/disponibilidade/backup-restore/segredos — o runbook de backup/restore reaproveita
+H5 sem alterar `BackupTrackingError`/`RestoreEvidenceError`), templates de comunicação/postmortem,
+exercício de mesa (tabletop) validando que o processo é executável, e `scripts/create-incident.js`
+(nunca aceita caminho arbitrário — diretório de saída fixo `incidents/`, nunca versionado; nunca
+sobrescreve registro existente; valida severidade/categoria contra listas fechadas; sanitiza o resumo
+removendo quebra de linha, impedindo forjar outro campo). Nenhum dado pessoal/segredo é armazenado no
+registro de incidente por design (evidência por referência: `requestId`/`backupId`/`restoreId`/evento de
+log, nunca `Authorization`/senha/segredo MFA/`DATABASE_URL`/payload integral). O runbook inclui o
+gatilho `legalHoldReviewRequired` (revisão jurídica, nunca uma política de retenção em si — H8
+permanece fora de escopo) e a etapa de avaliação de dado pessoal/LGPD (sem fixar prazo regulatório sem
+validação jurídica real). **PG-20 permanece explicitamente ABERTO**: o processo está implementado e
+testado, mas nenhum canal de comunicação real (`INCIDENT_PRIMARY_CHANNEL`/`INCIDENT_SECONDARY_CHANNEL`/
+`INCIDENT_SECURITY_CONTACT`/`INCIDENT_PRIVACY_CONTACT`) nem nome individual real foi parametrizado nesta
+rodada — decisão operacional pré-produção, nunca inventada. Gate como um todo permanece NO-GO.

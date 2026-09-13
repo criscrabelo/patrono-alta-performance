@@ -1185,3 +1185,34 @@ ABERTO. Não expande H6 — apenas garante a integridade do requisito de evidên
 - **PG-17 continua ABERTO** — inalterado por esta correção (não relacionado a agregador/destino de
   alerta real de produção, que continua sendo a pendência específica do gate).
 - Nenhum escopo de H7-H11/LGPD foi expandido nesta correção.
+
+## QA — Hardening H7 (Incident Response — IMPLEMENTADO PARCIALMENTE, PG-20 ABERTO)
+
+`docs/PRODUCTION_GATE.md`, seção 24; `docs/DECISIONS.md`, PROD-H7-01; `docs/INCIDENT_RESPONSE.md`.
+
+- **546 testes totais** com `TEST_DATABASE_URL` (527 anteriores + 19 novos em
+  `tests/h7-incident-response.test.js`), 0 falhando, nenhum teste removido/pulado.
+- **Consistência documental (`[H7-doc-A..J]`)**: `docs/INCIDENT_RESPONSE.md` contém as 4 severidades e
+  13 categorias mínimas; os 6 papéis funcionais; o checklist de 18 itens e o lifecycle completo de 11
+  estados; a documentação do canal de comunicação via env vars sem nenhum valor real (regex de e-mail
+  não encontra nenhum valor junto às `INCIDENT_*`); a justificativa explícita de por que PG-20
+  permanece aberto; os 9 templates/runbooks mínimos existem; o template de postmortem contém os 14
+  campos exigidos; nenhum template/runbook contém padrão de segredo real (chave privada, AWS access
+  key); `.env.example` contém as 4 variáveis de incidente, todas vazias; `docs/MASTER_HANDOFF.md`
+  permanece sem diff contra `origin/master`.
+- **`scripts/create-incident.js` (`[H7-script-A..I]`)**: `incidentId` único no formato
+  `INC-YYYYMMDD-XXXXXXXX` (dois IDs gerados no mesmo instante nunca colidem — sufixo aleatório via
+  `crypto.randomBytes`, nunca incremental); severidade/categoria inválida rejeitada; o diretório de
+  saída é sempre `incidents/` fixo (nunca um caminho vindo do chamador — elimina path traversal por
+  construção, não por validação); timestamp gerado é UTC ISO-8601; nunca sobrescreve um registro
+  existente; o arquivo gerado contém os campos mínimos do incident record; um resumo malicioso
+  contendo uma quebra de linha seguida de `incidentCommander: ATACANTE...` nunca cria uma segunda linha
+  `incidentCommander:` — a quebra de linha é removida antes de entrar no arquivo, o campo real
+  permanece com seu valor original (`(preencher)`); `SEVERITIES`/`CATEGORIES` exportados batem
+  exatamente com a documentação.
+- CI: Node 20.x/22.x, PostgreSQL real — nenhum teste H7 crítico pulado; H1-H6 inalterados.
+- `npm audit`: inalterado (2 vulnerabilidades altas conhecidas, `image-size`/`pptxgenjs` — H9); nenhuma
+  dependência nova adicionada nesta rodada.
+- **PG-20 permanece ABERTO** — o processo de resposta a incidentes está implementado e testado com
+  evidência real, mas depende de parametrização operacional real (canal de comunicação e responsável
+  nomeado) para atender integralmente o critério de aceite — ver `docs/PRODUCTION_GATE.md`, seção 24.
