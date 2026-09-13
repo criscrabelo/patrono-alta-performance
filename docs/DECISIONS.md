@@ -735,7 +735,40 @@ Cristiane.
     inativo" até reatribuição formal; histórico nunca apagado**.
 
 **Nenhum item permanece pendente desta lista.** Todas as 12 decisões estão homologadas — a implementação
-funcional correspondente (Fase 4B) continua não iniciada e deve ser feita em PR(s) separado(s).
+funcional correspondente (Fase 4B) foi concluída (ver seção 1.3 abaixo e `docs/SPRINT2-PLANO.md`).
+
+---
+
+## 1.3. Encerramento do Sprint 2 — Decisão D2-CLOSE
+
+### D2-CLOSE — Encerramento formal do Sprint 2
+
+**Status: HOMOLOGADO** (decisão de encerramento, não uma decisão de negócio sobre regra jurídica —
+registrada nesta seção por ser o mesmo namespace de decisões de governança do Sprint 2, distinto da
+numeração D1/D4 já homologada, que permanece inalterada).
+
+**Conteúdo da decisão:**
+
+1. O Sprint 2 está **concluído no escopo homologado** — Fases 1, 2, 3, 4A e 4B entregues e mergeadas na
+   master (`3eff813a6e5a9996a10164b33f10d00c087161c2`, PR #8, squash de
+   `d2f7ac8afc3c9a38b809bc5d6215942a33d47e1e`).
+2. Os gaps aceitos ao encerrar (Agenda Events manuais fora de Minha Semana; ausência de operação de
+   "desatribuir" responsável; Google Calendar sem OAuth real) **permanecem registrados** como itens
+   diferidos/bloqueados por dependência externa ou de negócio — não como falha do Sprint 2 (ver
+   `docs/SPRINT2-PLANO.md`, seção "Encerramento do Sprint 2").
+3. O Google Calendar real **permanece bloqueado** por ausência de credenciais de OAuth e de um mecanismo
+   seguro de armazenamento de token por usuário neste ambiente — não resolvido por esta decisão, nem por
+   nenhuma decisão anterior do Sprint 2.
+4. **Esta decisão não autoriza produção, deploy, nem qualquer escrita externa.** Produção depende de um
+   gate técnico/de negócio separado (ver `docs/SECURITY.md`, "Riscos residuais após o Sprint 2").
+5. **O próximo Sprint (Sprint 3) requer autorização explícita e separada** para iniciar — esta decisão de
+   encerramento não inicia, planeja em código, nem abre trabalho do Sprint 3. As frentes futuras sugeridas
+   (ver `docs/SPRINT2-PLANO.md`, "Transição para o próximo Sprint") são propostas de priorização, não
+   compromissos assumidos.
+
+Esta decisão não altera nenhuma decisão D1/D4 já homologada — apenas registra o encerramento formal do
+Sprint 2 como um todo, reconciliando o que já estava disperso entre `docs/SPRINT2-PLANO.md`, `docs/QA.md`
+e o estado real consolidado na master.
 
 ---
 

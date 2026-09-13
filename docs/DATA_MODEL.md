@@ -310,3 +310,25 @@ entidade nova nem tabela/coleção paralela:
   `status: 'not_configured'` e `events: []` sempre, nunca uma simulação. Nenhum método de escrita da API
   do Calendar existe no código (verificado por teste de código-fonte). Quando credenciais reais existirem,
   a interface já definida (`configured`/`connected`/`status`/`events`) é o ponto de extensão.
+
+## Encerramento do Sprint 2 — estado final do modelo
+
+Rodada estritamente documental (`docs/DECISIONS.md`, D2-CLOSE) — nenhuma entidade foi redesenhada aqui;
+esta seção apenas consolida o estado final do modelo de dados ao encerrar o Sprint 2:
+
+- **Nenhuma entidade duplicada foi criada** em nenhuma Fase: Legal Deadline permanece coleção própria
+  (`legalDeadlines`), Agenda/Atenção/Minha Semana são views sobre ela (e sobre `store.agenda`), nunca uma
+  cópia persistida.
+- **Nenhuma Task automática existe ou foi criada** — o modelo desta plataforma não tem uma entidade Task;
+  nada em Legal Deadline, Agenda, Minha Semana ou no adapter de Google Calendar gera uma.
+- **Google Calendar é externo e não-canônico** — eventos lidos (quando a leitura real existir) nunca
+  recebem um `id` canônico Patrono (apenas `externalId`), nunca são persistidos como cópia permanente, e
+  nunca alteram Legal Deadline/Agenda/Minha Semana de volta.
+- **Gaps de modelo não resolvidos nesta rodada** (registrados, não silenciosos): `store.agenda` não tem
+  um campo canônico de atribuição por usuário (`owner` é texto livre) — bloqueia a inclusão de Agenda
+  Events manuais em Minha Semana; não existe operação de "remover responsável" (`responsibleUserId: null`)
+  homologada; Google Calendar real depende de credenciais de OAuth e armazenamento seguro de token,
+  nenhum dos dois presente neste ambiente.
+- O restante do modelo (Legal Deadline, `originType`/`status` fechados, `responsibleUserId`,
+  `companyId`/`speId`/`department`, auditoria) permanece exatamente como descrito nas seções acima — sem
+  alteração nesta rodada de encerramento.

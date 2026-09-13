@@ -316,3 +316,32 @@ da Fase 4B.
 - **`responsibleUserId` não amplia autorização:** testado explicitamente (companyId/speId fora de
   escopo, TI, administrador técnico) em `tests/security-integration.test.js` — nenhum desses papéis ganha
   visibilidade adicional por ser (ou não) responsável por um Legal Deadline.
+
+## Riscos residuais após o Sprint 2
+
+Rodada de encerramento (`docs/DECISIONS.md`, D2-CLOSE) — consolidação, sem nova mitigação de código.
+Separados em três categorias, para não misturar risco funcional do piloto com risco de produção:
+
+### A. Riscos aceitos do piloto (não bloqueiam o encerramento do Sprint 2)
+
+- Agenda Events manuais não entram em "Minha Semana" (gap de modelo, `store.agenda.owner` textual).
+- `responsibleUserId` sem operação de "desatribuir" (não homologado).
+- Cache/offline do Calendar do usuário (mitigado por D4.8 — indisponibilidade nunca afeta Legal Deadline).
+
+### B. Bloqueios para produção (fora do escopo do Sprint 2, gate separado)
+
+- Persistência `data/store.json` não é production-grade (migração PostgreSQL preparada, ADR-001, não
+  executada).
+- Gestão/revogação de sessão além do soft-delete de usuário (`deletedAt`) implementado nesta Fase 4B.
+- Hardening HTTP/security headers amplo, rate limiting global, CSP completa, CSRF amplo.
+- Incident response formal e retenção/legal hold.
+- Vulnerabilidade conhecida de dependência `pptxgenjs`.
+
+### C. Dependências externas (bloqueiam apenas a funcionalidade específica, não o Sprint 2)
+
+- Google Calendar real: sem credenciais de OAuth do Google e sem mecanismo seguro de armazenamento de
+  token por usuário neste ambiente — adapter e contrato read-only já testados; ativação real depende de
+  provisionamento externo, não de trabalho de código adicional deste Sprint.
+
+**Nenhum item das categorias B/C declara produção pronta.** Produção continua exigindo um gate técnico/de
+negócio separado, com autorização própria.
