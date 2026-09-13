@@ -32,15 +32,19 @@ function createPostgresStore({ databaseUrl, ssl = false, seed }) {
   // como hoje — só `write()` a lê de volta.
   const VERSION = Symbol('storeVersion');
 
-  const REQUIRED_MIGRATION = '003_app_store';
-  const REQUIRED_COLUMNS = ['id', 'data', 'version', 'updated_at'];
+  // Sprint 2, Hardening H1B: '004_h1b_core_relational' é obrigatória a partir desta versão — sem ela,
+  // users/legal_processes/legal_deadlines/audit_log não existem e o bridge relacional (storage/index.js)
+  // não tem onde ler/gravar. Mesma rigidez do H1A: nunca criado pelo runtime, só validado.
+  const REQUIRED_MIGRATIONS = ['003_app_store', '004_h1b_core_relational'];
+  const REQUIRED_APP_STORE_COLUMNS = ['id', 'data', 'version', 'updated_at'];
+  const REQUIRED_CORE_TABLES = ['app_users', 'legal_processes', 'legal_deadlines', 'audit_log'];
   const MIGRATE_HINT = 'Rode "npm run migrate" para aplicar as migrations pendentes antes de iniciar a aplicação.';
 
   // Valida (nunca cria) o schema canônico. O runtime NUNCA deve substituir migration por
   // `CREATE TABLE IF NOT EXISTS`: isso mascararia um banco sem `schema_migrations` populado ou com
-  // `app_store` em formato incompatível/antigo, fazendo a aplicação operar sobre um schema que ela não
-  // pode garantir ser o esperado. `scripts/migrate.js` continua sendo o único caminho responsável por
-  // criar/evoluir o schema (docs/PRODUCTION_GATE.md, PG-03).
+  // `app_store`/tabelas do núcleo H1B em formato incompatível/antigo, fazendo a aplicação operar sobre
+  // um schema que ela não pode garantir ser o esperado. `scripts/migrate.js` continua sendo o único
+  // caminho responsável por criar/evoluir o schema (docs/PRODUCTION_GATE.md, PG-03).
   async function validateSchema() {
     const migrationsTable = await pool.query('SELECT to_regclass($1) AS reg', ['schema_migrations']);
     if (!migrationsTable.rows[0] || !migrationsTable.rows[0].reg) {
@@ -49,13 +53,12 @@ function createPostgresStore({ databaseUrl, ssl = false, seed }) {
       );
     }
 
-    const applied = await pool.query(
-      'SELECT 1 FROM schema_migrations WHERE version = $1',
-      [REQUIRED_MIGRATION]
-    );
-    if (!applied.rows.length) {
+    const applied = await pool.query('SELECT version FROM schema_migrations WHERE version = ANY($1)', [REQUIRED_MIGRATIONS]);
+    const appliedSet = new Set(applied.rows.map(row => row.version));
+    const missingMigrations = REQUIRED_MIGRATIONS.filter(version => !appliedSet.has(version));
+    if (missingMigrations.length) {
       throw new StoreUnavailableError(
-        `Schema do PostgreSQL incompatível: migration obrigatória "${REQUIRED_MIGRATION}" não foi aplicada. ${MIGRATE_HINT}`
+        `Schema do PostgreSQL incompatível: migration(s) obrigatória(s) não aplicada(s): ${missingMigrations.join(', ')}. ${MIGRATE_HINT}`
       );
     }
 
@@ -71,10 +74,22 @@ function createPostgresStore({ databaseUrl, ssl = false, seed }) {
       ['app_store']
     );
     const existingColumns = new Set(columns.rows.map(row => row.column_name));
-    const missingColumns = REQUIRED_COLUMNS.filter(column => !existingColumns.has(column));
+    const missingColumns = REQUIRED_APP_STORE_COLUMNS.filter(column => !existingColumns.has(column));
     if (missingColumns.length) {
       throw new StoreUnavailableError(
         `Schema do PostgreSQL incompatível: tabela "app_store" não possui a(s) coluna(s) esperada(s) (${missingColumns.join(', ')}). ${MIGRATE_HINT}`
+      );
+    }
+
+    const coreTables = await pool.query(
+      `SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ANY($1)`,
+      [REQUIRED_CORE_TABLES]
+    );
+    const existingCoreTables = new Set(coreTables.rows.map(row => row.table_name));
+    const missingCoreTables = REQUIRED_CORE_TABLES.filter(table => !existingCoreTables.has(table));
+    if (missingCoreTables.length) {
+      throw new StoreUnavailableError(
+        `Schema do PostgreSQL incompatível: tabela(s) do núcleo relacional H1B ausente(s): ${missingCoreTables.join(', ')}. ${MIGRATE_HINT}`
       );
     }
   }
@@ -152,7 +167,46 @@ function createPostgresStore({ databaseUrl, ssl = false, seed }) {
 
   async function close() { await pool.end(); }
 
-  return { mode: 'postgres', init, read, write, healthcheck, close };
+  // Sprint 2, Hardening H1B: usados só pela ponte relacional em storage/index.js — nunca por server.js
+  // diretamente (que continua falando apenas com storage/index.js, nunca com `pg`). `withTransaction`
+  // dá à ponte um único BEGIN/COMMIT/ROLLBACK que cobre TANTO os UPDATEs/INSERTs relacionais (users/
+  // legal_processes/legal_deadlines/audit_log) QUANTO a atualização do restante do blob app_store —
+  // "criar Legal Deadline + audit" (e qualquer outra mutação combinada) é atômico de ponta a ponta.
+  function getPool() { return pool; }
+  async function withTransaction(fn) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await fn(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+  // Mesma lógica de CAS de `write()`, mas usando um client já em transação (fornecido pela ponte
+  // relacional) em vez do pool — permite que a atualização do blob participe da MESMA transação que os
+  // INSERTs/UPDATEs relacionais, em vez de ser uma segunda escrita separada e não atômica.
+  async function writeBlobTx(client, store, expectedVersion) {
+    if (expectedVersion === undefined) {
+      const { rows } = await client.query(
+        'UPDATE app_store SET data = $1, version = version + 1, updated_at = now() WHERE id = $2 RETURNING version',
+        [JSON.stringify(store), APP_STORE_ID]
+      );
+      return rows.length ? rows[0].version : null;
+    }
+    const { rows } = await client.query(
+      'UPDATE app_store SET data = $1, version = version + 1, updated_at = now() WHERE id = $2 AND version = $3 RETURNING version',
+      [JSON.stringify(store), APP_STORE_ID, expectedVersion]
+    );
+    if (!rows.length) throw new StoreConflictError();
+    return rows[0].version;
+  }
+
+  return { mode: 'postgres', init, read, write, healthcheck, close, getPool, withTransaction, writeBlobTx, VERSION };
 }
 
 module.exports = { createPostgresStore };

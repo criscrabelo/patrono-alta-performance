@@ -528,3 +528,47 @@ aqui; esta seção apenas consolida o estado de QA já registrado nas Fases 1–
 - CI (`.github/workflows/ci.yml`) ganhou um serviço `postgres:16` isolado para rodar essa mesma bateria
   em todo PR/push, nos dois `Node 20.x`/`Node 22.x`.
 - `npm audit`: inalterado (2 vulnerabilidades altas conhecidas, `image-size`/`pptxgenjs` — H9).
+
+## QA — Hardening H1B (normalização relacional do núcleo canônico)
+
+- **314 testes totais** com `TEST_DATABASE_URL` (278 do H1A + 36 novos: 25 em
+  `tests/h1b-core-relational.test.js`, 9 de validação pura de `scripts/migrate-h1b-data.js` em
+  `tests/storage.test.js`), 0 falhando, sem remoção de nenhum teste anterior.
+- Sem `TEST_DATABASE_URL`: **279 testes**, 276 passam, 3 pulados explicitamente (os 2 já existentes do
+  H1A + 1 novo de `tests/h1b-core-relational.test.js`) — nunca fingindo cobertura de Postgres que não
+  existe.
+- Cobertura por categoria (nomenclatura A–Z do plano de execução do H1B):
+  - **A–C** (users): CRUD básico via ponte relacional, e-mail duplicado permitido (gap documentado, não
+    uma regressão), `deletedAt` preservado com login rejeitado para usuário inativo.
+  - **D–E** (Legal Process/Legal Deadline persistidos): tabela relacional confirmada por consulta SQL
+    direta, nunca mais dentro do blob.
+  - **F–J** (integridade referencial): `processId`/`responsibleUserId` órfão rejeitado tanto na validação
+    de aplicação quanto (segunda linha de defesa) pela FK real do banco, bypassando a aplicação;
+    `responsibleUserId` opcional aceito; `status`/`originType` fora do enum rejeitados pela CHECK
+    constraint do banco, também bypassando a aplicação.
+  - **K** (concorrência): duas leituras do mesmo Legal Deadline, a primeira escrita vence, a segunda
+    recebe `StoreConflictError` — via `version` própria da linha, não mais só a `version` global do blob.
+  - **L–M** (transação/rollback): criação persiste Legal Deadline + evento de auditoria juntos; falha
+    simulada na gravação do evento de auditoria reverte a transação inteira — nem o Legal Deadline nem o
+    audit ficam persistidos.
+  - **N–O** (reabertura/archive/restore): mesmas regras de negócio já homologadas (reabertura exige
+    `reason`; archive/restore preserva a linha via `deletedAt`), agora sobre a tabela relacional.
+  - **P–R** (Agenda/Atenção/Minha Semana): as três views continuam funcionando idênticas, lendo da tabela
+    relacional em vez do blob.
+  - **U–V** (regressão de RBAC): segregação TI≠Jurídico e "administrador técnico ≠ superusuário de
+    conteúdo" seguem negando corretamente, mesmo com o dado vindo de tabelas relacionais.
+  - **W** (audit append-only): múltiplas mutações no mesmo registro geram múltiplos eventos, nenhum
+    sobrescrito.
+  - **X–Z** (`scripts/migrate-h1b-data.js`): `--dry-run` nunca grava; importação real popula as 4 tabelas
+    e faz o cutover (remove as 4 chaves do blob); reimportação sem `--force` é recusada, com `--force` é
+    idempotente (`ON CONFLICT DO NOTHING`, nunca duplica); um órfão crítico aborta a importação inteira
+    sem gravar nada.
+  - Teste de regressão dedicado para um bug real encontrado e corrigido durante esta rodada: a ordenação
+    de leitura das tabelas relacionais (`ORDER BY id`) mudava a ordem efetiva de `store.users` em relação
+    à ordem de inserção original do array JSONB, alterando silenciosamente qual usuário “vence” em um
+    `find()` por email duplicado — corrigido para `ORDER BY created_at, id` e coberto por teste próprio.
+- CI roda `tests/h1b-core-relational.test.js` contra bancos Postgres **isolados**, criados e derrubados
+  pelo próprio arquivo de teste (`CREATE DATABASE`/`DROP DATABASE`), para nunca colidir com
+  `tests/storage.test.js`/`tests/security-integration-postgres.test.js` rodando em paralelo no mesmo
+  serviço `postgres:16`.
+- `npm audit`: inalterado (2 vulnerabilidades altas conhecidas, `image-size`/`pptxgenjs` — H9).

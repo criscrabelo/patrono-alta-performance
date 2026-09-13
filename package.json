@@ -8,7 +8,8 @@
     "start": "node server.js",
     "test": "node --test",
     "migrate": "node scripts/migrate.js",
-    "migrate:data": "node scripts/import-data.js"
+    "migrate:data": "node scripts/import-data.js",
+    "migrate:h1b:data": "node scripts/migrate-h1b-data.js"
   },
   "dependencies": {
     "pdfkit": "^0.19.1",
