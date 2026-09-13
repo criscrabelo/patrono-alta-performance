@@ -784,7 +784,7 @@ e o estado real consolidado na master.
    contradiz aquela.
 2. **Produção não está autorizada.** O gate técnico formal de produção — auditoria completa, achados
    classificados P0/P1/P2/P3, matriz GO/NO-GO e plano de hardening — está documentado em
-   `docs/PRODUCTION_GATE.md`. Estado atual: **NO-GO para produção**, com 10 achados P0 e 6 P1 abertos,
+   `docs/PRODUCTION_GATE.md`. Estado atual: **NO-GO para produção**, com 10 achados P0, 10 P1 e 5 P2 abertos,
    nenhum waiver concedido.
 3. Os critérios objetivos de GO/NO-GO, o processo de waiver e a ordem proposta de hardening (H1–H11)
    estão definidos em `docs/PRODUCTION_GATE.md` — esta decisão não os duplica, apenas os referencia como

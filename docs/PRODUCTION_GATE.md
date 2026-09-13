@@ -78,7 +78,7 @@ e um checklist mínimo de LGPD. Não cobre: desenho de novas funcionalidades de 
 | PG-05 | Sessão/Auth | Não há `logout` que invalide a sessão no servidor | Token roubado continua válido até expirar mesmo após "logout" do usuário | **P1** | SIM | Endpoint de logout que remove a sessão do armazenamento server-side | Token usado após logout retorna 401 | H2 |
 | PG-06 | Sessão/Auth | Não há revogação ativa de sessão (ex.: force-logout administrativo) | Sessão comprometida não pode ser encerrada remotamente | **P1** | SIM | Endpoint administrativo de revogação por usuário/sessão | Sessão revogada devolve 401 imediatamente | H2 |
 | PG-07 | Sessão/Auth | Senha única compartilhada (`COEVO_DEMO_PASSWORD`) para todos os usuários | Sem responsabilização individual real por login; qualquer vazamento afeta todos | **P0** | SIM | Senha/hash por usuário (bcrypt/argon2), fluxo de cadastro/redefinição real | Login exige credencial própria por usuário, hash armazenado com salt | H2 |
-| PG-08 | Sessão/Auth | Código de MFA único compartilhado (`COEVO_MFA_CODE`) | MFA não é MFA real — mesmo segundo fator para todos os usuários | **P0** | SIM | MFA por usuário (TOTP/SMS/e-mail individual) | Cada usuário tem segredo de MFA próprio, não reutilizável entre contas | H2 |
+| PG-08 | Sessão/Auth | Código de MFA único compartilhado (`COEVO_MFA_CODE`) | MFA não é MFA real — mesmo segundo fator para todos os usuários | **P0** | SIM | MFA individual por usuário, com fator separado e mecanismo aprovado para produção (a escolha concreta — TOTP, SMS, e-mail ou outro — fica para a implementação em H2, não homologada por este documento) | Cada usuário tem segredo/fator de MFA próprio, não reutilizável entre contas | H2 |
 | PG-09 | Sessão/Auth | Nenhuma política de senha (comprimento, complexidade, rotação) | N/A hoje (não há senha por usuário); vira obrigatório ao resolver PG-07 | **P1** | SIM (condicionado a PG-07) | Definir política mínima de senha ao implementar PG-07 | Política documentada e validada no cadastro/redefinição | PG-07 |
 | PG-10 | Sessão/Auth | Sem proteção a força bruta em `/api/auth/login`/`/api/auth/mfa` | Enumeração de credenciais/código por tentativa exaustiva | **P0** | SIM | Rate limiting + bloqueio progressivo por IP/conta | N tentativas falhas em janela de tempo bloqueiam/atrasam novas tentativas | H3 |
 | PG-11 | Rate limiting | Nenhuma rota tem rate limiting (login, API geral, integrações) | Abuso, DoS de aplicação, força bruta | **P0** | SIM | Rate limiting global + reforçado em rotas sensíveis (login/MFA) | Rajada acima do limite recebe 429, sem afetar outros usuários | H3 |
@@ -94,15 +94,23 @@ e um checklist mínimo de LGPD. Não cobre: desenho de novas funcionalidades de 
 | PG-21 | Backup/Restore | Backup/restore só sob demanda via API; sem agendamento, offsite, RPO/RTO ou teste de restore evidenciado | Perda de dado sem recuperação viável em caso de incidente | **P0** | SIM | Backup agendado, offsite, com RPO/RTO definidos e teste de restore documentado | Restore de um backup real é executado e validado ao menos uma vez, com evidência | H5, PG-01 |
 | PG-22 | Deploy/Infra | Não existe `fly.toml` nem `Dockerfile` no repositório — nenhuma infraestrutura como código versionada | Deploy depende de processo manual/tácito, não reprodutível | **P0** | SIM | Criar infraestrutura como código (container + config de deploy), healthcheck, variáveis de ambiente documentadas | Deploy reproduzível a partir do repositório, sem passo manual não documentado | H11 |
 | PG-23 | LGPD | Sem política formal de minimização, finalidade, retenção, descarte e direitos do titular | Exposição legal/regulatória em produção | **P1** | SIM | Checklist mínimo de LGPD (seção 9) formalizado com o time jurídico | Checklist preenchido e aprovado pelo responsável de negócio/jurídico | — |
-| PG-24 | LGPD | Monday.com e (futuramente) Google Calendar são suboperadores/subprocessadores sem lista/DPA documentado | Ausência de rastreabilidade de para onde dados pessoais trafegam | **P2** | NÃO (piloto), SIM (produção) | Documentar suboperadores e base legal de transferência | Lista de suboperadores mantida em `docs/SECURITY.md`/`docs/INTEGRATIONS.md` | — |
+| PG-24 | LGPD | Monday.com e (futuramente) Google Calendar são suboperadores/subprocessadores sem lista/DPA documentado | Ausência de rastreabilidade de para onde dados pessoais trafegam | **P1** | SIM | Documentar suboperadores e base legal de transferência | Lista de suboperadores mantida em `docs/SECURITY.md`/`docs/INTEGRATIONS.md` | — |
 | PG-25 | Dependências | Sem `npm audit` como gate de CI (hoje é apenas informativo, `|| true`) | Nova vulnerabilidade alta/crítica pode entrar sem bloquear o merge | **P2** | NÃO (aceitável com revisão manual continuada) | Tornar `npm audit` bloqueante para novas vulnerabilidades altas/críticas além da já conhecida | CI falha em nova vulnerabilidade alta/crítica não registrada como waiver | H9 |
 
-**Contagem:** P0 = 8 (PG-01, PG-02, PG-07, PG-08, PG-10, PG-11, PG-19, PG-20, PG-21, PG-22 — ver nota) · P1 = 6 · P2 = 5 · P3 = 0.
+**Contagem (25 achados, PG-01 a PG-25 — soma exata da tabela acima):**
 
-> Nota de contagem: PG-01/PG-02 são exibidos como dois achados por clareza de causa raiz, mas
-> compartilham a mesma correção (H1); ao contá-los separadamente o total de P0 é **10** (PG-01, PG-02,
-> PG-07, PG-08, PG-10, PG-11, PG-19, PG-20, PG-21, PG-22). Nenhum achado desta rodada foi classificado
-> como P3 — não há "melhoria cosmética" pendente que já não esteja coberta por um P1/P2 real.
+- **P0 = 10** — PG-01, PG-02, PG-07, PG-08, PG-10, PG-11, PG-19, PG-20, PG-21, PG-22.
+- **P1 = 10** — PG-03, PG-04, PG-05, PG-06, PG-09, PG-12, PG-15, PG-17, PG-23, PG-24.
+- **P2 = 5** — PG-13, PG-14, PG-16, PG-18, PG-25.
+- **P3 = 0** — nenhum achado desta rodada é "melhoria cosmética" já não coberta por um P1/P2 real.
+
+PG-01/PG-02 são exibidos como dois achados por clareza de causa raiz (persistência sem transação e sem
+lock são sintomas distintos do mesmo problema), mas compartilham a mesma correção (H1) — contados
+separadamente na tabela e nesta soma, não duplicados fora dela. PG-24 foi reclassificado de P2 para P1
+nesta revisão: a definição de severidade deste documento (seção 4) trata como P1 qualquer achado
+"necessário antes do go-live" — e a própria linha de PG-24 já indicava "SIM" para bloqueio de produção,
+o que é inconsistente com P2 ("pode ser pós-go-live com mitigação formal"). Corrigido para refletir a
+própria classificação declarada.
 
 ## 5. Matriz GO/NO-GO
 
@@ -282,6 +290,8 @@ Nenhum. Todos os achados P0/P1 permanecem abertos, sem exceção.
 
 10 achados P0 abertos (persistência, credenciais/MFA compartilhados, ausência de rate limiting, ausência
 de retenção/legal hold, ausência de incident response, backup/restore não validado, ausência de
-infraestrutura de deploy como código), mais 6 P1. Nenhum waiver foi emitido. O Sprint 2 permanece
-concluído no escopo homologado (`docs/DECISIONS.md`, D2-CLOSE) — este documento não reabre nem contradiz
-aquela decisão; apenas formaliza que produção é um gate técnico/de negócio separado, ainda não atendido.
+infraestrutura de deploy como código), mais 10 P1 e 5 P2 (25 achados no total, ver seção 4). Na matriz da
+seção 5, 13 dos 17 gates avaliados bloqueiam produção hoje (CSRF, Secrets, Auditoria e OAuth Calendar não
+bloqueiam). Nenhum waiver foi emitido. O Sprint 2 permanece concluído no escopo homologado
+(`docs/DECISIONS.md`, D2-CLOSE) — este documento não reabre nem contradiz aquela decisão; apenas formaliza
+que produção é um gate técnico/de negócio separado, ainda não atendido.
