@@ -18,7 +18,9 @@ Aplica-se a: indisponibilidade parcial/total, degradação de performance, HTTP 
 4. Verificar os logs estruturados (H6) para o `errorCode` mais recente.
 5. Conter tráfego se necessário (ex.: isolar a instância afetada, se houver mais de uma).
 6. Corrigir a causa raiz (config, dependência externa, recurso esgotado).
-7. Recuperar (reiniciar processo/instância afetada, confirmar `ready:true`).
+7. Recuperar — reiniciar o processo/instância afetada usando o mecanismo de reinício disponível no
+   ambiente (H11 ainda não define um supervisor/orquestrador padrão para este projeto), e confirmar
+   `ready:true` depois.
 8. Monitorar `repeated_http_5xx` parar de disparar antes de considerar resolvido.
 
 ## Nunca fazer

@@ -8,7 +8,7 @@ const path = require('node:path');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { createIncident, generateIncidentId, SEVERITIES, CATEGORIES, incidentsDir } = require('../scripts/create-incident');
+const { createIncident, generateIncidentId, SEVERITIES, CATEGORIES, incidentsDir, MAX_ID_ATTEMPTS } = require('../scripts/create-incident');
 
 const ROOT = path.join(__dirname, '..');
 
@@ -114,6 +114,38 @@ test('[H7-doc-J] docs/MASTER_HANDOFF.md permanece intocado (H7 nunca o altera)',
   assert.equal(diffStat.trim(), '', `docs/MASTER_HANDOFF.md não deveria ter sido alterado: ${diffStat}`);
 });
 
+// Correção pós-implementação (revisão técnica final, PR #18, item 4): a documentação não pode afirmar
+// que existe hoje um supervisor/orquestrador que reinicia o processo automaticamente — H11 (deploy/
+// infraestrutura) ainda não foi implementado. Nunca mais que "processo termina sozinho (supervisor
+// reinicia)" como fato consumado.
+test('[H7-doc-K] docs/INCIDENT_RESPONSE.md e os runbooks nunca afirmam supervisor/reinício automático como algo que já existe', () => {
+  const arquivos = [
+    'docs/INCIDENT_RESPONSE.md',
+    'docs/incidents/runbooks/AUTH_COMPROMISE.md',
+    'docs/incidents/runbooks/DATA_EXPOSURE.md',
+    'docs/incidents/runbooks/AVAILABILITY.md',
+    'docs/incidents/runbooks/BACKUP_RESTORE.md',
+    'docs/incidents/runbooks/SECRETS.md'
+  ];
+  // Frases que afirmariam, como fato já existente, uma infraestrutura de H11 que ainda não existe.
+  const proibidas = [
+    /supervisor reinicia\)/i,
+    /processo já termina sozinho\s*\(supervisor/i,
+    /redeploy garantido/i,
+    /rollback automático/i
+  ];
+  for (const arquivo of arquivos) {
+    const content = readDoc(arquivo);
+    for (const padrao of proibidas) {
+      assert.ok(!padrao.test(content), `${arquivo} parece afirmar infraestrutura de H11 (supervisor/redeploy/rollback automático) que ainda não existe: padrão ${padrao}`);
+    }
+  }
+  // A ocorrência de "reiniciar"/"reinício" em disponibilidade deve estar condicionada ao ambiente, nunca
+  // apresentada como automática/garantida.
+  const availability = readDoc('docs/incidents/runbooks/AVAILABILITY.md').replace(/\s+/g, ' ');
+  assert.match(availability, /mecanismo de reinício disponível no ambiente/i);
+});
+
 // --- scripts/create-incident.js -------------------------------------------------------------------------
 let tmpRoot;
 test.beforeEach(() => {
@@ -154,16 +186,66 @@ test('[H7-script-E] timestamp gerado é UTC ISO-8601', () => {
   assert.match(content, /detectedAt:\s+2026-09-14T10:00:00\.000Z/);
 });
 
-test('[H7-script-F] createIncident() nunca sobrescreve um registro existente', () => {
+// Correção pós-implementação (revisão técnica final, PR #18, item 2): o teste anterior não forçava uma
+// colisão real — apenas verificava que um arquivo já escrito continuava com seu conteúdo. Os testes
+// abaixo usam o seam de teste dedicado `generateIdOverride` para forçar deterministicamente o cenário de
+// colisão real: primeira tentativa retorna sempre o MESMO id (que já existe no disco, com conteúdo
+// conhecido); a escrita exclusiva (`flag: 'wx'`) deve falhar com EEXIST SEM tocar o arquivo existente; a
+// função deve então tentar de novo com outro id.
+
+test('[H7-script-F] criação usa escrita EXCLUSIVA (flag wx) — em colisão real, o arquivo existente nunca é sobrescrito e uma nova tentativa gera outro id', () => {
   const now = new Date('2026-09-14T10:00:00.000Z');
-  const first = createIncident({ severity: 'SEV-2', category: 'AVAILABILITY', now, baseDir: tmpRoot });
-  fs.writeFileSync(first.filePath, 'CONTEUDO_ORIGINAL_NUNCA_DEVE_SER_PERDIDO');
-  // Força colisão determinística chamando createIncident diretamente com o mesmo ID via monkey-patch
-  // não é necessário: validamos que, SE o arquivo já existir para o ID gerado, a função lança e não
-  // sobrescreve — simulamos isso escrevendo manualmente no caminho que o próximo ID aleatório usaria é
-  // inviável (aleatório); em vez disso, validamos a proteção diretamente criando o arquivo com um ID
-  // fixo e mandando o módulo detectar a colisão via chamada interna equivalente.
-  assert.equal(fs.readFileSync(first.filePath, 'utf8'), 'CONTEUDO_ORIGINAL_NUNCA_DEVE_SER_PERDIDO');
+  const dir = incidentsDir(tmpRoot);
+  fs.mkdirSync(dir, { recursive: true });
+
+  const idFixo = 'INC-20260914-COLISAO1';
+  const idAlternativo = 'INC-20260914-ALTERNAT';
+  const conteudoOriginal = 'CONTEUDO_ORIGINAL_NUNCA_DEVE_SER_PERDIDO';
+  fs.writeFileSync(path.join(dir, `${idFixo}.md`), conteudoOriginal, { mode: 0o600, flag: 'wx' });
+
+  let call = 0;
+  const generateIdOverride = () => {
+    call += 1;
+    return call === 1 ? idFixo : idAlternativo; // 1ª tentativa colide de propósito; 2ª é livre.
+  };
+
+  const result = createIncident({ severity: 'SEV-2', category: 'AVAILABILITY', now, baseDir: tmpRoot, generateIdOverride });
+
+  // O arquivo original permanece BYTE-FOR-BYTE intacto — nunca tocado pela tentativa que colidiu.
+  assert.equal(fs.readFileSync(path.join(dir, `${idFixo}.md`), 'utf8'), conteudoOriginal);
+  // A função se recuperou da colisão e criou o registro sob o segundo id.
+  assert.equal(result.incidentId, idAlternativo);
+  assert.equal(result.attempts, 2, 'deveria ter levado exatamente 2 tentativas (1 colisão + 1 sucesso)');
+  assert.ok(fs.existsSync(result.filePath));
+});
+
+test('[H7-script-F2] se TODAS as tentativas colidirem, createIncident() falha explicitamente e nenhum arquivo existente é alterado', () => {
+  const now = new Date('2026-09-14T10:00:00.000Z');
+  const dir = incidentsDir(tmpRoot);
+  fs.mkdirSync(dir, { recursive: true });
+
+  const idFixo = 'INC-20260914-SEMPRE00';
+  const conteudoOriginal = 'NUNCA_DEVE_SER_SOBRESCRITO';
+  fs.writeFileSync(path.join(dir, `${idFixo}.md`), conteudoOriginal, { mode: 0o600, flag: 'wx' });
+
+  const generateIdOverride = () => idFixo; // toda tentativa colide com o mesmo id, de propósito.
+
+  assert.throws(
+    () => createIncident({ severity: 'SEV-3', category: 'OTHER', now, baseDir: tmpRoot, generateIdOverride }),
+    new RegExp(`após ${MAX_ID_ATTEMPTS} tentativas`)
+  );
+  // Mesmo após esgotar todas as tentativas, o único arquivo no diretório continua sendo o original,
+  // com o conteúdo original — nenhuma escrita parcial ou corrompida foi deixada para trás.
+  const arquivos = fs.readdirSync(dir);
+  assert.deepEqual(arquivos, [`${idFixo}.md`]);
+  assert.equal(fs.readFileSync(path.join(dir, `${idFixo}.md`), 'utf8'), conteudoOriginal);
+});
+
+test('[H7-script-F3] o arquivo é criado com mode 0600 (somente o dono lê/escreve)', () => {
+  const now = new Date('2026-09-14T10:00:00.000Z');
+  const { filePath } = createIncident({ severity: 'SEV-4', category: 'OTHER', now, baseDir: tmpRoot });
+  const mode = fs.statSync(filePath).mode & 0o777;
+  assert.equal(mode, 0o600);
 });
 
 test('[H7-script-G] template gerado contém os campos mínimos do incident record', () => {

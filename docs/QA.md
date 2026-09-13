@@ -1216,3 +1216,31 @@ ABERTO. Não expande H6 — apenas garante a integridade do requisito de evidên
 - **PG-20 permanece ABERTO** — o processo de resposta a incidentes está implementado e testado com
   evidência real, mas depende de parametrização operacional real (canal de comunicação e responsável
   nomeado) para atender integralmente o critério de aceite — ver `docs/PRODUCTION_GATE.md`, seção 24.
+
+## QA — Correção técnica final do H7 (PR #18 — criação atômica + correção documental)
+
+`docs/PRODUCTION_GATE.md`, seção 24; `docs/DECISIONS.md`, PROD-H7-01 (adendo). PG-20 continua ABERTO.
+
+- **549 testes totais** com `TEST_DATABASE_URL` (546 anteriores + 3 novos em
+  `tests/h7-incident-response.test.js`, mais a reescrita do teste de não-sobrescrita), 0 falhando.
+- **Criação atômica (`[H7-script-F]`)**: `scripts/create-incident.js` agora escreve com
+  `flag: 'wx'` (criação exclusiva) em vez de `existsSync()` + `writeFileSync()` — elimina a janela
+  TOCTOU entre verificar e escrever. Um seam de teste dedicado (`generateIdOverride`) força uma colisão
+  REAL (não apenas simulada): a primeira tentativa usa um `incidentId` que já existe em disco com
+  conteúdo conhecido; a escrita falha com `EEXIST` sem tocar o arquivo; a função tenta de novo com outro
+  id e tem sucesso (`attempts: 2`).
+- **`[H7-script-F2]`**: se todas as `MAX_ID_ATTEMPTS` (5) tentativas colidirem, `createIncident()` lança
+  um erro explícito nomeando o limite — e o único arquivo no diretório continua sendo o original, com o
+  conteúdo original intacto (nenhuma escrita parcial/corrompida).
+- **`[H7-script-F3]`**: o arquivo gerado tem `mode` `0600` (só o dono lê/escreve).
+- **`[H7-doc-K]`**: `docs/INCIDENT_RESPONSE.md` e os 5 runbooks nunca mais afirmam, como fato já
+  existente, um supervisor/orquestrador que reinicia o processo automaticamente ou um
+  rollback/redeploy garantido — a linguagem foi corrigida para condicionar essas ações ao "mecanismo
+  disponível no ambiente" (H11 ainda não implementado).
+- Semântica de evidência documentada explicitamente no próprio `scripts/create-incident.js`: o registro
+  local é uma ferramenta operacional, nunca um armazenamento forense/durável de produção.
+- CI: Node 20.x/22.x, PostgreSQL real — nenhum teste crítico pulado.
+- `npm audit`: inalterado (2 vulnerabilidades altas conhecidas — H9); nenhuma dependência nova.
+- **PG-20 continua ABERTO** — inalterado por esta correção (não relacionado à parametrização real de
+  canal/responsável, que continua sendo a pendência específica do gate). Nenhum escopo de H8-H11 foi
+  expandido.

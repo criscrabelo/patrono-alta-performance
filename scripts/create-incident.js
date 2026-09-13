@@ -37,8 +37,10 @@ function sanitizeSummary(raw) {
 }
 
 // Formato INC-YYYYMMDD-XXXXXXXX (docs/INCIDENT_RESPONSE.md, seção 10) — sufixo aleatório via
-// crypto.randomBytes (nunca um contador incremental previsível).
-function generateIncidentId(now = new Date()) {
+// crypto.randomBytes (nunca um contador incremental previsível). `attempt` é aceito só para manter a
+// mesma assinatura de um `generateIdOverride` de teste (ver createIncident()) — o gerador real nunca
+// precisa dele, pois cada chamada já é independentemente aleatória.
+function generateIncidentId(now = new Date(), _attempt) {
   const datePart = now.toISOString().slice(0, 10).replace(/-/g, '');
   const randomPart = crypto.randomBytes(4).toString('hex').toUpperCase();
   return `INC-${datePart}-${randomPart}`;
@@ -97,11 +99,32 @@ completo. Nunca preencher os campos acima com segredo, token, senha ou payload i
 
 // Diretório de saída FIXO (item 32 do escopo) — nunca aceita um caminho vindo do usuário, elimina
 // qualquer possibilidade de path traversal por construção (não há input de path a validar).
+//
+// IMPORTANTE (semântica de evidência, correção pós-implementação — revisão técnica final, PR #18): este
+// registro local de incidente é uma FERRAMENTA OPERACIONAL de criação de registro — um arquivo em
+// `incidents/` (diretório local, ignorado pelo Git), nunca um armazenamento forense/durável de produção.
+// Eventual persistência/armazenamento durável (backup do próprio registro, retenção, replicação) depende
+// do ambiente/processo operacional em que este script roda — isso é explicitamente H8 (retenção/legal
+// hold)/H11 (deploy/infraestrutura), nunca implementado aqui.
 function incidentsDir(baseDir = path.join(__dirname, '..')) {
   return path.join(baseDir, 'incidents');
 }
 
-function createIncident({ severity, category, summary, now = new Date(), baseDir } = {}) {
+// Correção pós-implementação (revisão técnica final, PR #18, item 1): a checagem anterior
+// (`fs.existsSync()` seguida de `fs.writeFileSync()`) tinha uma janela TOCTOU entre verificar e
+// escrever — duas chamadas concorrentes podiam, em teoria, ambas passar pela checagem antes de
+// qualquer uma escrever. Corrigido com criação EXCLUSIVA atômica (`flag: 'wx'` — o próprio kernel
+// garante que a chamada falha com EEXIST se o arquivo já existir, sem essa janela). Se colidir (o que só
+// pode acontecer por coincidência do sufixo aleatório de 4 bytes, nunca por um contador prevísivel), o
+// arquivo existente NUNCA é tocado — geramos um novo `incidentId` e tentamos de novo, até
+// `MAX_ID_ATTEMPTS`.
+const MAX_ID_ATTEMPTS = 5;
+
+function writeIncidentFileExclusive(filePath, content) {
+  fs.writeFileSync(filePath, content, { mode: 0o600, flag: 'wx' });
+}
+
+function createIncident({ severity, category, summary, now = new Date(), baseDir, generateIdOverride } = {}) {
   if (!SEVERITIES.has(severity)) {
     throw new Error(`Severidade inválida: "${severity}". Valores aceitos: ${[...SEVERITIES].join(', ')}.`);
   }
@@ -111,16 +134,23 @@ function createIncident({ severity, category, summary, now = new Date(), baseDir
   const dir = incidentsDir(baseDir);
   fs.mkdirSync(dir, { recursive: true });
 
-  const incidentId = generateIncidentId(now);
-  const filePath = path.join(dir, `${incidentId}.md`);
-  if (fs.existsSync(filePath)) {
-    throw new Error(`Já existe um registro para ${incidentId} — nunca sobrescrito automaticamente.`);
-  }
-
   const detectedAt = now.toISOString();
-  const content = renderIncidentMarkdown({ incidentId, severity, category, summary: sanitizeSummary(summary), detectedAt });
-  fs.writeFileSync(filePath, content, { mode: 0o600 });
-  return { incidentId, filePath };
+  const idGenerator = generateIdOverride || generateIncidentId;
+
+  for (let attempt = 1; attempt <= MAX_ID_ATTEMPTS; attempt += 1) {
+    const incidentId = idGenerator(now, attempt);
+    const filePath = path.join(dir, `${incidentId}.md`);
+    const content = renderIncidentMarkdown({ incidentId, severity, category, summary: sanitizeSummary(summary), detectedAt });
+    try {
+      writeIncidentFileExclusive(filePath, content);
+      return { incidentId, filePath, attempts: attempt };
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      // Colisão real: o arquivo existente nunca é tocado (a escrita exclusiva nem chegou a abrir o
+      // arquivo para escrita) — apenas tentamos outro incidentId.
+    }
+  }
+  throw new Error(`Não foi possível gerar um incidentId único após ${MAX_ID_ATTEMPTS} tentativas — todas colidiram com um registro já existente em ${dir}.`);
 }
 
 if (require.main === module) {
@@ -135,4 +165,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { createIncident, generateIncidentId, SEVERITIES, CATEGORIES, incidentsDir, sanitizeSummary };
+module.exports = { createIncident, generateIncidentId, SEVERITIES, CATEGORIES, incidentsDir, sanitizeSummary, MAX_ID_ATTEMPTS };

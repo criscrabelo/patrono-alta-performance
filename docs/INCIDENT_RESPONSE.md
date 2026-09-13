@@ -18,10 +18,10 @@ Levantamento dos eventos/sinais já detectáveis via H2-H6, mapeados para o proc
 
 | Tipo | Fonte de detecção | Severidade típica | Responsável | Contenção | Evidência | Comunicação | Recuperação |
 |---|---|---|---|---|---|---|---|
-| Falha de boot (`app_start_failed`) | Log estruturado H6 (FATAL) | SEV-2 (bloqueia deploy) a SEV-1 (se em produção já servindo) | Technical Lead | Não promover a versão; reverter deploy | `requestId` n/a; log FATAL com `errorCode` | Interna (canal técnico) | Corrigir config e reimplantar |
-| Exceção não tratada (`uncaught_exception`/`unhandled_rejection`) | Log estruturado H6 (FATAL) + término do processo | SEV-1/SEV-2 conforme recorrência/impacto | Technical Lead | Processo já termina sozinho (supervisor reinicia) | Log FATAL sanitizado | Interna | Investigar causa raiz, corrigir, redeploy |
+| Falha de boot (`app_start_failed`) | Log estruturado H6 (FATAL) | SEV-2 (bloqueia deploy) a SEV-1 (se em produção já servindo) | Technical Lead | Não promover a versão; considerar reverter para a versão anterior conforme o processo de deploy disponível (H11) | `requestId` n/a; log FATAL com `errorCode` | Interna (canal técnico) | Corrigir config e reimplantar conforme o processo de deploy disponível |
+| Exceção não tratada (`uncaught_exception`/`unhandled_rejection`) | Log estruturado H6 (FATAL) + término do processo | SEV-1/SEV-2 conforme recorrência/impacto | Technical Lead | Processo encerra com código != 0; eventual reinício depende do supervisor/orquestrador do ambiente, quando configurado (H11) | Log FATAL sanitizado | Interna | Investigar causa raiz, corrigir; considerar rollback/redeploy conforme infraestrutura disponível |
 | HTTP 5xx repetido (`repeated_http_5xx`) | Alerta H6 (threshold real, `HTTP_5XX_ALERT_THRESHOLD`) | SEV-2 (ou SEV-1 se disponibilidade total) | Technical Lead | Avaliar rollback/mitigação | `route`, `statusCode`, `count`, janela | Interna | Corrigir causa, monitorar `repeated_http_5xx` parar |
-| Readiness falhando (`readiness_check_failed`, `/api/health/ready`) | Health H6 | SEV-2/SEV-1 conforme duração | Technical Lead | Isolar/reiniciar instância afetada | Log ERROR + resultado do probe | Interna | Restaurar conectividade/schema, confirmar `ready:true` |
+| Readiness falhando (`readiness_check_failed`, `/api/health/ready`) | Health H6 | SEV-2/SEV-1 conforme duração | Technical Lead | Isolar a instância afetada; considerar reiniciar o processo quando o mecanismo de reinício estiver disponível no ambiente | Log ERROR + resultado do probe | Interna | Restaurar conectividade/schema, confirmar `ready:true` |
 | Login/MFA repetidamente falho, lockout (`failed_login_count`/`locked_until`, H2) | `audit_log` de negócio | SEV-3 (isolado) a SEV-1 (indício de comprometimento confirmado) | Security/Privacy Lead | Bloquear conta/revogar sessões | `audit_log` + `credentialsVersion` | Interna, titular se aplicável | Reset de credencial, revisão de acesso |
 | `RATE_LIMIT_TRIGGERED` (H3) | `audit_log` de negócio | SEV-3 (padrão) a SEV-2 (recorrente/coordenado) | Security/Privacy Lead | Bloqueio já é automático (H3); avaliar IP/identidade adicional | `audit_log` (categoria, ator) | Interna | Monitorar; sem ação adicional se dentro do esperado |
 | Sincronização Monday falha (`monday_sync_failed`) | Log estruturado H6 (WARN/ERROR) | SEV-3 (integração não-core) a SEV-2 se prolongado | Technical Lead | Nenhuma ação destrutiva; integração é opcional | Log WARN/ERROR (nunca token/payload) | Interna | Corrigir integração, resync manual |
@@ -225,6 +225,15 @@ severidade; o preenchimento nominal é operacional, fora do repositório.
   comunicação definido") exige um elemento operacional real que ainda não foi parametrizado. Fechar
   PG-20 sem essa parametrização seria fechar por intenção, não por comprovação — mesma disciplina já
   aplicada a PG-21/H5 e PG-17/H6.
+- **Nenhum supervisor/orquestrador de processo (systemd, Docker, Kubernetes, Fly.io, etc.) está
+  implementado ou configurado nesta rodada** — isso é H11 (deploy/infraestrutura), explicitamente fora
+  de escopo aqui. As ações de "recuperar"/"reiniciar" descritas nos runbooks descrevem o QUE fazer, não
+  afirmam QUE existe hoje um mecanismo automático que faça isso — a execução real depende do que estiver
+  disponível no ambiente operacional em cada momento.
+- **O registro local de incidente (`scripts/create-incident.js`) é uma ferramenta operacional, não um
+  armazenamento forense/durável de produção** — o arquivo gerado fica em `incidents/` (diretório local,
+  nunca versionado). Persistência/retenção durável desse registro é responsabilidade do processo
+  operacional do ambiente (H8/H11), nunca implementada por este script.
 
 ## 16. Referências
 
