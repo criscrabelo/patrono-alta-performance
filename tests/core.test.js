@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, seed, parseCsv, hash, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, isValidCivilDate, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, hasGlobalScope, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, validateLegalDeadline, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems } = require('../server');
+const { ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, seed, parseCsv, hash, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, isValidCivilDate, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, hasGlobalScope, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, validateLegalDeadline, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, legalDeadlineLabels, legalDeadlineConfirmationLabel } = require('../server');
 const { WIDGET_TYPES, DASHBOARD_DEFINITIONS } = require('../dashboard-model');
 const { dashboardPayload } = require('../dashboard-service');
 const { PROJECT_ID, ensureProjectStore, projectDetail, projectPermissions } = require('../project-service');
@@ -788,12 +788,17 @@ test('legalDeadlineAttentionItems(): vencido entra como OVERDUE; suspenso/cumpri
   assert.deepEqual(items.map(i => i.entityId), ['ld-vencido'], 'somente o prazo ativo+vencido entra em Atenção; suspenso/cumprido/cancelado nunca contam como overdue');
   assert.equal(items[0].category, 'OVERDUE');
 
-  const agendaItems = legalDeadlineAgendaItems(store, agendaUser);
+  // Sprint 2, Fase 4B (D4.15 homologada): suspenso/cumprido/cancelado ficam fora da Agenda operacional
+  // por padrão — a flag `overdue` deles só é observável passando includeInactive:true explicitamente.
+  const agendaItems = legalDeadlineAgendaItems(store, agendaUser, { includeInactive: true });
   const overdueFlags = Object.fromEntries(agendaItems.map(i => [i.entityId, i.overdue]));
   assert.equal(overdueFlags['ld-vencido'], true);
   assert.equal(overdueFlags['ld-suspenso'], false);
   assert.equal(overdueFlags['ld-cumprido'], false);
   assert.equal(overdueFlags['ld-cancelado'], false);
+
+  const defaultAgendaItems = legalDeadlineAgendaItems(store, agendaUser);
+  assert.deepEqual(defaultAgendaItems.map(i => i.entityId), ['ld-vencido'], 'por padrão (sem includeInactive), a Agenda operacional só mostra o prazo ativo/vencido — D4.15');
 });
 
 test('legalDeadlineAttentionItems(): próximo dentro da janela de 30 dias entra como UPCOMING, reutilizando civilDateAfterDays()', () => {
@@ -896,4 +901,214 @@ test('itens de Agenda/Atenção sempre contêm entityType/entityId; nenhuma cóp
   const keysAfter = Object.keys(store.records).sort();
   assert.deepEqual(keysAfter, keysBefore, 'nenhuma nova coleção (agendaDeadline/agendaLegalDeadline/copiedDeadline/deadlineSnapshot ou equivalente) foi criada em store.records');
   assert.equal(store.records.legalDeadlines.length, 1, 'nenhuma duplicata de Legal Deadline foi persistida ao montar as views');
+});
+
+// ============================================================================================
+// Sprint 2, Fase 4B — testes unitários (responsibleUserId, Minha Semana, D4.15, Calendar adapter)
+// ============================================================================================
+
+const responsibleUser = { role: 'lider', department: 'Jurídico' };
+function buildResponsibleStore(users, deadlines = [], processOverrides = {}) {
+  return {
+    records: { processos: [{ id: 'proc-1', source: 'monday', department: 'Jurídico', deletedAt: null, ...processOverrides }], legalDeadlines: deadlines },
+    users,
+    agenda: [],
+    audit: []
+  };
+}
+function baseDeadlineCandidate(overrides = {}) {
+  return { processId: 'proc-1', origin: 'Prazo', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', ...overrides };
+}
+
+test('validateLegalDeadline(): responsibleUserId ausente permanece válido (campo opcional)', () => {
+  const store = buildResponsibleStore([]);
+  const result = validateLegalDeadline(baseDeadlineCandidate(), responsibleUser, store);
+  assert.equal(result, null);
+});
+
+test('validateLegalDeadline(): responsibleUserId de usuário existente e ativo é aceito', () => {
+  const store = buildResponsibleStore([{ id: 'usr-1', name: 'Fulano', deletedAt: null }]);
+  const result = validateLegalDeadline(baseDeadlineCandidate({ responsibleUserId: 'usr-1' }), responsibleUser, store);
+  assert.equal(result, null);
+});
+
+test('validateLegalDeadline(): responsibleUserId de usuário inexistente é rejeitado', () => {
+  const store = buildResponsibleStore([{ id: 'usr-1', name: 'Fulano', deletedAt: null }]);
+  const result = validateLegalDeadline(baseDeadlineCandidate({ responsibleUserId: 'usr-inexistente' }), responsibleUser, store);
+  assert.equal(result.status, 422);
+});
+
+test('validateLegalDeadline(): NOVA atribuição a usuário inativo (deletedAt) é rejeitada', () => {
+  const store = buildResponsibleStore([{ id: 'usr-inativo', name: 'Inativo', deletedAt: '2026-01-01T00:00:00.000Z' }]);
+  const result = validateLegalDeadline(baseDeadlineCandidate({ responsibleUserId: 'usr-inativo' }), responsibleUser, store, null);
+  assert.equal(result.status, 422);
+});
+
+test('validateLegalDeadline(): campo textual responsible/responsibleName/ownerName nunca substitui responsibleUserId', () => {
+  const store = buildResponsibleStore([]);
+  const candidate = baseDeadlineCandidate({ responsible: 'Fulano de Tal', responsibleName: 'Fulano', ownerName: 'Fulano' });
+  const result = validateLegalDeadline(candidate, responsibleUser, store);
+  assert.equal(result, null, 'nenhum desses campos textuais é validado como responsável — responsibleUserId continua undefined');
+  assert.equal(candidate.responsibleUserId, undefined);
+});
+
+test('validateLegalDeadline(): responsável do Legal Deadline pode ser diferente do responsável do processo (não há herança nem restrição cruzada)', () => {
+  const store = buildResponsibleStore([{ id: 'usr-1', name: 'Fulano', deletedAt: null }], [], { responsibleUserId: 'usr-outro' });
+  const result = validateLegalDeadline(baseDeadlineCandidate({ responsibleUserId: 'usr-1' }), responsibleUser, store);
+  assert.equal(result, null);
+});
+
+test('validateLegalDeadline(): responsibleUserId nunca é inferido automaticamente — omitido na criação permanece omitido', () => {
+  const store = buildResponsibleStore([{ id: 'usr-1', name: 'Fulano', deletedAt: null }]);
+  const candidate = baseDeadlineCandidate();
+  validateLegalDeadline(candidate, responsibleUser, store);
+  assert.equal(candidate.responsibleUserId, undefined, 'nada preenche responsibleUserId a partir do criador/processo/departamento');
+});
+
+test('validateLegalDeadline(): usuário responsável que SE TORNA inativo depois não invalida revalidações futuras do mesmo Legal Deadline (D4.11 — histórico nunca apagado)', () => {
+  const store = buildResponsibleStore([{ id: 'usr-1', name: 'Fulano', deletedAt: '2026-02-01T00:00:00.000Z' }]);
+  const candidate = baseDeadlineCandidate({ responsibleUserId: 'usr-1' });
+  const result = validateLegalDeadline(candidate, responsibleUser, store, 'usr-1');
+  assert.equal(result, null, 'mesma atribuição (previousResponsibleUserId === responsibleUserId) não é bloqueada mesmo com o usuário já inativo');
+});
+
+test('responsibleInfo(): sinaliza responsibleInactive quando o usuário responsável está com deletedAt, sem apagar responsibleUserId', () => {
+  const store = buildResponsibleStore([{ id: 'usr-1', name: 'Fulano', deletedAt: '2026-02-01T00:00:00.000Z' }]);
+  const info = responsibleInfo(store, { responsibleUserId: 'usr-1' });
+  assert.equal(info.responsibleUserId, 'usr-1');
+  assert.equal(info.responsibleInactive, true);
+});
+
+test('responsibleInfo(): sem responsibleUserId retorna responsibleInactive false e responsibleUserId null', () => {
+  const store = buildResponsibleStore([]);
+  assert.deepEqual(responsibleInfo(store, {}), { responsibleUserId: null, responsibleInactive: false });
+});
+
+test('responsibleUserId não amplia scoped() — legalDeadlineAgendaItems() de outra empresa continua fora de escopo mesmo sendo o responsável', () => {
+  const store = buildResponsibleStore(
+    [{ id: 'usr-1', name: 'Fulano', deletedAt: null }],
+    [{ id: 'ld-fora', processId: 'proc-2', origin: 'Fora de escopo', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', responsibleUserId: 'usr-1', companyId: 'empresa-B', scopeType: 'company' }],
+    {}
+  );
+  store.records.processos.push({ id: 'proc-2', source: 'monday', companyId: 'empresa-B', scopeType: 'company', deletedAt: null });
+  const scopedUser = { id: 'usr-1', role: 'colaborador', department: 'Jurídico', companyId: 'empresa-A', scopeType: 'company' };
+  const items = legalDeadlineAgendaItems(store, scopedUser);
+  assert.deepEqual(items, [], 'responsibleUserId === usr-1 não basta — scoped() por companyId continua bloqueando o registro de outra empresa');
+});
+
+test('isOperationallyVisible(): cumprido/cancelado/suspenso não são visíveis por padrão; ativo e demais status permanecem', () => {
+  assert.equal(isOperationallyVisible('ativo'), true);
+  assert.equal(isOperationallyVisible('cumprido'), false);
+  assert.equal(isOperationallyVisible('cancelado'), false);
+  assert.equal(isOperationallyVisible('suspenso'), false);
+  assert.equal(isOperationallyVisible(undefined), true, 'registro legado sem status não é escondido pela D4.15 — apenas os 3 status fechados são');
+});
+
+test('D4.15: legalDeadlineAgendaItems() não mostra cumprido/cancelado/suspenso por padrão; includeInactive=true devolve todos, sem apagar/alterar nenhum registro', () => {
+  const store = buildAgendaStore([
+    { id: 'ld-ativo', processId: 'proc-1', origin: 'Ativo', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', department: 'Jurídico' },
+    { id: 'ld-cumprido', processId: 'proc-1', origin: 'Cumprido', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', status: 'cumprido', department: 'Jurídico' },
+    { id: 'ld-cancelado', processId: 'proc-1', origin: 'Cancelado', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', status: 'cancelado', department: 'Jurídico' },
+    { id: 'ld-suspenso', processId: 'proc-1', origin: 'Suspenso', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', status: 'suspenso', department: 'Jurídico' }
+  ]);
+  const defaultItems = legalDeadlineAgendaItems(store, agendaUser);
+  assert.deepEqual(defaultItems.map(i => i.entityId), ['ld-ativo']);
+  const allItems = legalDeadlineAgendaItems(store, agendaUser, { includeInactive: true });
+  assert.deepEqual(allItems.map(i => i.entityId).sort(), ['ld-ativo', 'ld-cancelado', 'ld-cumprido', 'ld-suspenso']);
+  assert.equal(store.records.legalDeadlines.length, 4, 'nenhum registro foi removido/alterado ao filtrar a view');
+});
+
+test('civilWeekWindow(): segunda pertence à própria semana; domingo seguinte não entra; fuso America/Sao_Paulo', () => {
+  const monday = civilWeekWindow('2026-09-14');
+  assert.equal(monday.start, '2026-09-14');
+  assert.equal(monday.end, '2026-09-20');
+  const sunday = civilWeekWindow('2026-09-20');
+  assert.equal(sunday.start, '2026-09-14', 'domingo pertence à MESMA semana civil corrente (segunda a domingo), não à semana seguinte');
+  assert.equal(sunday.end, '2026-09-20');
+  const nextMonday = civilWeekWindow('2026-09-21');
+  assert.equal(nextMonday.start, '2026-09-21', 'segunda seguinte inicia uma nova janela — não é "próximos 7 dias corridos" a partir de qualquer data');
+});
+
+test('myWeekLegalDeadlineItems(): Legal Deadline do usuário logado, dentro da semana civil corrente, aparece; de outro usuário não aparece', () => {
+  const window = civilWeekWindow();
+  const store = buildResponsibleStore(
+    [{ id: 'usr-1', name: 'Fulano', deletedAt: null }, { id: 'usr-2', name: 'Ciclano', deletedAt: null }],
+    [
+      { id: 'ld-meu', processId: 'proc-1', origin: 'Meu prazo', date: window.start, originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', responsibleUserId: 'usr-1', department: 'Jurídico' },
+      { id: 'ld-outro', processId: 'proc-1', origin: 'De outro usuário', date: window.start, originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', responsibleUserId: 'usr-2', department: 'Jurídico' }
+    ]
+  );
+  const user1 = { id: 'usr-1', role: 'lider', department: 'Jurídico' };
+  const items = myWeekLegalDeadlineItems(store, user1);
+  assert.deepEqual(items.map(i => i.entityId), ['ld-meu']);
+});
+
+test('myWeekLegalDeadlineItems(): item fora da janela (semana anterior/seguinte) não aparece; cumprido/cancelado/suspenso não aparecem; nada é persistido (view pura)', () => {
+  const window = civilWeekWindow();
+  const store = buildResponsibleStore(
+    [{ id: 'usr-1', name: 'Fulano', deletedAt: null }],
+    [
+      { id: 'ld-nesta-semana', processId: 'proc-1', origin: 'Nesta semana', date: window.start, originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', responsibleUserId: 'usr-1', department: 'Jurídico' },
+      { id: 'ld-semana-anterior', processId: 'proc-1', origin: 'Semana anterior', date: '2000-01-03', originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', responsibleUserId: 'usr-1', department: 'Jurídico' },
+      { id: 'ld-cumprido', processId: 'proc-1', origin: 'Cumprido', date: window.start, originType: 'JUDICIAL_PROCESSUAL', status: 'cumprido', responsibleUserId: 'usr-1', department: 'Jurídico' }
+    ]
+  );
+  const keysBefore = Object.keys(store).sort();
+  const user1 = { id: 'usr-1', role: 'lider', department: 'Jurídico' };
+  const items = myWeekLegalDeadlineItems(store, user1);
+  assert.deepEqual(items.map(i => i.entityId), ['ld-nesta-semana']);
+  assert.deepEqual(Object.keys(store).sort(), keysBefore, 'myWeekLegalDeadlineItems() nunca cria uma coleção persistida nova (myWeek/weeklyItems/weekSnapshot ou equivalente)');
+});
+
+test('myWeekLegalDeadlineItems(): processo fora de escopo bloqueia o item mesmo com responsibleUserId correto (defesa em profundidade)', () => {
+  const window = civilWeekWindow();
+  const store = {
+    records: {
+      processos: [{ id: 'proc-restrito', source: 'monday', deletedAt: null, companyId: 'empresa-B', scopeType: 'company' }],
+      legalDeadlines: [{ id: 'ld-bloqueado', processId: 'proc-restrito', origin: 'Bloqueado', date: window.start, originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', responsibleUserId: 'usr-1', companyId: 'empresa-B', scopeType: 'company' }]
+    },
+    users: [{ id: 'usr-1', name: 'Fulano', deletedAt: null }],
+    agenda: [], audit: []
+  };
+  const user1 = { id: 'usr-1', role: 'colaborador', department: 'Jurídico', companyId: 'empresa-A', scopeType: 'company' };
+  assert.deepEqual(myWeekLegalDeadlineItems(store, user1), []);
+});
+
+test('googleCalendarStatus()/googleCalendarEvents(): nunca expõem token/segredo; status not_configured sem credenciais de ambiente; eventos vazios (somente leitura, adapter)', () => {
+  const status = googleCalendarStatus({ id: 'usr-1' });
+  assert.equal(typeof status.configured, 'boolean');
+  assert.equal(status.connected, false);
+  assert.ok(['not_configured', 'unavailable'].includes(status.status));
+  assert.ok(!('token' in status) && !('accessToken' in status) && !('refreshToken' in status));
+  const events = googleCalendarEvents({ id: 'usr-1' });
+  assert.deepEqual(events.events, [], 'sem integração real ativada nesta fase, nenhum evento é sintetizado/simulado');
+});
+
+test('legalDeadlineLabels() (D4.5/D4.6): rótulos em português para originType/status, sem alterar o enum técnico persistido', () => {
+  assert.deepEqual(legalDeadlineLabels({ originType: 'JUDICIAL_PROCESSUAL', status: 'ativo' }), { originTypeLabel: 'Prazo processual', statusLabel: 'Ativo' });
+  assert.deepEqual(legalDeadlineLabels({ originType: 'INTERNAL_CONTROL', status: 'cumprido' }), { originTypeLabel: 'Controle interno', statusLabel: 'Cumprido' });
+  assert.deepEqual(legalDeadlineLabels({ originType: 'INTERNAL_CONTROL', status: 'suspenso' }), { originTypeLabel: 'Controle interno', statusLabel: 'Suspenso' });
+  assert.deepEqual(legalDeadlineLabels({ originType: 'JUDICIAL_PROCESSUAL', status: 'cancelado' }), { originTypeLabel: 'Prazo processual', statusLabel: 'Cancelado' });
+  assert.deepEqual(legalDeadlineLabels({}), { originTypeLabel: null, statusLabel: null }, 'registro legado sem originType/status não recebe rótulo inventado');
+});
+
+test('legalDeadlineConfirmationLabel() (D4.4): "Confirmado pelo Jurídico" nunca aparece para requires_review; aparece para qualquer outro estado válido (INTERNAL_CONTROL, suspenso, cumprido, cancelado, reaberto)', () => {
+  assert.equal(legalDeadlineConfirmationLabel('requires_review'), null, 'registro legado/sem originType-status nunca é tratado como confirmado');
+  assert.equal(legalDeadlineConfirmationLabel('ok'), 'Confirmado pelo Jurídico');
+});
+
+test('D4.15/D4.4: item categorizado como REQUIRES_REVIEW nunca recebe confirmationLabel "Confirmado pelo Jurídico"', () => {
+  const store = buildAgendaStore([
+    { id: 'ld-legado-confirmacao', processId: 'proc-1', origin: 'Legado', date: '2020-01-01', department: 'Jurídico' }
+  ]);
+  const items = legalDeadlineAttentionItems(store, agendaUser);
+  assert.equal(items[0].category, 'REQUIRES_REVIEW');
+  assert.equal(items[0].confirmationLabel, null);
+});
+
+test('server.js não contém nenhum método de escrita do Google Calendar (events.insert/update/patch/delete) — Calendar é somente leitura', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  for (const writeMethod of ['events.insert', 'events.update', 'events.patch', 'events.delete', 'calendar.events.insert', 'calendar.events.delete']) {
+    assert.ok(!source.includes(writeMethod), `server.js não deve conter o método de escrita do Google Calendar: ${writeMethod}`);
+  }
 });

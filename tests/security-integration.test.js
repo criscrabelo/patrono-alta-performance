@@ -37,7 +37,12 @@ const EMAILS = {
   diretoria: 'juridico@coevoconstrutora.com.br',
   // Rodada 5, item 3: administrador técnico — modules:['*']/actions:['*'] (gestão de sistema/
   // integrações), mas scopes:[] (não é alçada de negócio global; não pode ser superusuário de conteúdo).
-  administrador: 'administrador.teste@coevo.local'
+  administrador: 'administrador.teste@coevo.local',
+  // Sprint 2, Fase 4B — usuários dedicados aos testes de responsibleUserId/Minha Semana: um responsável
+  // ativo comum e um usuário já INATIVO (deletedAt preenchido no seed) para os testes de "nova
+  // atribuição a usuário inativo".
+  responsavelAtivo: 'responsavel.ativo.teste@coevo.local',
+  responsavelInativo: 'responsavel.inativo.teste@coevo.local'
 };
 
 test.before(async () => {
@@ -57,7 +62,13 @@ test.before(async () => {
     // coincidência de department, mesmo sem nenhum módulo reconhecido em ROLES.
     { id: 'usr-teste-sem-acesso', name: 'Sem Acesso Teste', email: EMAILS.semAcesso, role: 'externo', department: 'Jurídico', mfa: false },
     // Rodada 5, item 3 — administrador técnico, sem department (papel de sistema, não de negócio).
-    { id: 'usr-teste-administrador', name: 'Administrador Técnico Teste', email: EMAILS.administrador, role: 'administrador', department: null, mfa: true }
+    { id: 'usr-teste-administrador', name: 'Administrador Técnico Teste', email: EMAILS.administrador, role: 'administrador', department: null, mfa: true },
+    // Sprint 2, Fase 4B: responsável ativo comum (para atribuição/reatribuição de Legal Deadline e
+    // para logar e ter sua própria Minha Semana testada).
+    { id: 'usr-teste-responsavel-ativo', name: 'Responsável Ativo Teste', email: EMAILS.responsavelAtivo, role: 'colaborador', department: 'Jurídico', mfa: false },
+    // Usuário JÁ inativo no seed (deletedAt preenchido) — reaproveita a mesma convenção de soft-delete
+    // usada em toda a plataforma para representar "usuário não mais válido" (D4.2/D4.3/D4.11).
+    { id: 'usr-teste-responsavel-inativo', name: 'Responsável Inativo Teste', email: EMAILS.responsavelInativo, role: 'colaborador', department: 'Jurídico', mfa: false, deletedAt: '2026-01-01T00:00:00.000Z', deletedBy: 'Teste' }
   );
   if (!store.records) store.records = {};
   store.records.processos = [
@@ -1932,4 +1943,311 @@ test('[HTTP] reabertura: suspenso não aparece como overdue; após reabertura co
   const agendaItems = await api('GET', '/api/agenda-items', { token });
   const agendaItem = agendaItems.body.items.find(i => i.entityId === id);
   assert.equal(agendaItem.overdue, true);
+});
+
+// ============================================================================================
+// Sprint 2, Fase 4B — testes HTTP (responsibleUserId, Minha Semana, D4.15, Google Calendar)
+// ============================================================================================
+
+test('[HTTP] POST /api/entities/legalDeadlines com responsibleUserId válido é aceito e persiste o campo', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const responsavel = await loginAs(EMAILS.responsavelAtivo);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Prazo com responsável (Fase 4B)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', responsibleUserId: 'usr-teste-responsavel-ativo' } });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.responsibleUserId, 'usr-teste-responsavel-ativo');
+  void responsavel;
+});
+
+test('[HTTP] POST /api/entities/legalDeadlines sem responsibleUserId continua válido (campo opcional)', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Prazo sem responsável (Fase 4B)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.responsibleUserId, undefined);
+});
+
+test('[HTTP] POST /api/entities/legalDeadlines com responsibleUserId inexistente é rejeitado com 422, sem persistir nada', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const before = readStore().records.legalDeadlines.length;
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Prazo com responsável inexistente (Fase 4B)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', responsibleUserId: 'usr-nao-existe' } });
+  assert.equal(created.status, 422);
+  assert.equal(readStore().records.legalDeadlines.length, before, 'nada foi persistido quando responsibleUserId é inválido');
+});
+
+test('[HTTP] POST /api/entities/legalDeadlines: campos textuais responsible/responsibleName/ownerName nunca substituem responsibleUserId', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Prazo com nome textual (Fase 4B)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', responsible: 'Fulano de Tal', responsibleName: 'Fulano', ownerName: 'Fulano' } });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.responsibleUserId, undefined, 'nenhum campo textual é aceito como substituto de responsibleUserId');
+});
+
+test('[HTTP] PATCH de responsável: reatribuição para outro usuário ativo é aceita, incrementa version e gera auditoria before/after', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Prazo para reatribuição (Fase 4B)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  const id = created.body.id;
+
+  const patched = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { responsibleUserId: 'usr-teste-responsavel-ativo' } });
+  assert.equal(patched.status, 200);
+  assert.equal(patched.body.responsibleUserId, 'usr-teste-responsavel-ativo');
+  assert.equal(patched.body.version, created.body.version + 1);
+
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  const detail = await api('GET', `/api/entities/legalDeadlines/${id}/detail`, { token: tokenDiretoria });
+  assert.equal(detail.status, 200);
+  const updateEvent = detail.body.history.find(event => event.action === 'UPDATE');
+  assert.ok(updateEvent, 'a reatribuição de responsável gera um evento de auditoria UPDATE');
+  assert.equal(updateEvent.before.responsibleUserId, undefined, 'auditoria preserva o estado ANTES da atribuição');
+  assert.equal(updateEvent.after.responsibleUserId, 'usr-teste-responsavel-ativo', 'auditoria preserva o estado DEPOIS da atribuição');
+});
+
+test('[HTTP] PATCH de responsável: atribuição a usuário INATIVO é rejeitada com 422, sem alterar o registro', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Prazo para tentativa de responsável inativo (Fase 4B)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  const id = created.body.id;
+
+  const patched = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { responsibleUserId: 'usr-teste-responsavel-inativo' } });
+  assert.equal(patched.status, 422);
+
+  const after = await api('GET', `/api/entities/legalDeadlines`, { token });
+  const item = after.body.find(i => i.id === id);
+  assert.equal(item.responsibleUserId, undefined, 'a tentativa rejeitada não altera o registro');
+  assert.equal(item.version, created.body.version, 'version não é incrementada em uma atribuição rejeitada');
+});
+
+test('[HTTP] PATCH de responsável: remover responsável (responsibleUserId nulo) não é suportado nesta fase — 422, sem invenção de "desatribuir"', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Prazo para tentativa de remoção de responsável (Fase 4B)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', responsibleUserId: 'usr-teste-responsavel-ativo' } });
+  const id = created.body.id;
+
+  const patched = await api('PATCH', `/api/entities/legalDeadlines/${id}`, { token, json: { responsibleUserId: null } });
+  assert.equal(patched.status, 422);
+
+  const after = await api('GET', '/api/entities/legalDeadlines', { token });
+  const item = after.body.find(i => i.id === id);
+  assert.equal(item.responsibleUserId, 'usr-teste-responsavel-ativo', 'responsibleUserId permanece intacto após a tentativa rejeitada de remoção');
+});
+
+test('[HTTP] D4.11: responsável que se torna inativo depois não é apagado do Legal Deadline; view sinaliza responsibleInactive', async () => {
+  const store = readStore();
+  store.users.push({ id: 'usr-teste-fica-inativo', name: 'Fica Inativo Teste', email: 'fica.inativo.teste@coevo.local', role: 'colaborador', department: 'Jurídico', mfa: false });
+  writeStore(store);
+
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Prazo D4.11 (Fase 4B)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', responsibleUserId: 'usr-teste-fica-inativo' } });
+  const id = created.body.id;
+
+  const storeNow = readStore();
+  storeNow.users.find(u => u.id === 'usr-teste-fica-inativo').deletedAt = new Date().toISOString();
+  writeStore(storeNow);
+
+  const detail = await api('GET', `/api/entities/legalDeadlines/${id}/detail`, { token });
+  assert.equal(detail.status, 200);
+  assert.equal(detail.body.responsibleUserId, 'usr-teste-fica-inativo', 'responsibleUserId nunca é apagado quando o usuário se torna inativo');
+  assert.equal(detail.body.responsibleInactive, true, 'view sinaliza "responsável inativo"');
+  assert.equal(detail.body.status, 'ativo', 'status do Legal Deadline não é alterado pela inatividade do responsável');
+});
+
+test('[HTTP] GET /api/my-week: Legal Deadline do usuário logado dentro da semana civil corrente aparece; de outro usuário não aparece', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const civilWeek = require('../server').civilWeekWindow();
+  const created = await api('POST', '/api/entities/legalDeadlines', { token: tokenJuridico, json: { processId: 'proc-juridico-teste', origin: 'Minha Semana — meu prazo (Fase 4B)', date: civilWeek.start, originType: 'JUDICIAL_PROCESSUAL', responsibleUserId: 'usr-teste-responsavel-ativo' } });
+  assert.equal(created.status, 201);
+  const createdOutro = await api('POST', '/api/entities/legalDeadlines', { token: tokenJuridico, json: { processId: 'proc-juridico-teste', origin: 'Minha Semana — de outro usuário (Fase 4B)', date: civilWeek.start, originType: 'JUDICIAL_PROCESSUAL', responsibleUserId: 'usr-teste-lider-juridico' } });
+  assert.equal(createdOutro.status, 201);
+
+  const tokenResponsavel = await loginAs(EMAILS.responsavelAtivo);
+  const myWeek = await api('GET', '/api/my-week', { token: tokenResponsavel });
+  assert.equal(myWeek.status, 200);
+  assert.ok(myWeek.body.items.some(i => i.entityId === created.body.id), 'aparece o Legal Deadline do próprio usuário logado, dentro da semana civil corrente');
+  assert.ok(!myWeek.body.items.some(i => i.entityId === createdOutro.body.id), 'nunca aparece o Legal Deadline atribuído a outro usuário');
+  assert.equal(myWeek.body.window.start, civilWeek.start);
+  assert.equal(myWeek.body.window.end, civilWeek.end);
+});
+
+test('[HTTP] GET /api/my-week: companyId fora de escopo bloqueia o item mesmo sendo o responsável (defesa em profundidade)', async () => {
+  const store = readStore();
+  store.records.processos.push({ id: 'proc-fase4b-empresa-b', source: 'monday', department: 'Jurídico', companyId: 'fase4b-empresa-b', scopeType: 'company', title: 'Processo Fase 4B Empresa B', deletedAt: null });
+  store.users.push({ id: 'usr-teste-fase4b-empresa-a', name: 'Responsável Fase4B Empresa A', email: 'responsavel.fase4b.empresa.a@coevo.local', role: 'colaborador', department: 'Jurídico', companyId: 'fase4b-empresa-a', scopeType: 'company', mfa: false });
+  writeStore(store);
+
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  const civilWeek = require('../server').civilWeekWindow();
+  const created = await api('POST', '/api/entities/legalDeadlines', { token: tokenDiretoria, json: { processId: 'proc-fase4b-empresa-b', origin: 'Minha Semana — empresa B (Fase 4B)', date: civilWeek.start, originType: 'JUDICIAL_PROCESSUAL', responsibleUserId: 'usr-teste-fase4b-empresa-a', companyId: 'fase4b-empresa-b', scopeType: 'company' } });
+  assert.equal(created.status, 201);
+
+  const tokenEmpresaA = await loginAs('responsavel.fase4b.empresa.a@coevo.local');
+  const myWeek = await api('GET', '/api/my-week', { token: tokenEmpresaA });
+  assert.equal(myWeek.status, 200);
+  assert.ok(!myWeek.body.items.some(i => i.entityId === created.body.id), 'responsibleUserId não amplia autorização — scoped() por companyId continua bloqueando');
+});
+
+test('[HTTP] GET /api/my-week: speId fora de escopo bloqueia o item mesmo sendo o responsável', async () => {
+  const store = readStore();
+  store.records.processos.push({ id: 'proc-fase4b-spe-y', source: 'monday', department: 'Jurídico', speId: 'fase4b-spe-y', scopeType: 'spe', title: 'Processo Fase 4B SPE Y', deletedAt: null });
+  store.users.push({ id: 'usr-teste-fase4b-spe-x', name: 'Responsável Fase4B SPE X', email: 'responsavel.fase4b.spe.x@coevo.local', role: 'colaborador', department: 'Jurídico', speId: 'fase4b-spe-x', scopeType: 'spe', mfa: false });
+  writeStore(store);
+
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  const civilWeek = require('../server').civilWeekWindow();
+  const created = await api('POST', '/api/entities/legalDeadlines', { token: tokenDiretoria, json: { processId: 'proc-fase4b-spe-y', origin: 'Minha Semana — SPE Y (Fase 4B)', date: civilWeek.start, originType: 'JUDICIAL_PROCESSUAL', responsibleUserId: 'usr-teste-fase4b-spe-x', speId: 'fase4b-spe-y', scopeType: 'spe' } });
+  assert.equal(created.status, 201);
+
+  const tokenSpeX = await loginAs('responsavel.fase4b.spe.x@coevo.local');
+  const myWeek = await api('GET', '/api/my-week', { token: tokenSpeX });
+  assert.equal(myWeek.status, 200);
+  assert.ok(!myWeek.body.items.some(i => i.entityId === created.body.id));
+});
+
+test('[HTTP] GET /api/my-week: líder de TI não recebe conteúdo jurídico de outro usuário, mesmo autenticado', async () => {
+  const tokenTi = await loginAs(EMAILS.liderTi);
+  const myWeek = await api('GET', '/api/my-week', { token: tokenTi });
+  assert.equal(myWeek.status, 200);
+  assert.deepEqual(myWeek.body.items.filter(i => i.entityType === 'legalDeadline'), [], 'TI nunca recebe Legal Deadline em Minha Semana, mesmo que exista algum atribuído por engano a outro id');
+});
+
+test('[HTTP] GET /api/my-week: administrador técnico não ganha conteúdo jurídico por ter módulos de gestão de sistema', async () => {
+  const tokenAdministrador = await loginAs(EMAILS.administrador);
+  const myWeek = await api('GET', '/api/my-week', { token: tokenAdministrador });
+  assert.equal(myWeek.status, 200);
+  assert.deepEqual(myWeek.body.items.filter(i => i.entityType === 'legalDeadline'), []);
+});
+
+test('[HTTP] GET /api/my-week: diretoria só vê em Minha Semana os Legal Deadlines atribuídos à própria diretoria, não o consolidado de todos os usuários', async () => {
+  const tokenJuridico = await loginAs(EMAILS.liderJuridico);
+  const civilWeek = require('../server').civilWeekWindow();
+  const created = await api('POST', '/api/entities/legalDeadlines', { token: tokenJuridico, json: { processId: 'proc-juridico-teste', origin: 'Minha Semana — não é da diretoria (Fase 4B)', date: civilWeek.start, originType: 'JUDICIAL_PROCESSUAL', responsibleUserId: 'usr-teste-responsavel-ativo' } });
+  assert.equal(created.status, 201);
+
+  const tokenDiretoria = await loginAs(EMAILS.diretoria);
+  const myWeek = await api('GET', '/api/my-week', { token: tokenDiretoria });
+  assert.equal(myWeek.status, 200);
+  assert.ok(!myWeek.body.items.some(i => i.entityId === created.body.id), 'Minha Semana é pessoal por identidade/atribuição — alçada global de negócio não torna a diretoria "responsável" por todos os prazos');
+});
+
+test('[HTTP] GET /api/my-week não cria nem altera nenhum registro (é uma view pura, chamadas repetidas são idempotentes)', async () => {
+  const before = JSON.stringify(readStore());
+  const token = await loginAs(EMAILS.responsavelAtivo);
+  await api('GET', '/api/my-week', { token });
+  await api('GET', '/api/my-week', { token });
+  const after = JSON.stringify(readStore());
+  assert.equal(after, before, 'GET /api/my-week nunca persiste nada (nenhuma coleção myWeek/weeklyItems/weekSnapshot é criada nem qualquer registro existente é alterado)');
+});
+
+test('[HTTP] D4.15: GET /api/agenda-items por padrão só mostra ativo/vencido; cumprido/cancelado/suspenso ficam de fora, mas continuam acessíveis via listagem/detalhe/includeInactive', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const ativo = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'D4.15 ativo', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  const paraCumprir = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'D4.15 cumprido', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  const paraCancelar = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'D4.15 cancelado', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  const paraSuspender = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'D4.15 suspenso', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  await api('PATCH', `/api/entities/legalDeadlines/${paraCumprir.body.id}`, { token, json: { status: 'cumprido' } });
+  await api('PATCH', `/api/entities/legalDeadlines/${paraCancelar.body.id}`, { token, json: { status: 'cancelado' } });
+  await api('PATCH', `/api/entities/legalDeadlines/${paraSuspender.body.id}`, { token, json: { status: 'suspenso' } });
+
+  const defaultAgenda = await api('GET', '/api/agenda-items', { token });
+  const idsDefault = defaultAgenda.body.items.map(i => i.entityId);
+  assert.ok(idsDefault.includes(ativo.body.id), 'ativo/vencido continua aparecendo por padrão');
+  assert.ok(!idsDefault.includes(paraCumprir.body.id), 'cumprido não aparece por padrão (D4.15)');
+  assert.ok(!idsDefault.includes(paraCancelar.body.id), 'cancelado não aparece por padrão (D4.15)');
+  assert.ok(!idsDefault.includes(paraSuspender.body.id), 'suspenso não aparece por padrão (D4.15)');
+
+  const includeInactive = await api('GET', '/api/agenda-items?includeInactive=1', { token });
+  const idsIncluding = includeInactive.body.items.map(i => i.entityId);
+  for (const id of [ativo.body.id, paraCumprir.body.id, paraCancelar.body.id, paraSuspender.body.id]) {
+    assert.ok(idsIncluding.includes(id), `?includeInactive=1 continua devolvendo ${id}, sem criar uma API paralela`);
+  }
+
+  // Os mesmos itens fechados continuam acessíveis pela listagem/filtro/detalhe já existentes de Legal
+  // Deadline — nenhum registro foi apagado nem teve status alterado por esta view.
+  const listagemCumprido = await api('GET', '/api/entities/legalDeadlines?paginated=1&status=cumprido', { token });
+  assert.ok(listagemCumprido.body.records.some(r => r.id === paraCumprir.body.id));
+  const detalheSuspenso = await api('GET', `/api/entities/legalDeadlines/${paraSuspender.body.id}/detail`, { token });
+  assert.equal(detalheSuspenso.status, 200);
+  assert.equal(detalheSuspenso.body.status, 'suspenso');
+
+  const store = readStore();
+  for (const id of [ativo.body.id, paraCumprir.body.id, paraCancelar.body.id, paraSuspender.body.id]) {
+    assert.ok(store.records.legalDeadlines.some(item => item.id === id && !item.deletedAt), `nenhum registro (${id}) foi fisicamente apagado`);
+  }
+});
+
+test('[HTTP] D4.5/D4.6/D4.4: Agenda/Atenção/detalhe expõem originTypeLabel/statusLabel/confirmationLabel; requires_review nunca mostra "Confirmado pelo Jurídico"', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const valido = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'D4.5/D4.6 válido', date: '2026-12-01', originType: 'INTERNAL_CONTROL' } });
+  assert.equal(valido.status, 201);
+
+  const agendaItems = await api('GET', '/api/agenda-items', { token });
+  const agendaItem = agendaItems.body.items.find(i => i.entityId === valido.body.id);
+  assert.equal(agendaItem.originTypeLabel, 'Controle interno');
+  assert.equal(agendaItem.statusLabel, 'Ativo');
+  assert.equal(agendaItem.confirmationLabel, 'Confirmado pelo Jurídico');
+
+  const detail = await api('GET', `/api/entities/legalDeadlines/${valido.body.id}/detail`, { token });
+  assert.equal(detail.body.originTypeLabel, 'Controle interno');
+  assert.equal(detail.body.confirmationLabel, 'Confirmado pelo Jurídico');
+
+  const legado = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'D4.4 requires_review', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  const storeForce = readStore();
+  const legadoItem = storeForce.records.legalDeadlines.find(i => i.id === legado.body.id);
+  delete legadoItem.originType;
+  writeStore(storeForce);
+
+  const attention = await api('GET', '/api/attention', { token });
+  const attentionItem = attention.body.items.find(i => i.entityId === legado.body.id);
+  assert.equal(attentionItem.category, 'REQUIRES_REVIEW');
+  assert.equal(attentionItem.categoryLabel, 'Requer revisão');
+  assert.equal(attentionItem.confirmationLabel, null, 'requires_review nunca é tratado como "Confirmado pelo Jurídico"');
+});
+
+test('[HTTP] GET /api/calendar/status e /api/calendar/events: adapter somente leitura, nunca expõe token/segredo, nenhuma escrita', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const status = await api('GET', '/api/calendar/status', { token });
+  assert.equal(status.status, 200);
+  assert.equal(typeof status.body.configured, 'boolean');
+  assert.equal(status.body.connected, false);
+  assert.ok(['not_configured', 'unavailable'].includes(status.body.status));
+  const serialized = JSON.stringify(status.body).toLowerCase();
+  assert.ok(!serialized.includes('token') && !serialized.includes('secret') && !serialized.includes('client_secret'), 'resposta de status nunca inclui token/segredo');
+
+  const events = await api('GET', '/api/calendar/events', { token });
+  assert.equal(events.status, 200);
+  assert.deepEqual(events.body.events, [], 'sem credenciais reais de OAuth configuradas neste ambiente, a leitura fica bloqueada por design (adapter), nunca simulada/inventada');
+  const serializedEvents = JSON.stringify(events.body).toLowerCase();
+  assert.ok(!serializedEvents.includes('token') && !serializedEvents.includes('secret'));
+});
+
+test('[HTTP] Google Calendar: falha/indisponibilidade da integração nunca afeta Legal Deadline nem esconde a Agenda canônica', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Prazo independente do Calendar (Fase 4B)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  assert.equal(created.status, 201);
+
+  await api('GET', '/api/calendar/events', { token });
+  await api('GET', '/api/calendar/status', { token });
+
+  const agendaItems = await api('GET', '/api/agenda-items', { token });
+  assert.ok(agendaItems.body.items.some(i => i.entityId === created.body.id), 'Legal Deadline continua visível na Agenda independentemente do estado da integração de Calendar');
+  const detail = await api('GET', `/api/entities/legalDeadlines/${created.body.id}/detail`, { token });
+  assert.equal(detail.status, 200);
+  assert.equal(detail.body.status, 'ativo', 'status não é alterado por indisponibilidade do Calendar');
+});
+
+test('[HTTP] Google Calendar: leitura repetida nunca cria Legal Deadline/Task/evento de Agenda novo (sem espelhamento/duplicação)', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const beforeLegal = readStore().records.legalDeadlines.length;
+  const beforeAgenda = readStore().agenda.length;
+
+  await api('GET', '/api/calendar/events', { token });
+  await api('GET', '/api/calendar/events', { token });
+  await api('GET', '/api/calendar/status', { token });
+
+  const store = readStore();
+  assert.equal(store.records.legalDeadlines.length, beforeLegal, 'leitura do Calendar nunca cria Legal Deadline');
+  assert.equal(store.agenda.length, beforeAgenda, 'leitura do Calendar nunca cria evento de Agenda');
+  assert.ok(!Object.keys(store).some(key => /calendarevent|calendarsnapshot|mirroredcalendar/i.test(key)), 'nenhuma coleção canônica paralela de eventos de Calendar foi criada');
+});
+
+test('[HTTP] GET /api/my-week combina Legal Deadline com a leitura (vazia, adapter) do Google Calendar, sem misturar as duas fontes', async () => {
+  const token = await loginAs(EMAILS.responsavelAtivo);
+  const myWeek = await api('GET', '/api/my-week', { token });
+  assert.equal(myWeek.status, 200);
+  assert.ok('calendar' in myWeek.body, 'resposta de Minha Semana expõe o estado da integração de Calendar (configured/connected/status)');
+  assert.ok(!myWeek.body.items.some(i => i.entityType === 'calendarEvent'), 'sem integração real configurada neste ambiente, nenhum evento de Calendar é sintetizado/inventado na resposta');
 });

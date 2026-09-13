@@ -89,9 +89,21 @@ const LEGAL_DEADLINE_ORIGIN_TYPES = Object.freeze(['JUDICIAL_PROCESSUAL', 'INTER
 // são valores persistidos — reabertura é o retorno a 'ativo' (ver PATCH de /api/entities/legalDeadlines),
 // e atraso é condição derivada (ver isLegalDeadlineOverdue(), abaixo).
 const LEGAL_DEADLINE_STATUSES = Object.freeze(['ativo', 'suspenso', 'cumprido', 'cancelado']);
-function validateLegalDeadline(candidate, user, store) {
+function validateLegalDeadline(candidate, user, store, previousResponsibleUserId = null) {
   const missing = ['processId','origin','date','originType'].filter(field => !candidate[field]);
   if (missing.length) return { status: 422, error: `Prazo jurídico sem origem identificada bloqueia a operação. Campos obrigatórios ausentes: ${missing.join(', ')}` };
+  // Sprint 2, Fase 4B (D4.2/D4.3, homologadas): responsibleUserId é opcional; quando informado, deve
+  // referenciar um usuário existente. Uma NOVA atribuição (diferente do responsável anterior a este
+  // PATCH/POST) exige usuário ativo — reaproveita o padrão de soft-delete (`deletedAt`) já usado em toda
+  // a plataforma (agenda, projetos, entidades genéricas), em vez de inventar um segundo campo de
+  // "usuário ativo" que não existe hoje em `store.users`. Um responsável já atribuído que depois fica
+  // inativo NÃO invalida revalidações futuras do mesmo Legal Deadline (D4.11 — histórico nunca apagado;
+  // só a NOVA atribuição é bloqueada, nunca a permanência de uma atribuição antiga).
+  if (candidate.responsibleUserId !== undefined && candidate.responsibleUserId !== null) {
+    const responsible = (store.users || []).find(u => u.id === candidate.responsibleUserId);
+    if (!responsible) return { status: 422, error: 'O campo responsibleUserId deve referenciar um usuário existente' };
+    if (candidate.responsibleUserId !== previousResponsibleUserId && responsible.deletedAt) return { status: 422, error: 'Não é possível atribuir um Legal Deadline a um usuário inativo' };
+  }
   // P0 corrigido (rodada 4, item 6): origin e date antes só passavam por um teste de "truthy" — uma
   // string só de espaços, ou uma data como "banana"/"2026-99-99", passavam sem checagem semântica.
   const trimmedOrigin = typeof candidate.origin === 'string' ? candidate.origin.trim() : '';
@@ -132,10 +144,68 @@ function isLegalDeadlineOverdue(deadline, today = todayCivilDate()) {
 // "vencido" nas views — mesmo padrão de fuso de todayCivilDate(), não uma segunda regra de atraso
 // (isLegalDeadlineOverdue() continua sendo a única fonte da condição "vencido").
 function civilDateAfterDays(days) { return new Date(Date.now() + days * 86400000).toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' }); }
+// Sprint 2, Fase 4B (D4.15 homologada): cumprido/cancelado/suspenso não aparecem por padrão na Agenda
+// operacional — só ativo e vencido (derivado). Nunca remove o registro nem muda seu status; os mesmos
+// itens continuam acessíveis via detalhe/histórico/filtro explícito de Legal Deadline.
+function isOperationallyVisible(status) { return status !== 'cumprido' && status !== 'cancelado' && status !== 'suspenso'; }
+// Sprint 2, Fase 4B (D4.10 homologada): "Minha Semana" é a semana civil CORRENTE, segunda a domingo,
+// fuso America/Sao_Paulo — nunca "próximos 7 dias corridos". Calculado a partir de todayCivilDate()
+// (mesmo padrão de fuso já usado em todo o Sprint 2), sem depender de aritmética ingênua em UTC.
+function civilWeekWindow(today = todayCivilDate()) {
+  const [y, m, d] = today.split('-').map(Number);
+  const base = new Date(y, m - 1, d);
+  const dow = base.getDay();
+  const diffToMonday = (dow + 6) % 7;
+  const monday = new Date(base); monday.setDate(base.getDate() - diffToMonday);
+  const sunday = new Date(monday); sunday.setDate(monday.getDate() + 6);
+  const fmt = dt => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+  return { start: fmt(monday), end: fmt(sunday) };
+}
+// Sprint 2, Fase 4B (D4.11 homologada): responsibleUserId nunca é apagado/alterado quando o usuário
+// responsável se torna inativo depois — a view apenas sinaliza a inconsistência ("Responsável
+// inativo"), reaproveitando a mesma convenção de soft-delete (`deletedAt`) já usada em toda a
+// plataforma como representação de "registro/usuário não mais válido" (nenhum campo novo inventado).
+function responsibleInfo(store, item) {
+  const responsibleUserId = item.responsibleUserId ?? null;
+  if (!responsibleUserId) return { responsibleUserId: null, responsibleInactive: false };
+  const responsible = (store.users || []).find(u => u.id === responsibleUserId);
+  return { responsibleUserId, responsibleInactive: Boolean(responsible && responsible.deletedAt) };
+}
+// Sprint 2, Fase 4B (Opção B homologada, D4.1, docs/DECISIONS.md): adapter somente leitura do Google
+// Calendar. Nenhum método de escrita da API do Calendar (criar/atualizar/remover evento) existe neste
+// arquivo — Calendar nunca é fonte de prazo jurídico, nunca é espelhado a partir de Legal Deadline, nunca é
+// alterado pelo Patrono. Sem credenciais reais de OAuth do Google neste ambiente
+// (GOOGLE_CALENDAR_CLIENT_ID/SECRET), a ativação real permanece bloqueada por design — reportado como
+// blocker técnico (não uma implementação insegura/improvisada só para "fechar" a integração).
+// Compromissos do Calendar pertencem à identidade do usuário CONECTADO — nunca uma agenda corporativa
+// global (alçada global de negócio não dá acesso ao Calendar pessoal de outro usuário).
+function googleCalendarStatus(user) {
+  const configured = Boolean(process.env.GOOGLE_CALENDAR_CLIENT_ID && process.env.GOOGLE_CALENDAR_CLIENT_SECRET);
+  return { configured, connected: false, status: configured ? 'unavailable' : 'not_configured' };
+}
+function googleCalendarEvents(user) {
+  return { ...googleCalendarStatus(user), events: [] };
+}
 // Registros legados anteriores à homologação da D1 podem existir sem originType/status persistidos
 // (docs/DATA_MODEL.md, "Registros legados anteriores à D1"). Nunca inferimos esses campos — a view
 // apenas sinaliza a inconsistência para revisão manual do Jurídico, sem inventar um status novo.
 function legalDeadlineIntegrityFlag(deadline) { return (!deadline || !deadline.originType || !deadline.status) ? 'requires_review' : 'ok'; }
+// Sprint 2, Fase 4B (D4.5/D4.6 homologadas): rótulos de apresentação em português — nunca alteram o
+// enum técnico persistido (originType/status continuam JUDICIAL_PROCESSUAL/ativo/etc.), apenas
+// adicionam um campo derivado para quem consome a view. Nenhum rótulo fora desta tabela é inventado.
+const ORIGIN_TYPE_LABELS = Object.freeze({ JUDICIAL_PROCESSUAL: 'Prazo processual', INTERNAL_CONTROL: 'Controle interno' });
+const STATUS_LABELS = Object.freeze({ ativo: 'Ativo', suspenso: 'Suspenso', cumprido: 'Cumprido', cancelado: 'Cancelado' });
+const CATEGORY_LABELS = Object.freeze({ OVERDUE: 'Vencido', UPCOMING: 'Próximo', REQUIRES_REVIEW: 'Requer revisão' });
+function legalDeadlineLabels(item) {
+  return { originTypeLabel: ORIGIN_TYPE_LABELS[item.originType] ?? null, statusLabel: STATUS_LABELS[item.status] ?? null };
+}
+// Sprint 2, Fase 4B (D4.4 homologada): "Confirmado pelo Jurídico" só é exibido para um Legal Deadline
+// que não seja requires_review (nunca para registro legado sem originType/status). Todo registro na
+// coleção já foi necessariamente criado por um usuário autorizado no módulo jurídico (allowedContent()
+// nega a criação a qualquer outro papel) — não há necessidade de checar novamente aqui quem criou.
+// Nunca usa "Comprovado documentalmente"/"Documento validado"/"Evidência confirmada"/"Fonte oficial
+// comprovada" (D1.4/D4.4 — essas dependem de `evidenceReference`, fora de escopo desta fase).
+function legalDeadlineConfirmationLabel(dataIntegrity) { return dataIntegrity === 'requires_review' ? null : 'Confirmado pelo Jurídico'; }
 // Filtro/paginação de Legal Deadline (Sprint 2, Fase 2, item 9) — mesmo padrão de filterProcesses()/
 // filterHonorariums() (values() multi-seleção, pageSize em [25,50,100], page/totalPages). `rows` já
 // deve chegar filtrado por scoped()/relação com processo acessível (feito no chamador, GET /api/
@@ -185,21 +255,59 @@ function scopedLegalDeadlineRows(store, user) {
 // Agenda mínima (Fase 3, item 5): ViewModel de apresentação — nunca persiste cópia de date/status/
 // origin/originType. `target` aponta para o detalhe canônico já existente (Fase 2); nenhuma edição de
 // Legal Deadline acontece por esta via.
-function legalDeadlineAgendaItems(store, user) {
-  return scopedLegalDeadlineRows(store, user).map(({ item, relatedProcess }) => ({
-    entityType: 'legalDeadline',
-    entityId: item.id,
-    date: item.date,
-    processId: item.processId,
-    process: { id: relatedProcess.id, title: relatedProcess.title || null },
-    origin: item.origin,
-    originType: item.originType,
-    status: item.status,
-    overdue: isLegalDeadlineOverdue(item),
-    dataIntegrity: legalDeadlineIntegrityFlag(item),
-    department: item.department ?? null,
-    target: `/api/entities/legalDeadlines/${item.id}/detail`
-  }));
+// `includeInactive` (Sprint 2, Fase 4B, D4.15 homologada): por padrão, cumprido/cancelado/suspenso
+// ficam fora da Agenda operacional — reaproveita o parâmetro explícito já usado em outras rotas do
+// Sprint 2 em vez de criar uma API paralela; os mesmos registros continuam disponíveis via
+// detalhe/histórico/filtro de Legal Deadline (?status=...) independentemente deste parâmetro.
+function legalDeadlineAgendaItems(store, user, { includeInactive = false } = {}) {
+  return scopedLegalDeadlineRows(store, user)
+    .filter(({ item }) => includeInactive || isOperationallyVisible(item.status))
+    .map(({ item, relatedProcess }) => ({
+      entityType: 'legalDeadline',
+      entityId: item.id,
+      date: item.date,
+      processId: item.processId,
+      process: { id: relatedProcess.id, title: relatedProcess.title || null },
+      origin: item.origin,
+      originType: item.originType,
+      status: item.status,
+      overdue: isLegalDeadlineOverdue(item),
+      dataIntegrity: legalDeadlineIntegrityFlag(item),
+      department: item.department ?? null,
+      ...responsibleInfo(store, item),
+      ...legalDeadlineLabels(item),
+      confirmationLabel: legalDeadlineConfirmationLabel(legalDeadlineIntegrityFlag(item)),
+      target: `/api/entities/legalDeadlines/${item.id}/detail`
+    }));
+}
+// Sprint 2, Fase 4B (D4.10 homologada): "Minha Semana" é VIEW — nunca persiste `myWeek`/`weeklyItems`/
+// `weekSnapshot`. Só entram Legal Deadlines cujo responsibleUserId é o usuário logado, dentro da semana
+// civil corrente (segunda a domingo, America/Sao_Paulo), reaproveitando scopedLegalDeadlineRows() —
+// mesma defesa em profundidade (scoped() sobre o prazo E sobre o processo relacionado). responsibleUserId
+// NUNCA amplia autorização: um usuário só vê aqui o que já poderia ver por escopo normal.
+function myWeekLegalDeadlineItems(store, user) {
+  const window = civilWeekWindow();
+  return scopedLegalDeadlineRows(store, user)
+    .filter(({ item }) => item.responsibleUserId === user.id)
+    .filter(({ item }) => isOperationallyVisible(item.status))
+    .filter(({ item }) => isValidCivilDate(item.date) && item.date >= window.start && item.date <= window.end)
+    .map(({ item, relatedProcess }) => ({
+      entityType: 'legalDeadline',
+      entityId: item.id,
+      date: item.date,
+      source: 'legalDeadline',
+      processId: item.processId,
+      process: { id: relatedProcess.id, title: relatedProcess.title || null },
+      origin: item.origin,
+      originType: item.originType,
+      status: item.status,
+      overdue: isLegalDeadlineOverdue(item),
+      dataIntegrity: legalDeadlineIntegrityFlag(item),
+      responsibleUserId: item.responsibleUserId,
+      ...legalDeadlineLabels(item),
+      confirmationLabel: legalDeadlineConfirmationLabel(legalDeadlineIntegrityFlag(item)),
+      target: `/api/entities/legalDeadlines/${item.id}/detail`
+    }));
 }
 // `store.agenda` é entidade PRÉ-EXISTENTE de compromissos manuais (título/prioridade/responsável),
 // independente de Legal Deadline (module 'agenda', já com GET/POST próprios em /api/agenda) — a Fase 3
@@ -241,9 +349,12 @@ function legalDeadlineAttentionItems(store, user) {
     const category = dataIntegrity === 'requires_review' ? 'REQUIRES_REVIEW' : overdue ? 'OVERDUE' : upcoming ? 'UPCOMING' : null;
     if (!category) return null;
     return {
-      entityType: 'legalDeadline', entityId: item.id, category,
+      entityType: 'legalDeadline', entityId: item.id, category, categoryLabel: CATEGORY_LABELS[category] ?? null,
       processId: item.processId, process: { id: relatedProcess.id, title: relatedProcess.title || null },
       date: item.date, origin: item.origin, originType: item.originType, status: item.status,
+      ...responsibleInfo(store, item),
+      ...legalDeadlineLabels(item),
+      confirmationLabel: legalDeadlineConfirmationLabel(dataIntegrity),
       target: `/api/entities/legalDeadlines/${item.id}/detail`
     };
   }).filter(Boolean);
@@ -830,7 +941,7 @@ function handler(req, res) {
     if (!found) return json(res,404,{error:'Registro não encontrado'});
     const { item, relatedProcess } = found;
     const history = store.audit.filter(event=>event.entity==='legalDeadlines' && event.entityId===id).sort((a,b)=>String(a.date).localeCompare(String(b.date))).map(event=>sanitizeAuditEventForUser(user,event));
-    return json(res,200,{ ...item, overdue: isLegalDeadlineOverdue(item), dataIntegrity: legalDeadlineIntegrityFlag(item), process: { id: relatedProcess.id, title: relatedProcess.title || null }, history });
+    return json(res,200,{ ...item, overdue: isLegalDeadlineOverdue(item), dataIntegrity: legalDeadlineIntegrityFlag(item), process: { id: relatedProcess.id, title: relatedProcess.title || null }, history, ...responsibleInfo(store, item), ...legalDeadlineLabels(item), confirmationLabel: legalDeadlineConfirmationLabel(legalDeadlineIntegrityFlag(item)) });
   }
   // Sprint 2, Fase 3: Agenda mínima combinando Legal Deadline (fonte canônica exclusiva de prazo
   // jurídico) e store.agenda (compromissos manuais pré-existentes) — cada fonte só entra se o usuário
@@ -839,12 +950,49 @@ function handler(req, res) {
     const canReadLegal = allowedInDepartment(user,'juridico','read');
     const canReadAgenda = allowed(user,'agenda','read');
     if (!canReadLegal && !canReadAgenda) return json(res,403,{error:'Sem permissão'});
+    // Sprint 2, Fase 4B (D4.15 homologada): reaproveita o mesmo padrão de parâmetro explícito já usado
+    // em outras rotas do Sprint 2 (ex.: ?paginated=1) em vez de criar uma API paralela só para os itens
+    // fechados — `includeInactive=1` devolve também cumprido/cancelado/suspenso nesta mesma rota.
+    const includeInactive = url.searchParams.get('includeInactive') === '1';
     const items = sortAgendaItems([
-      ...(canReadLegal ? legalDeadlineAgendaItems(store,user) : []),
+      ...(canReadLegal ? legalDeadlineAgendaItems(store,user,{includeInactive}) : []),
       ...(canReadAgenda ? agendaEventItems(store,user) : [])
     ]);
     return json(res,200,{items});
   }
+  // Sprint 2, Fase 4B (D4.10 homologada): "Minha Semana" é VIEW — nada é persistido aqui. Combina
+  // Legal Deadline (responsibleUserId === usuário logado, dentro da semana civil corrente) com a
+  // leitura somente-visualização do Google Calendar (Opção B homologada, D4.1) — Agenda Event manual
+  // NÃO entra: `store.agenda` só tem `owner` em texto livre, sem um id canônico de usuário, e inferir
+  // por nome seria a mesma "substituição textual" já vedada para responsibleUserId (lacuna reportada).
+  if (req.method === 'GET' && url.pathname === '/api/my-week') {
+    const window = civilWeekWindow();
+    const legalItems = myWeekLegalDeadlineItems(store,user);
+    const calendar = googleCalendarEvents(user);
+    const calendarItems = calendar.events.map(event => ({
+      entityType: 'calendarEvent',
+      externalId: event.id ?? null,
+      date: event.date ?? null,
+      source: 'google_calendar',
+      title: event.title ?? null,
+      start: event.start ?? null,
+      end: event.end ?? null,
+      allDay: Boolean(event.allDay),
+      target: null
+    }));
+    const items = [...legalItems, ...calendarItems].sort((a,b)=>{
+      const dateA=String(a.date||''), dateB=String(b.date||'');
+      if (dateA!==dateB) return dateA.localeCompare(dateB);
+      if (a.entityType!==b.entityType) return String(a.entityType).localeCompare(String(b.entityType));
+      return String(a.entityId ?? a.externalId ?? '').localeCompare(String(b.entityId ?? b.externalId ?? ''));
+    });
+    return json(res,200,{ window, items, calendar: { configured: calendar.configured, connected: calendar.connected, status: calendar.status } });
+  }
+  // Sprint 2, Fase 4B (Opção B homologada, D4.1): status da integração de leitura do Google Calendar —
+  // nunca devolve token/segredo, só o estado da conexão (mesmo padrão já usado para Monday em
+  // /api/monday/status).
+  if (req.method === 'GET' && url.pathname === '/api/calendar/status') return json(res,200, googleCalendarStatus(user));
+  if (req.method === 'GET' && url.pathname === '/api/calendar/events') return json(res,200, googleCalendarEvents(user));
   // Sprint 2, Fase 3: Atenção mínima — só Legal Deadline (item 6 do plano). Categorias OVERDUE/
   // UPCOMING/REQUIRES_REVIEW são de apresentação (nunca persistidas, nunca um status novo).
   if (req.method === 'GET' && url.pathname === '/api/attention') {
@@ -901,13 +1049,20 @@ function handler(req, res) {
     // não apenas sobre os campos enviados nesta requisição. Um PATCH que esvazia origin/date, ou troca
     // processId para um processo inexistente/fora de escopo, é rejeitado antes de qualquer gravação.
     if(isLegalDeadline){
+      // Sprint 2, Fase 4B (D4.2/D4.3, homologadas): "desatribuir" responsável (responsibleUserId
+      // explicitamente null quando já havia um valor) NÃO foi homologado — só atribuição/reatribuição
+      // a outro usuário. Em vez de inventar esse comportamento, o PATCH rejeita explicitamente e
+      // reporta a lacuna, sem tocar em nenhum campo do registro.
+      if (Object.hasOwn(sanitized, 'responsibleUserId') && sanitized.responsibleUserId === null && item.responsibleUserId != null) {
+        return json(res,422,{error:'Remover o responsável (responsibleUserId nulo) não é suportado nesta fase — apenas atribuição/reatribuição a outro usuário são permitidas.'});
+      }
       const candidate = { ...item, ...sanitized };
       // Correção (revisão do PR #4): reabertura (status sai de um valor diferente de 'ativo' e o PATCH
       // o leva de volta a 'ativo') exige `reason` textual não vazio — sem isso, 422 e NADA é alterado
       // (nem version, nem status, nem evento de auditoria).
       const isReopening = item.status !== 'ativo' && candidate.status === 'ativo';
       if (isReopening && !legalDeadlineReason) return json(res,422,{error:'A reabertura de um Legal Deadline exige motivo explícito (reason não pode ser vazio).'});
-      const invalid = validateLegalDeadline(candidate, user, store);
+      const invalid = validateLegalDeadline(candidate, user, store, item.responsibleUserId ?? null);
       if(invalid) return json(res,invalid.status,{error:invalid.error});
       // validateLegalDeadline() herda department/companyId/speId/scopeType do processo relacionado
       // DENTRO de `candidate` — precisa ser copiado para `sanitized` (o que de fato é aplicado ao
@@ -935,5 +1090,5 @@ function handler(req, res) {
   return json(res,404,{error:'Rota não encontrada'});
 }
 if (require.main === module) { ensureStore(); http.createServer((req,res)=>handler(req,res)).listen(PORT,()=>console.log(`COEVO Alta Performance disponível em http://localhost:${PORT}`)); setInterval(()=>scheduledMondayTick().catch(error=>console.error('Monday scheduler:',error.message)),60000); }
-module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems };
+module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, ORIGIN_TYPE_LABELS, STATUS_LABELS, CATEGORY_LABELS, legalDeadlineLabels, legalDeadlineConfirmationLabel };
 
