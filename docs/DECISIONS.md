@@ -1518,6 +1518,74 @@ PROD-H4-01 já homologadas — apenas registra o avanço parcial do H5 dentro do
 
 ---
 
+## 1.11. Hardening H6 — Decisão PROD-H6-01
+
+### PROD-H6-01 — Observabilidade estruturada (logging e monitoramento operacional)
+
+**Status: IMPLEMENTADO PARCIALMENTE / PG-17 ABERTO.** Ver `docs/PRODUCTION_GATE.md`, seção 23;
+`docs/OBSERVABILITY.md` (documento de referência completo); `docs/SECURITY.md`/`docs/QA.md` (seções
+H6).
+
+**Contexto**: PG-17 apontava ausência total de logging estruturado, alerta ou monitoramento de
+produção — incidentes podiam passar despercebidos, sem visibilidade operacional. O código usava
+`console.log`/`console.error` livres em `server.js` (boot, scheduler Monday, catch-all de persistência)
+e nos scripts de backup/restore de H5.
+
+**Decisão**: implementar um subsistema de observabilidade **provider-neutro** (Node.js nativo, JSON
+estruturado em `stdout`/`stderr`, sem OpenTelemetry/SDK de Datadog/Sentry/New Relic/Splunk/CloudWatch/
+Azure Monitor/Grafana Cloud), composto por três módulos novos:
+
+1. **`observability/redaction.js`** — sanitização defensiva genérica (por nome de campo e por padrão em
+   texto livre), reaproveitada por `backup/sanitize.js` (H5) sem alterar sua assinatura pública — nunca
+   duas implementações divergentes de redaction no projeto.
+2. **`observability/logger.js`** — logger centralizado com 5 níveis (`debug/info/warn/error/fatal`),
+   schema fixo (`timestamp` UTC ISO-8601, `level`, `event`, `message`, `service`, `environment`,
+   `component`, mais campos condicionais), `LOG_LEVEL` com fallback seguro (`info`) em produção,
+   serializador seguro de erro (nunca `JSON.stringify(error)` cru, stack nunca em produção).
+3. **`observability/alert.js`** — webhook HTTPS genérico, HTTPS obrigatório em produção, assinatura
+   HMAC-SHA256 opcional, retry limitado, cooldown/dedup em memória por instância, e garantia explícita
+   de nunca mascarar o erro original nem gerar alerta recursivo a partir da própria falha de entrega.
+
+Em `server.js`: `requestId` gerado no servidor (`crypto.randomUUID()`) para toda requisição, exposto via
+`X-Request-Id`; access log HTTP (`http_request_completed`) com rota normalizada (segmentos que parecem
+UUID/id numérico viram `:id`), nunca incluindo corpo/query string/`Authorization`/`Cookie`; 4xx nunca
+classificado automaticamente como erro operacional; `/api/health/live` (liveness, nunca toca storage) e
+`/api/health/ready` (readiness, reaproveita `storage.healthcheck()`, nunca chama Monday/Calendar/S3)
+somam-se ao `/api/health` legado mantido; boot/shutdown/scheduler Monday convertidos para eventos
+estruturados (`app_started`/`app_start_failed`/`app_shutdown_started`/`app_shutdown_completed`/
+`monday_sync_*`); `process.on('uncaughtException'/'unhandledRejection')` registrados apenas no processo
+real (nunca ao importar `server.js` como módulo em teste) com log FATAL + término controlado.
+
+H5 (backup/restore) ganhou eventos estruturados (`backup_started/completed/failed/tracking_failed`,
+`restore_started/completed/failed/evidence_failed`) em paralelo ao comportamento já aprovado —
+`BackupTrackingError`/`RestoreEvidenceError` e seus exit codes (2) permanecem exatamente como estavam.
+
+**Por que PG-17 permanece ABERTO**: o critério de aceite exige que "log de erro em produção seja
+buscável e não contenha segredo/PII". A parte de aplicação (estrutura, correlação, redaction) está
+comprovada; a parte de "buscável em produção" depende de um agregador/coletor real, e a validação de um
+destino de alerta real depende de infraestrutura — nenhuma das duas foi provisionada ou exercitada
+nesta rodada (proibido pelo escopo H6; fica para H11). Fechar PG-17 sem essa evidência seria fechar por
+intenção — mesma disciplina já aplicada a PG-21/H5.
+
+**Limitações documentadas**: cooldown/dedup do alerta é em memória, por instância (nunca uma garantia
+global entre múltiplas instâncias); nenhum endpoint `/metrics` criado nesta rodada; eventos de auth
+operacionais (`auth_login_failed` etc.) ficaram fora do escopo mínimo — o `audit_log` de negócio (H2/H3)
+já cobre a trilha exigida hoje; `scripts/health-probe.js` não foi criado (não há destino real para
+conectá-lo nesta rodada).
+
+**Testes**: 518/518 passando com PostgreSQL real (485 anteriores + 33 novos em
+`tests/h6-observability.test.js` — redaction, logger, alerta com servidor HTTP local real, HTTP real
+com `requestId`/access log/normalização de rota/401-404 não classificados como erro/500 real via
+injeção de falha, health liveness/readiness, headers H4 preservados). `npm audit`: inalterado (2
+vulnerabilidades altas conhecidas, `image-size`/`pptxgenjs` — H9); nenhuma dependência nova adicionada.
+
+Esta decisão não altera D1/D4/D2-CLOSE/PROD-GATE-01/PROD-H1-01/PROD-H1B-01/PROD-H2-01/PROD-H3-01/
+PROD-H4-01/PROD-H5-01 já homologadas — apenas registra o avanço parcial do H6 dentro do gate de
+produção já aberto. Não altera H5/PG-21 (backup/restore) nem qualquer decisão de LGPD/incident
+response/retenção.
+
+---
+
 ## 2. ADRs de Engenharia — Fase 0 (Sprint 1)
 
 Decisões técnicas locais e reversíveis, permitidas pela v1.3 (§27, linhas D8/D9: "Não bloqueia decisão

@@ -534,3 +534,24 @@ nunca sugere reexecução automática (exit code 2, distinto de falha real). Tes
 (role com privilégio restrito para o cenário de backup; injeção de dependência para o de restore, cuja
 tabela é recriada pelo próprio `pg_restore` e por isso não é restringível por GRANT/REVOKE real). Não
 expande H6.
+
+**H6 (Logging estruturado e monitoramento operacional) implementado PARCIALMENTE — PG-17 permanece
+aberto** (`docs/DECISIONS.md`, PROD-H6-01; `docs/PRODUCTION_GATE.md`, seção 23; `docs/OBSERVABILITY.md`):
+logger centralizado (`observability/logger.js`) — cada evento é uma linha JSON única, nunca mistura com
+o `audit_log` de negócio. Redaction defensiva centralizada (`observability/redaction.js`, reaproveitada
+por `backup/sanitize.js` sem mudar seu comportamento público) — cobre por NOME de campo (password,
+token, secret, authorization, cookie, mfa, totp, hmac, encryption, `DATABASE_URL`, `PGPASSWORD`, chaves
+de todas as rodadas de Hardening) e por PADRÃO em texto livre (connection string, `password=`,
+`Bearer ...`); testado inclusive com objetos aninhados. Nunca loga PII por padrão (nome, CPF, e-mail,
+telefone, corpo/query string de requisição, IP em texto puro, User-Agent completo, payload do Monday) —
+o access log HTTP nunca inclui corpo/query/`Authorization`/`Cookie`, apenas `requestId`/method/rota
+normalizada/`statusCode`/`durationMs`. `requestId` gerado no servidor (`crypto.randomUUID()`) para toda
+requisição, nunca confia em um identificador externo; exposto via `X-Request-Id`. `/api/health/live`
+(nunca toca storage) e `/api/health/ready` (reaproveita `storage.healthcheck()`, nunca chama
+Monday/Calendar/S3) somam-se ao `/api/health` legado, mantido. Alerta via webhook HTTPS genérico
+(`observability/alert.js`, provider-neutro) — HTTPS obrigatório em produção, assinatura HMAC-SHA256
+opcional, retry limitado, cooldown/dedup por instância, e uma falha de entrega NUNCA mascara o erro
+original nem dispara um segundo alerta (anti-recursão testada explicitamente). **PG-17 permanece
+explicitamente ABERTO**: o lado da aplicação está implementado e testado com evidência real, mas nenhum
+agregador/coletor de logs de produção nem destino de alerta real foram configurados ou exercitados
+nesta rodada — sem infraestrutura provisionada (depende de H11). Gate como um todo permanece NO-GO.

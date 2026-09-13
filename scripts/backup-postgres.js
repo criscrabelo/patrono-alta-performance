@@ -23,6 +23,7 @@ const { sanitizeErrorMessage } = require('../backup/sanitize');
 const runsRepository = require('../backup/runs-repository');
 const { parsePostgresConnection, pgCliArgs, pgChildEnv } = require('../backup/pg-connection');
 const { BackupTrackingError } = require('../backup/errors');
+const logger = require('../observability/logger');
 
 function generateBackupId() {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -66,6 +67,7 @@ async function fetchDatabaseMetadata(databaseUrl) {
 }
 
 async function runBackup({ databaseUrl, environment, tempDir, s3Client } = {}) {
+  logger.info('backup_started', { component: 'backup' });
   const resolvedDatabaseUrl = databaseUrl || process.env.DATABASE_URL;
   if (!resolvedDatabaseUrl) throw new Error('DATABASE_URL é obrigatória para executar o backup do PostgreSQL.');
   const resolvedEnvironment = environment || resolveAppEnvironment();
@@ -193,14 +195,19 @@ async function runBackup({ databaseUrl, environment, tempDir, s3Client } = {}) {
       }
     }
 
+    logger.info('backup_completed', { component: 'backup', backupId, sizeBytes: manifest.sizeBytes });
     return manifest;
   } catch (error) {
     // `BackupTrackingError` significa que o backup TEVE SUCESSO — nunca marcar como failed (mentiria
     // sobre o resultado real) nem apagar o artefato já confirmado no storage. Propaga como está,
     // preservando `.manifest` para quem chamar decidir a reconciliação.
-    if (error instanceof BackupTrackingError) throw error;
+    if (error instanceof BackupTrackingError) {
+      logger.error('backup_tracking_failed', { component: 'backup', backupId, errorCode: 'BACKUP_TRACKING_FAILED', error: logger.serializeError(error) });
+      throw error;
+    }
 
     const sanitizedMessage = sanitizeErrorMessage(error.message);
+    logger.error('backup_failed', { component: 'backup', backupId, errorCode: 'BACKUP_FAILED', error: logger.serializeError(error) });
     if (trackingAvailable) {
       // Correção pós-H5 (revisão técnica independente): mesmo aqui — onde o backup JÁ falhou por outro
       // motivo — uma falha adicional ao registrar `status='failed'` nunca fica silenciosa. Não lançamos
@@ -208,6 +215,7 @@ async function runBackup({ databaseUrl, environment, tempDir, s3Client } = {}) {
       // sinalizamos explicitamente em stderr — nunca um `.catch(() => {})` vazio sem nenhum sinal.
       await runsRepository.markBackupRunFailed(client, { backupId, errorMessage: sanitizedMessage }).catch(trackingFailError => {
         console.error(`Aviso: falha adicional ao registrar backup_runs como "failed" (backupId=${backupId}): ${sanitizeErrorMessage(trackingFailError.message)}`);
+        logger.error('backup_tracking_failed', { component: 'backup', backupId, errorCode: 'BACKUP_RUN_MARK_FAILED_FAILED', error: logger.serializeError(trackingFailError) });
       });
     }
     const wrapped = new Error(sanitizedMessage);
