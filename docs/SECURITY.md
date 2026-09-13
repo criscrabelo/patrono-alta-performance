@@ -274,20 +274,21 @@ não foi pedido nem é consistente com o estado real do repositório.
 
 ## Riscos identificados — Sprint 2, Fase 4A (documental; nenhuma integração implementada nesta rodada)
 
-A Fase 4A (`docs/DECISIONS.md`, seção 1.2) analisou, documentalmente, uma possível integração de leitura
-com Google Calendar e um futuro campo de responsável (`responsibleUserId`) em `legalDeadlines`. Nenhum
-dos dois foi implementado — os riscos abaixo são levantados **preventivamente**, para orientar a Fase 4B
-quando (e se) for homologada, não porque algo já exista em produção.
+A Fase 4A (`docs/DECISIONS.md`, seção 1.2) homologou uma integração de **leitura apenas** com Google
+Calendar (D4.1, Opção B — Patrono nunca escreve eventos no Calendar do usuário) e um campo de responsável
+(`responsibleUserId`, D4.2/D4.3) em `legalDeadlines`. Nenhum dos dois foi implementado nesta rodada — os
+riscos abaixo são levantados **preventivamente**, para orientar a Fase 4B, não porque algo já exista em
+produção.
 
 | Risco | Descrição | Mitigação proposta |
 |---|---|---|
-| Exposição de conteúdo jurídico em Calendar | Um evento de calendário sincroniza com contas pessoais, fora do controle de acesso do Patrono (dispositivo pessoal, app de terceiros conectado à conta Google) | Título neutro/mínimo (D4.7 — "Prazo jurídico — Patrono"), nunca o conteúdo do processo; detalhe completo permanece exclusivamente no Patrono, atrás do RBAC já existente |
-| Sincronização externa | Token/credencial de acesso ao Calendar do usuário é um novo segredo a proteger | Mesmo tratamento já exigido para o Monday (MASTER_HANDOFF §10, "Segredos de integração — P0 de implementação"): nunca no frontend, sempre server-side, escopo mínimo de leitura por usuário |
-| Revogação de acesso | Usuário revoga o acesso do Patrono ao próprio Google Calendar | Eventos espelhados devem ser removidos/parar de ser atualizados; o Legal Deadline no Patrono nunca é afetado (D4.1/D4.8) |
-| Usuário desligado/desativado | Um responsável (`responsibleUserId`, se D4.3 for homologada) deixa a empresa ou é desativado | Histórico nunca é apagado; view sinaliza "Responsável inativo" até reatribuição formal (D4.11) — nunca reatribuição automática silenciosa |
-| Vazamento por título de evento | Título do evento revela identidade de parte/processo mesmo sem abrir o Patrono | Política de minimização de dados (D4.7) — recomendação técnica é o título mais neutro possível |
-| Dados em dispositivo pessoal | Calendário sincronizado aparece em celular/notebook pessoal do usuário, fora do perímetro de segurança do Patrono | Decorre diretamente do risco anterior — mitigado pela mesma política de conteúdo mínimo, nunca por controle de dispositivo (fora do escopo do Patrono) |
-| Cache/offline do Calendar | App de calendário pode manter em cache um evento já desatualizado (ex.: prazo que mudou de data ou foi suspenso) após a integração ficar temporariamente indisponível | Fallback já definido em D4.8: falha de integração nunca afeta o Patrono; ao reconectar, a sincronização deve atualizar/remover eventos desatualizados — o Patrono continua sendo a fonte de verdade em caso de divergência |
+| Exposição do próprio conteúdo do Google Calendar do usuário | A visualização complementar (leitura) exibe compromissos pessoais do usuário dentro do Patrono | Consentimento OAuth explícito e por usuário; leitura restrita ao próprio usuário logado (mesmo princípio de `docs/PERMISSIONS.md`) — nunca uma sincronização "em nome do sistema" |
+| Sincronização externa | Token/credencial de acesso de leitura ao Calendar do usuário é um novo segredo a proteger | Mesmo tratamento já exigido para o Monday (MASTER_HANDOFF §10, "Segredos de integração — P0 de implementação"): nunca no frontend, sempre server-side, escopo mínimo de leitura por usuário |
+| Revogação de acesso | Usuário revoga o acesso do Patrono ao próprio Google Calendar | A visualização complementar simplesmente para de mostrar aqueles compromissos; como a Opção B não escreve nada no Calendar, não há evento espelhado para remover; o Legal Deadline no Patrono nunca é afetado (D4.1/D4.8) |
+| Usuário desligado/desativado como responsável | Um responsável (`responsibleUserId`, D4.3 homologada) deixa a empresa ou é desativado | Histórico nunca é apagado; view sinaliza "Responsável inativo" até reatribuição formal (D4.11) — nunca reatribuição automática silenciosa |
+| Cache/offline do Calendar | O app de calendário do usuário pode exibir localmente um compromisso desatualizado enquanto a leitura do Patrono está indisponível | Fallback já definido em D4.8: indisponibilidade da leitura nunca afeta o Legal Deadline no Patrono; a visualização complementar sinaliza `unavailable`/`stale`, nunca mostra zero |
+| Exposição futura em Calendar (se uma Opção C vier a ser homologada) | Um evento espelhado por escrita revelaria conteúdo jurídico em um app de terceiros, fora do controle de acesso do Patrono | **Não aplicável ao piloto atual** (D4.1 homologou só a Opção B) — se uma decisão futura separada homologar a Opção C, a recomendação de título neutro (D4.7 — "Prazo jurídico — Patrono") deve ser revisitada e homologada antes de qualquer escrita externa |
 
-**Nenhum destes riscos bloqueia a Fase 4A (documental) nem qualquer P0/P1 do escopo já entregue (Fases
-1–3)** — são registrados para orientar o desenho de segurança da Fase 4B, quando homologada.
+**Nenhum destes riscos bloqueia a Fase 4A (documental, já homologada) nem qualquer P0/P1 do escopo já
+entregue (Fases 1–3)** — são registrados para orientar o desenho de segurança da implementação funcional
+da Fase 4B.

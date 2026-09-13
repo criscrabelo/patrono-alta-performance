@@ -51,28 +51,35 @@ tela de Integrações, sem simular dados.
 **Google Calendar, quando ativado:** é apenas view de leitura de compromissos, nunca fonte de prazo
 jurídico (§10, §23). Nenhuma automação desta execução liga Legal Deadline a eventos de calendário.
 
-### Google Calendar — decisão pendente de homologação (Sprint 2, Fase 4A)
+### Google Calendar — decisão HOMOLOGADA: Opção B, leitura apenas (Sprint 2, Fase 4A)
 
-**Status: opcional, não canônico, não SoT, não fonte de cálculo, não fonte de confirmação — decisão de
-ativação PENDENTE.** A Fase 4A (`docs/DECISIONS.md`, seção 1.2, D4.1) analisou opções para ativar essa
-integração no piloto e recomendou tecnicamente a opção de leitura pura (Opção B: Patrono lê a agenda
-pessoal do usuário no Calendar e a exibe lado a lado com a Agenda combinada da Fase 3, sem nunca escrever
-Legal Deadline no Calendar do usuário). Uma opção de espelhamento com escrita (Opção C) foi registrada
-como alternativa possível, mas **exige escrita externa**, o que colide com a regra "nenhuma escrita
-externa no MVP" (§10) e precisaria de uma decisão própria abrindo exceção formal a essa regra — não
-apenas a D4.1.
+**Status: opcional, não canônico, não SoT, não fonte de cálculo, não fonte de confirmação — ativação
+HOMOLOGADA como Opção B (leitura apenas).** A Fase 4A (`docs/DECISIONS.md`, seção 1.2, D4.1) analisou as
+opções e a Cristiane homologou, em 12/09/2026, a **Opção B**: Patrono **lê** a agenda pessoal do usuário
+no Google Calendar (compromissos que o próprio usuário já tem lá) e pode exibi-los em uma view
+complementar, lado a lado com a Agenda combinada da Fase 3. **Patrono não cria, não atualiza e não remove
+nenhum evento no Google Calendar do usuário. Legal Deadline não é espelhado no Calendar.** Nenhum
+`originType`/`status` de Legal Deadline "entra" no Calendar, porque nada é escrito lá.
 
-Nenhuma das duas opções foi homologada nesta rodada — **nenhuma implementação de Calendar começa antes de
-homologação explícita da Cristiane** (ver `docs/DECISIONS.md`, D4.14). Se e quando homologada:
-- `originType`: ambos podem aparecer, nunca sem identificação clara (`INTERNAL_CONTROL` nunca rotulado
-  como prazo processual).
-- `status`: apenas `ativo` gera/mantém evento; `suspenso`/`cumprido`/`cancelado` não geram evento novo, e
-  um evento existente referente a um prazo que mudou de status deixa de aparecer como compromisso ativo.
-- Conteúdo do evento: título neutro/mínimo (recomendação D4.7 — "Prazo jurídico — Patrono"), nunca o
-  conteúdo jurídico completo.
-- Indisponibilidade: nunca afeta o Legal Deadline no Patrono nem esconde/zera nada — mesma regra de
-  "falha de fonte preserva o último dado válido" já aplicada ao Monday (D4.8, Anexo A regras 3/14).
-- Nenhum caminho de sincronização permite que o Calendar altere o Legal Deadline de volta.
+A Opção C (espelhamento Patrono → Calendar, com escrita) **não foi homologada** — permanece registrada
+apenas como possibilidade futura, condicionada a uma decisão de negócio própria que abra exceção formal à
+regra "nenhuma escrita externa no MVP" (§10). As regras abaixo, portanto, só valeriam para essa eventual
+Opção C futura, não para o piloto atual:
+- `originType`: ambos poderiam aparecer, nunca sem identificação clara (`INTERNAL_CONTROL` nunca
+  rotulado como prazo processual).
+- `status`: apenas `ativo` geraria/manteria evento; `suspenso`/`cumprido`/`cancelado` não gerariam evento
+  novo.
+- Conteúdo do evento: título neutro/mínimo (recomendação D4.7, preservada como referência — "Prazo
+  jurídico — Patrono").
+- Nenhum caminho de sincronização permitiria que o Calendar alterasse o Legal Deadline de volta.
+
+**Para a Opção B homologada (a única em vigor):** indisponibilidade da leitura de Calendar nunca afeta o
+Legal Deadline no Patrono nem esconde/zera nada — mesma regra de "falha de fonte preserva o último dado
+válido" já aplicada ao Monday (D4.8, Anexo A regras 3/14); a indisponibilidade afeta apenas a
+visualização complementar dos compromissos pessoais do Google.
+
+Implementação (Fase 4B) ainda **não iniciada** — decisão homologada, matriz GO/NO-GO em GO DOCUMENTAL
+(`docs/DECISIONS.md`, D4.13); código a ser desenvolvido em PR separado.
 
 ## Regras de segurança de integração aplicadas
 
