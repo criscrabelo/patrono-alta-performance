@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, seed, parseCsv, hash, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, isValidCivilDate, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, hasGlobalScope, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, validateLegalDeadline, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines } = require('../server');
+const { ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, seed, parseCsv, hash, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, isValidCivilDate, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, hasGlobalScope, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, validateLegalDeadline, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems } = require('../server');
 const { WIDGET_TYPES, DASHBOARD_DEFINITIONS } = require('../dashboard-model');
 const { dashboardPayload } = require('../dashboard-service');
 const { PROJECT_ID, ensureProjectStore, projectDetail, projectPermissions } = require('../project-service');
@@ -746,4 +746,154 @@ test('filterLegalDeadlines() filtra por processId/originType/status/overdue/date
   assert.equal(paginated.records.length, 3);
   assert.equal(paginated.totalAvailable, 3);
   assert.ok('dataIntegrity' in paginated.records[0], 'cada registro paginado inclui o campo de integridade calculado (dataIntegrity)');
+});
+
+// ============================================================================================
+// Sprint 2, Fase 3 — testes unitários (Agenda/Atenção mínima, Legal Deadline como fonte canônica)
+// ============================================================================================
+
+function buildAgendaStore(deadlines, agendaEvents = [], processOverrides = {}) {
+  return {
+    records: {
+      processos: [{ id: 'proc-1', source: 'monday', department: 'Jurídico', deletedAt: null, ...processOverrides }],
+      legalDeadlines: deadlines
+    },
+    agenda: agendaEvents,
+    audit: []
+  };
+}
+const agendaUser = { role: 'lider', department: 'Jurídico' };
+
+test('legalDeadlineAgendaItems(): Legal Deadline ativo futuro aparece na Agenda com entityType/entityId/target corretos', () => {
+  const future = civilDateAfterDays(10);
+  const store = buildAgendaStore([{ id: 'ld-futuro', processId: 'proc-1', origin: 'Prazo futuro', date: future, originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', department: 'Jurídico' }]);
+  const items = legalDeadlineAgendaItems(store, agendaUser);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].entityType, 'legalDeadline');
+  assert.equal(items[0].entityId, 'ld-futuro');
+  assert.equal(items[0].date, future);
+  assert.equal(items[0].overdue, false);
+  assert.equal(items[0].target, '/api/entities/legalDeadlines/ld-futuro/detail', 'item referencia o detalhe canônico já existente, não uma cópia');
+  assert.equal(items[0].process.id, 'proc-1', 'item referencia o processo relacionado, sem duplicar seus dados');
+});
+
+test('legalDeadlineAttentionItems(): vencido entra como OVERDUE; suspenso/cumprido/cancelado nunca entram como overdue mesmo com data passada', () => {
+  const store = buildAgendaStore([
+    { id: 'ld-vencido', processId: 'proc-1', origin: 'Vencido', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', department: 'Jurídico' },
+    { id: 'ld-suspenso', processId: 'proc-1', origin: 'Suspenso', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL', status: 'suspenso', department: 'Jurídico' },
+    { id: 'ld-cumprido', processId: 'proc-1', origin: 'Cumprido', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL', status: 'cumprido', department: 'Jurídico' },
+    { id: 'ld-cancelado', processId: 'proc-1', origin: 'Cancelado', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL', status: 'cancelado', department: 'Jurídico' }
+  ]);
+  const items = legalDeadlineAttentionItems(store, agendaUser);
+  assert.deepEqual(items.map(i => i.entityId), ['ld-vencido'], 'somente o prazo ativo+vencido entra em Atenção; suspenso/cumprido/cancelado nunca contam como overdue');
+  assert.equal(items[0].category, 'OVERDUE');
+
+  const agendaItems = legalDeadlineAgendaItems(store, agendaUser);
+  const overdueFlags = Object.fromEntries(agendaItems.map(i => [i.entityId, i.overdue]));
+  assert.equal(overdueFlags['ld-vencido'], true);
+  assert.equal(overdueFlags['ld-suspenso'], false);
+  assert.equal(overdueFlags['ld-cumprido'], false);
+  assert.equal(overdueFlags['ld-cancelado'], false);
+});
+
+test('legalDeadlineAttentionItems(): próximo dentro da janela de 30 dias entra como UPCOMING, reutilizando civilDateAfterDays()', () => {
+  const soon = civilDateAfterDays(10);
+  const far = civilDateAfterDays(90);
+  const store = buildAgendaStore([
+    { id: 'ld-proximo', processId: 'proc-1', origin: 'Próximo', date: soon, originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', department: 'Jurídico' },
+    { id: 'ld-distante', processId: 'proc-1', origin: 'Distante', date: far, originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', department: 'Jurídico' }
+  ]);
+  const items = legalDeadlineAttentionItems(store, agendaUser);
+  assert.deepEqual(items.map(i => i.entityId), ['ld-proximo']);
+  assert.equal(items[0].category, 'UPCOMING');
+});
+
+test('legalDeadlineAttentionItems(): registro legado (dataIntegrity=requires_review) aparece como REQUIRES_REVIEW, sem inferir originType/status', () => {
+  const store = buildAgendaStore([
+    { id: 'ld-legado', processId: 'proc-1', origin: 'Registro legado', date: '2020-01-01', department: 'Jurídico' }
+  ]);
+  const items = legalDeadlineAttentionItems(store, agendaUser);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].category, 'REQUIRES_REVIEW');
+  assert.equal(items[0].originType, undefined, 'nenhum originType foi inferido/preenchido para o registro legado');
+});
+
+test('legalDeadlineAgendaItems(): JUDICIAL_PROCESSUAL e INTERNAL_CONTROL são identificados corretamente pelo campo originType', () => {
+  const store = buildAgendaStore([
+    { id: 'ld-judicial', processId: 'proc-1', origin: 'Processual', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', department: 'Jurídico' },
+    { id: 'ld-interno', processId: 'proc-1', origin: 'Controle interno', date: '2026-12-01', originType: 'INTERNAL_CONTROL', status: 'ativo', department: 'Jurídico' }
+  ]);
+  const items = legalDeadlineAgendaItems(store, agendaUser);
+  const byId = Object.fromEntries(items.map(i => [i.entityId, i.originType]));
+  assert.equal(byId['ld-judicial'], 'JUDICIAL_PROCESSUAL');
+  assert.equal(byId['ld-interno'], 'INTERNAL_CONTROL', 'INTERNAL_CONTROL é preservado tal como está, nunca rotulado/convertido em prazo processual pela view');
+});
+
+test('legalDeadlineAgendaItems(): processo sem Legal Deadline não gera item; DATA/CITAÇÃO do processo nunca viram prazo (regressão obrigatória)', () => {
+  const store = buildAgendaStore([], [], { columnsByTitle: { DATA: '2026-09-01', 'CITAÇÃO/PROTOCOLO': '2026-09-02' } });
+  const items = legalDeadlineAgendaItems(store, agendaUser);
+  assert.deepEqual(items, [], 'processo sem nenhum Legal Deadline não produz item de prazo, mesmo tendo DATA/CITAÇÃO no board Monday');
+  const attention = legalDeadlineAttentionItems(store, agendaUser);
+  assert.deepEqual(attention, []);
+});
+
+test('legalDeadlineAgendaItems(): múltiplos Legal Deadlines do mesmo processo geram itens distintos, sem substituição', () => {
+  const store = buildAgendaStore([
+    { id: 'ld-1', processId: 'proc-1', origin: 'Primeira intimação', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', department: 'Jurídico' },
+    { id: 'ld-2', processId: 'proc-1', origin: 'Segunda intimação', date: '2026-12-15', originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', department: 'Jurídico' }
+  ]);
+  const items = legalDeadlineAgendaItems(store, agendaUser);
+  assert.equal(items.length, 2);
+  assert.deepEqual(items.map(i => i.entityId).sort(), ['ld-1', 'ld-2']);
+});
+
+test('legalDeadlineAgendaItems() reflete alteração do Legal Deadline sem duplicata persistida — Agenda é view, não source of truth', () => {
+  const deadline = { id: 'ld-mutavel', processId: 'proc-1', origin: 'Prazo mutável', date: '2026-09-20', originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', department: 'Jurídico', version: 1 };
+  const store = buildAgendaStore([deadline]);
+  const before = legalDeadlineAgendaItems(store, agendaUser);
+  assert.equal(before[0].date, '2026-09-20');
+
+  // Simula um PATCH real: o mesmo registro é mutado in-place (mesmo id/version incrementada) — não um
+  // novo registro criado por baixo, exatamente como o PATCH real de /api/entities/legalDeadlines faz.
+  deadline.date = '2026-09-25';
+  deadline.version = 2;
+  const after = legalDeadlineAgendaItems(store, agendaUser);
+  assert.equal(after.length, 1, 'nenhum segundo item é criado pela mudança — a view apenas reflete o estado atual');
+  assert.equal(after[0].date, '2026-09-25');
+  assert.equal(after[0].entityId, 'ld-mutavel', 'mesmo id — não é um registro novo');
+  assert.equal(store.records.legalDeadlines.length, 1, 'apenas 1 Legal Deadline persistido, antes e depois da alteração');
+});
+
+test('sortAgendaItems(): ordenação determinística por date → entityType → entityId', () => {
+  const items = [
+    { entityType: 'legalDeadline', entityId: 'z-later', date: '2026-01-02' },
+    { entityType: 'agendaEvent', entityId: 'b', date: '2026-01-01' },
+    { entityType: 'legalDeadline', entityId: 'a', date: '2026-01-01' },
+    { entityType: 'agendaEvent', entityId: 'a', date: '2026-01-01' }
+  ];
+  const sorted = sortAgendaItems(items);
+  assert.deepEqual(sorted.map(i => `${i.date}|${i.entityType}|${i.entityId}`), [
+    '2026-01-01|agendaEvent|a',
+    '2026-01-01|agendaEvent|b',
+    '2026-01-01|legalDeadline|a',
+    '2026-01-02|legalDeadline|z-later'
+  ], 'mesma data ordena por entityType, depois por entityId — critério estável e previsível');
+});
+
+test('itens de Agenda/Atenção sempre contêm entityType/entityId; nenhuma cópia de Legal Deadline é persistida em store.records', () => {
+  const store = buildAgendaStore([
+    { id: 'ld-1', processId: 'proc-1', origin: 'Prazo', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', department: 'Jurídico' }
+  ], [
+    { id: 'evt-1', title: 'Reunião', department: 'Jurídico', date: '2026-12-02' }
+  ]);
+  const keysBefore = Object.keys(store.records).sort();
+  const agendaItems = legalDeadlineAgendaItems(store, agendaUser);
+  const eventItems = agendaEventItems(store, agendaUser);
+  const attentionItems = legalDeadlineAttentionItems(store, agendaUser);
+  for (const item of [...agendaItems, ...eventItems]) {
+    assert.ok('entityType' in item && 'entityId' in item, 'todo item de Agenda/Atenção deve referenciar entityType/entityId da entidade canônica');
+  }
+  const keysAfter = Object.keys(store.records).sort();
+  assert.deepEqual(keysAfter, keysBefore, 'nenhuma nova coleção (agendaDeadline/agendaLegalDeadline/copiedDeadline/deadlineSnapshot ou equivalente) foi criada em store.records');
+  assert.equal(store.records.legalDeadlines.length, 1, 'nenhuma duplicata de Legal Deadline foi persistida ao montar as views');
 });

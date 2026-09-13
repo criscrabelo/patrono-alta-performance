@@ -168,6 +168,86 @@ function filterLegalDeadlines(rows, url) {
     pagination: { page, pageSize, totalPages }
   };
 }
+// Sprint 2, Fase 3: helper único de "Legal Deadline visível a este usuário" — reaproveitado pela
+// listagem/detalhe (Fase 2) e pelas novas views de Agenda/Atenção (Fase 3), para nunca duplicar a
+// defesa em profundidade (scoped() sobre o prazo E sobre o processo relacionado — item 13 do plano).
+// Retorna {item, relatedProcess} para cada Legal Deadline autorizado; nada é persistido aqui.
+function scopedLegalDeadlineRows(store, user) {
+  const processos = collection(store, 'processos');
+  return collection(store, 'legalDeadlines')
+    .filter(item => !item.deletedAt && scoped(user, item))
+    .map(item => {
+      const relatedProcess = processos.find(p => p.id === item.processId && !p.deletedAt);
+      return relatedProcess && scoped(user, relatedProcess) ? { item, relatedProcess } : null;
+    })
+    .filter(Boolean);
+}
+// Agenda mínima (Fase 3, item 5): ViewModel de apresentação — nunca persiste cópia de date/status/
+// origin/originType. `target` aponta para o detalhe canônico já existente (Fase 2); nenhuma edição de
+// Legal Deadline acontece por esta via.
+function legalDeadlineAgendaItems(store, user) {
+  return scopedLegalDeadlineRows(store, user).map(({ item, relatedProcess }) => ({
+    entityType: 'legalDeadline',
+    entityId: item.id,
+    date: item.date,
+    processId: item.processId,
+    process: { id: relatedProcess.id, title: relatedProcess.title || null },
+    origin: item.origin,
+    originType: item.originType,
+    status: item.status,
+    overdue: isLegalDeadlineOverdue(item),
+    dataIntegrity: legalDeadlineIntegrityFlag(item),
+    department: item.department ?? null,
+    target: `/api/entities/legalDeadlines/${item.id}/detail`
+  }));
+}
+// `store.agenda` é entidade PRÉ-EXISTENTE de compromissos manuais (título/prioridade/responsável),
+// independente de Legal Deadline (module 'agenda', já com GET/POST próprios em /api/agenda) — a Fase 3
+// não a substitui nem a redefine, apenas a inclui como mais uma fonte na view combinada de Agenda.
+function agendaEventItems(store, user) {
+  return (store.agenda || []).filter(event => !event.deletedAt && scoped(user, event)).map(event => ({
+    entityType: 'agendaEvent',
+    entityId: event.id,
+    date: event.date || null,
+    title: event.title ?? null,
+    department: event.department ?? null,
+    priority: event.priority ?? null,
+    status: event.status ?? null,
+    owner: event.owner ?? null,
+    classification: event.classification ?? null
+  }));
+}
+// Ordenação determinística por data civil (item 21 do plano): date → entityType → entityId, sem
+// conversão para Date/UTC — mesma comparação lexicográfica de string já usada em todo o Sprint 2.
+function sortAgendaItems(items) {
+  return [...items].sort((a, b) => {
+    const dateA = String(a.date || ''), dateB = String(b.date || '');
+    if (dateA !== dateB) return dateA.localeCompare(dateB);
+    if (a.entityType !== b.entityType) return String(a.entityType).localeCompare(String(b.entityType));
+    return String(a.entityId).localeCompare(String(b.entityId));
+  });
+}
+// Atenção mínima (Fase 3, item 6): categorias de VIEW (nunca persistidas, nunca um novo status de
+// Legal Deadline) — OVERDUE/UPCOMING via isLegalDeadlineOverdue()/civilDateAfterDays() já existentes
+// (nenhuma regra de atraso recalculada aqui); REQUIRES_REVIEW via legalDeadlineIntegrityFlag() (Fase 2).
+// Um registro legado sem originType/status nunca chega a status==='ativo' de forma confiável, então
+// nunca também vira OVERDUE/UPCOMING — apenas REQUIRES_REVIEW.
+function legalDeadlineAttentionItems(store, user) {
+  const soonLimit = civilDateAfterDays(30);
+  return scopedLegalDeadlineRows(store, user).map(({ item, relatedProcess }) => {
+    const dataIntegrity = legalDeadlineIntegrityFlag(item);
+    const overdue = isLegalDeadlineOverdue(item);
+    const upcoming = item.status === 'ativo' && !overdue && isValidCivilDate(item.date) && item.date <= soonLimit;
+    const category = dataIntegrity === 'requires_review' ? 'REQUIRES_REVIEW' : overdue ? 'OVERDUE' : upcoming ? 'UPCOMING' : null;
+    if (!category) return null;
+    return {
+      entityType: 'legalDeadline', entityId: item.id, category,
+      processId: item.processId, process: { id: relatedProcess.id, title: relatedProcess.title || null },
+      date: item.date, origin: item.origin, originType: item.originType, status: item.status,
+      target: `/api/entities/legalDeadlines/${item.id}/detail`
+    };
+  }).filter(Boolean);
+}
 // P0 corrigido (rodada 6, item 4): a validação de processId de internalization (existe + source
 // 'monday' + escopo do usuário) foi introduzida na rodada 5 apenas no POST. O PATCH de sub-recurso de
 // projeto é genérico e não revalidava nada — uma internalização criada corretamente podia ser alterada
@@ -743,22 +823,42 @@ function handler(req, res) {
   if (req.method === 'GET' && /^\/api\/entities\/legalDeadlines\/[^/]+\/detail$/.test(url.pathname)) {
     if (!allowedInDepartment(user,'juridico','read')) return json(res,403,{error:'Sem permissão'});
     const id = url.pathname.split('/')[4];
-    const item = collection(store,'legalDeadlines').find(x=>x.id===id && !x.deletedAt);
-    if (!item || !scoped(user,item)) return json(res,404,{error:'Registro não encontrado'});
-    // Defesa em profundidade (item 5 do plano da Fase 2): nunca expor o prazo se o processo
-    // relacionado não estiver (mais) acessível ao usuário, mesmo que o registro já tenha herdado o
-    // escopo do processo na criação/PATCH — nunca confiar apenas no escopo gravado no próprio prazo.
-    const relatedProcess = collection(store,'processos').find(p=>p.id===item.processId && !p.deletedAt);
-    if (!relatedProcess || !scoped(user,relatedProcess)) return json(res,404,{error:'Registro não encontrado'});
+    // Defesa em profundidade (item 5 do plano da Fase 2, reaproveitada na Fase 3 via
+    // scopedLegalDeadlineRows()): nunca expor o prazo se o processo relacionado não estiver (mais)
+    // acessível ao usuário, mesmo que o registro já tenha herdado o escopo na criação/PATCH.
+    const found = scopedLegalDeadlineRows(store,user).find(row => row.item.id === id);
+    if (!found) return json(res,404,{error:'Registro não encontrado'});
+    const { item, relatedProcess } = found;
     const history = store.audit.filter(event=>event.entity==='legalDeadlines' && event.entityId===id).sort((a,b)=>String(a.date).localeCompare(String(b.date))).map(event=>sanitizeAuditEventForUser(user,event));
     return json(res,200,{ ...item, overdue: isLegalDeadlineOverdue(item), dataIntegrity: legalDeadlineIntegrityFlag(item), process: { id: relatedProcess.id, title: relatedProcess.title || null }, history });
+  }
+  // Sprint 2, Fase 3: Agenda mínima combinando Legal Deadline (fonte canônica exclusiva de prazo
+  // jurídico) e store.agenda (compromissos manuais pré-existentes) — cada fonte só entra se o usuário
+  // tiver o módulo correspondente; nada é persistido, apenas montado na resposta (item 4/5 do plano).
+  if (req.method === 'GET' && url.pathname === '/api/agenda-items') {
+    const canReadLegal = allowedInDepartment(user,'juridico','read');
+    const canReadAgenda = allowed(user,'agenda','read');
+    if (!canReadLegal && !canReadAgenda) return json(res,403,{error:'Sem permissão'});
+    const items = sortAgendaItems([
+      ...(canReadLegal ? legalDeadlineAgendaItems(store,user) : []),
+      ...(canReadAgenda ? agendaEventItems(store,user) : [])
+    ]);
+    return json(res,200,{items});
+  }
+  // Sprint 2, Fase 3: Atenção mínima — só Legal Deadline (item 6 do plano). Categorias OVERDUE/
+  // UPCOMING/REQUIRES_REVIEW são de apresentação (nunca persistidas, nunca um status novo).
+  if (req.method === 'GET' && url.pathname === '/api/attention') {
+    if (!allowedInDepartment(user,'juridico','read')) return json(res,403,{error:'Sem permissão'});
+    const items = legalDeadlineAttentionItems(store,user);
+    const summary = { overdue: items.filter(i=>i.category==='OVERDUE').length, upcoming: items.filter(i=>i.category==='UPCOMING').length, requiresReview: items.filter(i=>i.category==='REQUIRES_REVIEW').length };
+    return json(res,200,{items,summary});
   }
   // Sprint 2, Fase 2, item 9: listagem/filtro de Legal Deadline reaproveita esta MESMA rota genérica
   // (`?paginated=1` opcional) em vez de criar uma arquitetura paralela — mesmo padrão já usado em
   // GET /api/legal/:module?paginated=1 (filterProcesses/filterHonorariums). O array simples (sem
   // `paginated=1`, ou para qualquer outro `type`) continua exatamente como antes, para não quebrar
   // nenhum chamador existente.
-  if (req.method === 'GET' && url.pathname.startsWith('/api/entities/')) { const type=url.pathname.split('/')[3]; const module=entityModule(type); if(!module || !allowedInDepartment(user,module,'read')) return json(res,403,{error:'Sem permissão'}); let rows=collection(store,type).filter(x=>!x.deletedAt && scoped(user,x)); if(type==='legalDeadlines'){ const processos=collection(store,'processos'); rows=rows.filter(item=>{const relatedProcess=processos.find(p=>p.id===item.processId && !p.deletedAt); return relatedProcess && scoped(user,relatedProcess);}); if(url.searchParams.get('paginated')==='1') return json(res,200,filterLegalDeadlines(rows,url)); } return json(res,200,rows); }
+  if (req.method === 'GET' && url.pathname.startsWith('/api/entities/')) { const type=url.pathname.split('/')[3]; const module=entityModule(type); if(!module || !allowedInDepartment(user,module,'read')) return json(res,403,{error:'Sem permissão'}); let rows=collection(store,type).filter(x=>!x.deletedAt && scoped(user,x)); if(type==='legalDeadlines'){ rows=scopedLegalDeadlineRows(store,user).map(row=>row.item); if(url.searchParams.get('paginated')==='1') return json(res,200,filterLegalDeadlines(rows,url)); } return json(res,200,rows); }
   // P0 corrigido (rodada 6, itens 1 e 3): allowedContent() combina o isolamento departamental
   // (allowedInDepartment) com a negação explícita de `administrador` em módulos de CONTEÚDO de negócio
   // — sem isso, um líder de TI passava em allowed(user,'juridico','create') (item 1), e `administrador`
@@ -835,5 +935,5 @@ function handler(req, res) {
   return json(res,404,{error:'Rota não encontrada'});
 }
 if (require.main === module) { ensureStore(); http.createServer((req,res)=>handler(req,res)).listen(PORT,()=>console.log(`COEVO Alta Performance disponível em http://localhost:${PORT}`)); setInterval(()=>scheduledMondayTick().catch(error=>console.error('Monday scheduler:',error.message)),60000); }
-module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines };
+module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems };
 
