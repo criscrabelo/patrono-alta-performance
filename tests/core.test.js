@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, seed, parseCsv, hash, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, isValidCivilDate, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, hasGlobalScope, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, validateLegalDeadline, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, legalDeadlineLabels, legalDeadlineConfirmationLabel } = require('../server');
+const { ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, seed, parseCsv, hash, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, isValidCivilDate, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, hasGlobalScope, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, validateLegalDeadline, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, legalDeadlineLabels, legalDeadlineConfirmationLabel, filterCalendarEventsByWindow } = require('../server');
 const { WIDGET_TYPES, DASHBOARD_DEFINITIONS } = require('../dashboard-model');
 const { dashboardPayload } = require('../dashboard-service');
 const { PROJECT_ID, ensureProjectStore, projectDetail, projectPermissions } = require('../project-service');
@@ -926,10 +926,38 @@ test('validateLegalDeadline(): responsibleUserId ausente permanece válido (camp
   assert.equal(result, null);
 });
 
-test('validateLegalDeadline(): responsibleUserId de usuário existente e ativo é aceito', () => {
-  const store = buildResponsibleStore([{ id: 'usr-1', name: 'Fulano', deletedAt: null }]);
+test('validateLegalDeadline(): responsibleUserId de usuário existente, ativo e com acesso ao processo relacionado é aceito', () => {
+  const store = buildResponsibleStore([{ id: 'usr-1', name: 'Fulano', role: 'colaborador', department: 'Jurídico', deletedAt: null }]);
   const result = validateLegalDeadline(baseDeadlineCandidate({ responsibleUserId: 'usr-1' }), responsibleUser, store);
   assert.equal(result, null);
+});
+
+test('validateLegalDeadline(): NOVA atribuição a usuário que NÃO tem acesso ao processo relacionado (department diferente) é rejeitada (P1.1)', () => {
+  const store = buildResponsibleStore([{ id: 'usr-ti', name: 'Líder TI', role: 'lider', department: 'TI', deletedAt: null }]);
+  const result = validateLegalDeadline(baseDeadlineCandidate({ responsibleUserId: 'usr-ti' }), responsibleUser, store, null);
+  assert.equal(result.status, 403);
+});
+
+test('validateLegalDeadline(): NOVA atribuição a administrador técnico (sem alçada de conteúdo jurídico) é rejeitada (P1.1)', () => {
+  const store = buildResponsibleStore([{ id: 'usr-admin', name: 'Administrador Técnico', role: 'administrador', department: null, deletedAt: null }]);
+  const result = validateLegalDeadline(baseDeadlineCandidate({ responsibleUserId: 'usr-admin' }), responsibleUser, store, null);
+  assert.equal(result.status, 403, 'administrador técnico não pode ser responsável — technical admin != content superuser');
+});
+
+test('validateLegalDeadline(): NOVA atribuição a usuário de companyId diferente do processo relacionado é rejeitada (P1.1)', () => {
+  const store = buildResponsibleStore(
+    [{ id: 'usr-empresa-a', name: 'Fulano Empresa A', role: 'colaborador', department: 'Jurídico', companyId: 'empresa-a', deletedAt: null }],
+    [],
+    { companyId: 'empresa-b', scopeType: 'company' }
+  );
+  const result = validateLegalDeadline(baseDeadlineCandidate({ responsibleUserId: 'usr-empresa-a' }), responsibleUser, store, null);
+  assert.equal(result.status, 403);
+});
+
+test('validateLegalDeadline(): atribuição já existente (mesmo previousResponsibleUserId) não é revalidada quanto a acesso — só a NOVA atribuição é checada', () => {
+  const store = buildResponsibleStore([{ id: 'usr-ti', name: 'Líder TI', role: 'lider', department: 'TI', deletedAt: null }]);
+  const result = validateLegalDeadline(baseDeadlineCandidate({ responsibleUserId: 'usr-ti' }), responsibleUser, store, 'usr-ti');
+  assert.equal(result, null, 'reenviar o MESMO responsável já atribuído (sem mudança) não é tratado como nova atribuição');
 });
 
 test('validateLegalDeadline(): responsibleUserId de usuário inexistente é rejeitado', () => {
@@ -953,7 +981,7 @@ test('validateLegalDeadline(): campo textual responsible/responsibleName/ownerNa
 });
 
 test('validateLegalDeadline(): responsável do Legal Deadline pode ser diferente do responsável do processo (não há herança nem restrição cruzada)', () => {
-  const store = buildResponsibleStore([{ id: 'usr-1', name: 'Fulano', deletedAt: null }], [], { responsibleUserId: 'usr-outro' });
+  const store = buildResponsibleStore([{ id: 'usr-1', name: 'Fulano', role: 'colaborador', department: 'Jurídico', deletedAt: null }], [], { responsibleUserId: 'usr-outro' });
   const result = validateLegalDeadline(baseDeadlineCandidate({ responsibleUserId: 'usr-1' }), responsibleUser, store);
   assert.equal(result, null);
 });
@@ -1104,6 +1132,20 @@ test('D4.15/D4.4: item categorizado como REQUIRES_REVIEW nunca recebe confirmati
   const items = legalDeadlineAttentionItems(store, agendaUser);
   assert.equal(items[0].category, 'REQUIRES_REVIEW');
   assert.equal(items[0].confirmationLabel, null);
+});
+
+test('filterCalendarEventsByWindow() (P1.3, revisão pós-PR #8): mantém apenas eventos dentro da janela civil da semana, sem alterar hora externa', () => {
+  const window = { start: '2026-09-14', end: '2026-09-20' };
+  const events = [
+    { id: 'evt-segunda', date: '2026-09-14T09:00:00.000Z', start: '09:00' },
+    { id: 'evt-domingo', date: '2026-09-20' },
+    { id: 'evt-domingo-seguinte', date: '2026-09-21' },
+    { id: 'evt-semana-anterior', date: '2026-09-07' },
+    { id: 'evt-sem-data' }
+  ];
+  const filtered = filterCalendarEventsByWindow(events, window);
+  assert.deepEqual(filtered.map(e => e.id), ['evt-segunda', 'evt-domingo']);
+  assert.equal(filtered[0].date, '2026-09-14T09:00:00.000Z', 'a hora/valor externo do evento nunca é alterado pelo filtro — só decide inclusão/exclusão');
 });
 
 test('server.js não contém nenhum método de escrita do Google Calendar (events.insert/update/patch/delete) — Calendar é somente leitura', () => {

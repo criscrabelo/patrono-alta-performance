@@ -2046,6 +2046,33 @@ test('[HTTP] D4.11: responsável que se torna inativo depois não é apagado do 
   assert.equal(detail.body.status, 'ativo', 'status do Legal Deadline não é alterado pela inatividade do responsável');
 });
 
+test('[HTTP] P1.2 (revisão pós-PR #8): usuário com deletedAt não consegue mais autenticar (login nem sessão existente), fechando a inconsistência com "Responsável inativo"', async () => {
+  const store = readStore();
+  store.users.push({ id: 'usr-teste-autenticacao-inativo', name: 'Autenticação Inativo Teste', email: 'autenticacao.inativo.teste@coevo.local', role: 'colaborador', department: 'Jurídico', mfa: false });
+  writeStore(store);
+
+  const tokenAntesDeInativar = await loginAs('autenticacao.inativo.teste@coevo.local');
+  const oldSessionWorks = await api('GET', '/api/legal/processos', { token: tokenAntesDeInativar });
+  assert.equal(oldSessionWorks.status, 200, 'sessão válida funciona normalmente antes da inativação');
+
+  const storeNow = readStore();
+  storeNow.users.find(u => u.id === 'usr-teste-autenticacao-inativo').deletedAt = new Date().toISOString();
+  writeStore(storeNow);
+
+  const oldSessionAfterInactive = await api('GET', '/api/legal/processos', { token: tokenAntesDeInativar });
+  assert.equal(oldSessionAfterInactive.status, 401, 'uma sessão já emitida deixa de ser aceita assim que o usuário fica inativo (getUser() nega deletedAt)');
+
+  const newLoginAttempt = await api('POST', '/api/auth/login', { json: { email: 'autenticacao.inativo.teste@coevo.local', password: process.env.COEVO_DEMO_PASSWORD } });
+  assert.equal(newLoginAttempt.status, 401, 'novo login também é negado para usuário inativo, mesma mensagem genérica de credenciais inválidas');
+});
+
+test('[HTTP] P1.3 (revisão pós-PR #8): GET /api/my-week nunca traz evento de Calendar fora da semana civil corrente (adapter vazio hoje; garantia coberta por teste unitário de filterCalendarEventsByWindow())', async () => {
+  const token = await loginAs(EMAILS.responsavelAtivo);
+  const myWeek = await api('GET', '/api/my-week', { token });
+  assert.equal(myWeek.status, 200);
+  assert.deepEqual(myWeek.body.items.filter(i => i.entityType === 'calendarEvent'), [], 'sem integração real ativada neste ambiente, nenhum evento de Calendar é sintetizado/inventado');
+});
+
 test('[HTTP] GET /api/my-week: Legal Deadline do usuário logado dentro da semana civil corrente aparece; de outro usuário não aparece', async () => {
   const tokenJuridico = await loginAs(EMAILS.liderJuridico);
   const civilWeek = require('../server').civilWeekWindow();
@@ -2063,7 +2090,7 @@ test('[HTTP] GET /api/my-week: Legal Deadline do usuário logado dentro da seman
   assert.equal(myWeek.body.window.end, civilWeek.end);
 });
 
-test('[HTTP] GET /api/my-week: companyId fora de escopo bloqueia o item mesmo sendo o responsável (defesa em profundidade)', async () => {
+test('[HTTP] POST /api/entities/legalDeadlines: atribuir responsável de companyId diferente do processo é rejeitado na CRIAÇÃO (P1.1 — revisão pós-PR #8)', async () => {
   const store = readStore();
   store.records.processos.push({ id: 'proc-fase4b-empresa-b', source: 'monday', department: 'Jurídico', companyId: 'fase4b-empresa-b', scopeType: 'company', title: 'Processo Fase 4B Empresa B', deletedAt: null });
   store.users.push({ id: 'usr-teste-fase4b-empresa-a', name: 'Responsável Fase4B Empresa A', email: 'responsavel.fase4b.empresa.a@coevo.local', role: 'colaborador', department: 'Jurídico', companyId: 'fase4b-empresa-a', scopeType: 'company', mfa: false });
@@ -2072,15 +2099,27 @@ test('[HTTP] GET /api/my-week: companyId fora de escopo bloqueia o item mesmo se
   const tokenDiretoria = await loginAs(EMAILS.diretoria);
   const civilWeek = require('../server').civilWeekWindow();
   const created = await api('POST', '/api/entities/legalDeadlines', { token: tokenDiretoria, json: { processId: 'proc-fase4b-empresa-b', origin: 'Minha Semana — empresa B (Fase 4B)', date: civilWeek.start, originType: 'JUDICIAL_PROCESSUAL', responsibleUserId: 'usr-teste-fase4b-empresa-a', companyId: 'fase4b-empresa-b', scopeType: 'company' } });
-  assert.equal(created.status, 201);
-
-  const tokenEmpresaA = await loginAs('responsavel.fase4b.empresa.a@coevo.local');
-  const myWeek = await api('GET', '/api/my-week', { token: tokenEmpresaA });
-  assert.equal(myWeek.status, 200);
-  assert.ok(!myWeek.body.items.some(i => i.entityId === created.body.id), 'responsibleUserId não amplia autorização — scoped() por companyId continua bloqueando');
+  assert.equal(created.status, 403, 'a atribuição em si já é rejeitada — o responsável não pode nem acessar o processo relacionado (companyId diferente)');
 });
 
-test('[HTTP] GET /api/my-week: speId fora de escopo bloqueia o item mesmo sendo o responsável', async () => {
+test('[HTTP] GET /api/my-week: defesa em profundidade — mesmo se um registro com responsável fora de escopo existir (drift), Minha Semana nunca o revela', async () => {
+  const store = readStore();
+  store.records.processos.push({ id: 'proc-fase4b-empresa-b-drift', source: 'monday', department: 'Jurídico', companyId: 'fase4b-empresa-b-drift', scopeType: 'company', title: 'Processo Fase 4B Empresa B (drift)', deletedAt: null });
+  store.users.push({ id: 'usr-teste-fase4b-empresa-a-drift', name: 'Responsável Fase4B Empresa A (drift)', email: 'responsavel.fase4b.empresa.a.drift@coevo.local', role: 'colaborador', department: 'Jurídico', companyId: 'fase4b-empresa-a-drift', scopeType: 'company', mfa: false });
+  const civilWeek = require('../server').civilWeekWindow();
+  // Inserção direta no store (bypassando a validação de criação) simula um registro cujo escopo mudou
+  // DEPOIS da atribuição do responsável (ex.: o processo foi reclassificado de empresa) — cenário que a
+  // validação de criação/PATCH não cobre retroativamente (D4.11: atribuição antiga nunca é revalidada).
+  store.records.legalDeadlines.push({ id: 'ld-fase4b-drift', processId: 'proc-fase4b-empresa-b-drift', origin: 'Drift de escopo (Fase 4B)', date: civilWeek.start, originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', responsibleUserId: 'usr-teste-fase4b-empresa-a-drift', companyId: 'fase4b-empresa-b-drift', scopeType: 'company', department: 'Jurídico', version: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), createdBy: 'Teste' });
+  writeStore(store);
+
+  const tokenEmpresaA = await loginAs('responsavel.fase4b.empresa.a.drift@coevo.local');
+  const myWeek = await api('GET', '/api/my-week', { token: tokenEmpresaA });
+  assert.equal(myWeek.status, 200);
+  assert.ok(!myWeek.body.items.some(i => i.entityId === 'ld-fase4b-drift'), 'responsibleUserId não amplia autorização — scoped() por companyId continua bloqueando mesmo para um registro inserido fora do fluxo normal de validação');
+});
+
+test('[HTTP] POST /api/entities/legalDeadlines: atribuir responsável de speId diferente do processo é rejeitado na CRIAÇÃO (P1.1 — revisão pós-PR #8)', async () => {
   const store = readStore();
   store.records.processos.push({ id: 'proc-fase4b-spe-y', source: 'monday', department: 'Jurídico', speId: 'fase4b-spe-y', scopeType: 'spe', title: 'Processo Fase 4B SPE Y', deletedAt: null });
   store.users.push({ id: 'usr-teste-fase4b-spe-x', name: 'Responsável Fase4B SPE X', email: 'responsavel.fase4b.spe.x@coevo.local', role: 'colaborador', department: 'Jurídico', speId: 'fase4b-spe-x', scopeType: 'spe', mfa: false });
@@ -2089,12 +2128,19 @@ test('[HTTP] GET /api/my-week: speId fora de escopo bloqueia o item mesmo sendo 
   const tokenDiretoria = await loginAs(EMAILS.diretoria);
   const civilWeek = require('../server').civilWeekWindow();
   const created = await api('POST', '/api/entities/legalDeadlines', { token: tokenDiretoria, json: { processId: 'proc-fase4b-spe-y', origin: 'Minha Semana — SPE Y (Fase 4B)', date: civilWeek.start, originType: 'JUDICIAL_PROCESSUAL', responsibleUserId: 'usr-teste-fase4b-spe-x', speId: 'fase4b-spe-y', scopeType: 'spe' } });
-  assert.equal(created.status, 201);
+  assert.equal(created.status, 403);
+});
 
-  const tokenSpeX = await loginAs('responsavel.fase4b.spe.x@coevo.local');
-  const myWeek = await api('GET', '/api/my-week', { token: tokenSpeX });
-  assert.equal(myWeek.status, 200);
-  assert.ok(!myWeek.body.items.some(i => i.entityId === created.body.id));
+test('[HTTP] POST /api/entities/legalDeadlines: atribuir responsável de outro departamento (TI) a um Legal Deadline jurídico é rejeitado na CRIAÇÃO (P1.1)', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'P1.1 — responsável de TI (Fase 4B)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', responsibleUserId: 'usr-teste-lider-ti' } });
+  assert.equal(created.status, 403);
+});
+
+test('[HTTP] POST /api/entities/legalDeadlines: atribuir responsável a administrador técnico é rejeitado na CRIAÇÃO (technical admin != content superuser, P1.1)', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'P1.1 — responsável administrador (Fase 4B)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', responsibleUserId: 'usr-teste-administrador' } });
+  assert.equal(created.status, 403);
 });
 
 test('[HTTP] GET /api/my-week: líder de TI não recebe conteúdo jurídico de outro usuário, mesmo autenticado', async () => {

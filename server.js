@@ -93,16 +93,11 @@ function validateLegalDeadline(candidate, user, store, previousResponsibleUserId
   const missing = ['processId','origin','date','originType'].filter(field => !candidate[field]);
   if (missing.length) return { status: 422, error: `Prazo jurídico sem origem identificada bloqueia a operação. Campos obrigatórios ausentes: ${missing.join(', ')}` };
   // Sprint 2, Fase 4B (D4.2/D4.3, homologadas): responsibleUserId é opcional; quando informado, deve
-  // referenciar um usuário existente. Uma NOVA atribuição (diferente do responsável anterior a este
-  // PATCH/POST) exige usuário ativo — reaproveita o padrão de soft-delete (`deletedAt`) já usado em toda
-  // a plataforma (agenda, projetos, entidades genéricas), em vez de inventar um segundo campo de
-  // "usuário ativo" que não existe hoje em `store.users`. Um responsável já atribuído que depois fica
-  // inativo NÃO invalida revalidações futuras do mesmo Legal Deadline (D4.11 — histórico nunca apagado;
-  // só a NOVA atribuição é bloqueada, nunca a permanência de uma atribuição antiga).
+  // referenciar um usuário existente (checagem de existência aqui; atividade/acesso são checados mais
+  // abaixo, depois que o processo relacionado e a herança de escopo já foram resolvidos).
   if (candidate.responsibleUserId !== undefined && candidate.responsibleUserId !== null) {
-    const responsible = (store.users || []).find(u => u.id === candidate.responsibleUserId);
-    if (!responsible) return { status: 422, error: 'O campo responsibleUserId deve referenciar um usuário existente' };
-    if (candidate.responsibleUserId !== previousResponsibleUserId && responsible.deletedAt) return { status: 422, error: 'Não é possível atribuir um Legal Deadline a um usuário inativo' };
+    const responsibleExists = (store.users || []).some(u => u.id === candidate.responsibleUserId);
+    if (!responsibleExists) return { status: 422, error: 'O campo responsibleUserId deve referenciar um usuário existente' };
   }
   // P0 corrigido (rodada 4, item 6): origin e date antes só passavam por um teste de "truthy" — uma
   // string só de espaços, ou uma data como "banana"/"2026-99-99", passavam sem checagem semântica.
@@ -125,6 +120,24 @@ function validateLegalDeadline(candidate, user, store, previousResponsibleUserId
   candidate.companyId = relatedProcess.companyId;
   candidate.speId = relatedProcess.speId;
   candidate.scopeType = relatedProcess.scopeType;
+  // Sprint 2, Fase 4B (revisão pós-PR #8, P1.1/P1.2): uma NOVA atribuição de responsável (diferente do
+  // responsável anterior a este PATCH/POST) exige: (1) usuário não inativo — reaproveita a convenção de
+  // soft-delete (`deletedAt`) já usada em toda a plataforma (agenda/projetos/entidades genéricas) para
+  // "registro não mais válido"; nenhum segundo campo de "usuário ativo" foi inventado; e (2) usuário
+  // elegível para conteúdo jurídico E com acesso ao processo/Legal Deadline pelo MESMO RBAC + scoped()
+  // já vigente — não basta existir/estar ativo, a atribuição não pode criar um "responsável" que não
+  // poderia sequer ler o próprio registro. `allowedContent()` (não `allowedInDepartment()` isolado) é
+  // usado porque nega administrador técnico corretamente (technical admin != content superuser); `scoped()`
+  // é checado tanto sobre o candidato final (com escopo já herdado do processo) quanto sobre o próprio
+  // processo relacionado, mesma defesa em profundidade de `scopedLegalDeadlineRows()`. Uma atribuição já
+  // existente que depois deixa de satisfazer este critério (ex.: o processo muda de escopo) NÃO é
+  // revalidada — apenas a NOVA atribuição é bloqueada (D4.11 — histórico/atribuição antiga preservados).
+  if (candidate.responsibleUserId !== undefined && candidate.responsibleUserId !== null && candidate.responsibleUserId !== previousResponsibleUserId) {
+    const responsible = (store.users || []).find(u => u.id === candidate.responsibleUserId);
+    if (responsible.deletedAt) return { status: 422, error: 'Não é possível atribuir um Legal Deadline a um usuário inativo' };
+    const responsibleCanAccess = allowedContent(responsible, 'juridico', 'read') && scoped(responsible, candidate) && scoped(responsible, relatedProcess);
+    if (!responsibleCanAccess) return { status: 403, error: 'O usuário indicado como responsável não tem permissão para acessar este Legal Deadline ou o processo relacionado' };
+  }
   return null;
 }
 // Sprint 2, Fase 1 (D1 homologada, docs/DECISIONS.md seção 1.1): data civil "hoje" no fuso do piloto
@@ -185,6 +198,16 @@ function googleCalendarStatus(user) {
 }
 function googleCalendarEvents(user) {
   return { ...googleCalendarStatus(user), events: [] };
+}
+// Sprint 2, Fase 4B (revisão pós-PR #8, P1.3): a janela de "Minha Semana" (D4.10) precisa valer também
+// para os eventos do Google Calendar, não só para Legal Deadline — sem isso, quando a leitura real for
+// ativada, um evento fora da semana civil corrente poderia aparecer em Minha Semana. Extraída como
+// função pura (testável isoladamente do HTTP/adapter, que hoje sempre devolve `events: []`). A data
+// civil do evento é os 10 primeiros caracteres de `event.date` (YYYY-MM-DD, mesmo quando o valor for um
+// datetime completo); a hora externa em si continua preservada nos campos `start`/`end`, nunca
+// convertida para data civil (Legal Deadline continua com `date` civil puro, sem virar timestamp).
+function filterCalendarEventsByWindow(events, window) {
+  return (events || []).filter(event => { const civilDate = String(event.date || '').slice(0, 10); return civilDate >= window.start && civilDate <= window.end; });
 }
 // Registros legados anteriores à homologação da D1 podem existir sem originType/status persistidos
 // (docs/DATA_MODEL.md, "Registros legados anteriores à D1"). Nunca inferimos esses campos — a view
@@ -377,6 +400,12 @@ function validateInternalizationProcess(processId, user, store) {
 // `{...input}` permitia que o corpo da requisição sobrescrevesse `id`, `version`, `createdBy`,
 // `updatedAt`, dados de exclusão lógica ou a origem/externalId de um registro sincronizado.
 const PROTECTED_ENTITY_FIELDS = ['id','version','createdAt','createdBy','updatedAt','updatedBy','deletedAt','deletedBy','source','externalId','boardId','boardName','syncedAt'];
+// Sprint 2, Fase 4B (revisão pós-PR #8, P2): nomes textuais de responsável nunca são um substituto
+// válido de `responsibleUserId` (só o `user.id` canônico é aceito — ver validateLegalDeadline()) — em
+// vez de apenas ignorá-los na validação, são removidos do input antes de persistir, para não criar
+// campos paralelos de responsabilidade sem significado (`responsible`/`responsibleName`/`ownerName`
+// ficariam gravados no registro sem nenhuma validação/auditoria própria).
+const LEGAL_DEADLINE_TEXTUAL_RESPONSIBLE_FIELDS = ['responsible', 'responsibleName', 'ownerName'];
 // Papel com `scopes:['*']` (hoje diretoria/administrador) tem alçada global — é o único que pode
 // escolher escopo (department/scopeType/companyId/speId) de um registro que está criando/gerindo.
 function hasGlobalScope(user) { return (ROLES[user.role]?.scopes || []).includes('*'); }
@@ -526,13 +555,22 @@ function dashboardAuthorized(user, definition) {
   return true;
 }
 function json(res, status, body) { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'x-content-type-options': 'nosniff' }); res.end(JSON.stringify(body)); }
+// Sprint 2, Fase 4B (revisão pós-PR #8, P1.2): `deletedAt` em `users` agora é consistentemente a
+// convenção de "usuário inativo" também na autenticação — uma sessão de um usuário com `deletedAt`
+// preenchido nunca é resolvida como válida aqui (mesmo padrão de soft-delete já aplicado a
+// processos/agenda/entidades genéricas, agora fechado também no ponto de entrada de sessão), para não
+// deixar `responsibleInactive`/rejeição de nova atribuição inconsistentes com quem ainda pode logar.
+// Não cria rota de inativação (fora de escopo) nem revoga sessões já emitidas antes da inativação
+// (fora de escopo — ver docs/SECURITY.md, "Revogação de sessão").
 function getUser(req) {
   const header = req.headers.authorization;
   if (!header?.startsWith('Bearer ')) return null;
   const token = header.slice(7);
   const session = sessions.get(token);
-  if (session && !session.challenge && session.expiresAt > Date.now()) return readStore().users.find(u => u.id === session.userId) || null;
-  return null;
+  const sessionValid = session && !session.challenge && session.expiresAt > Date.now();
+  if (!sessionValid) return null;
+  const found = readStore().users.find(u => u.id === session.userId);
+  return found && !found.deletedAt ? found : null;
 }
 async function body(req) { let s=''; for await (const c of req) s += c; return s ? JSON.parse(s) : {}; }
 function metrics(store) { const finance=departmentFinancials(store); const total=finance.reduce((n,d)=>n+(d.actual||0),0); const budget=finance.reduce((n,d)=>n+(d.budget||0),0); return { realized:total, budget, execution:budget?total/budget:0, composition:finance.map(d=>({departmentId:d.departmentId,departmentName:d.departmentName,budget:d.budget,actual:d.actual})), agenda:store.agenda.length, audit:store.audit.length }; }
@@ -678,7 +716,10 @@ function handler(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/auth/login') return body(req).then(input => {
     const found = store.users.find(u => u.email.toLowerCase() === String(input.email || '').toLowerCase());
     const configured = process.env.COEVO_DEMO_PASSWORD;
-    if (!found || !configured || hash(input.password) !== hash(configured)) return json(res,401,{error:'Credenciais inválidas'});
+    // Sprint 2, Fase 4B (revisão pós-PR #8, P1.2): usuário com `deletedAt` (mesma convenção de "inativo"
+    // agora usada por responsibleUserId/getUser()) nunca recebe sessão nova — mesma mensagem genérica de
+    // credenciais inválidas, para não revelar por timing/mensagem se o e-mail pertence a alguém inativo.
+    if (!found || found.deletedAt || !configured || hash(input.password) !== hash(configured)) return json(res,401,{error:'Credenciais inválidas'});
     if (!requireMfa(found)) { const token=crypto.randomBytes(32).toString('hex'); sessions.set(token,{userId:found.id,expiresAt:Date.now()+Number(process.env.COEVO_SESSION_MS||3600000)}); return json(res,200,{mfaRequired:false,token}); }
     const challenge = crypto.randomUUID(); sessions.set(challenge,{userId:found.id,challenge:true,expiresAt:Date.now()+300000});
     return json(res,200,{mfaRequired:true,challenge,maskedPhone:'final ****'});
@@ -969,17 +1010,18 @@ function handler(req, res) {
     const window = civilWeekWindow();
     const legalItems = myWeekLegalDeadlineItems(store,user);
     const calendar = googleCalendarEvents(user);
-    const calendarItems = calendar.events.map(event => ({
-      entityType: 'calendarEvent',
-      externalId: event.id ?? null,
-      date: event.date ?? null,
-      source: 'google_calendar',
-      title: event.title ?? null,
-      start: event.start ?? null,
-      end: event.end ?? null,
-      allDay: Boolean(event.allDay),
-      target: null
-    }));
+    const calendarItems = filterCalendarEventsByWindow(calendar.events, window)
+      .map(event => ({
+        entityType: 'calendarEvent',
+        externalId: event.id ?? null,
+        date: event.date ?? null,
+        source: 'google_calendar',
+        title: event.title ?? null,
+        start: event.start ?? null,
+        end: event.end ?? null,
+        allDay: Boolean(event.allDay),
+        target: null
+      }));
     const items = [...legalItems, ...calendarItems].sort((a,b)=>{
       const dateA=String(a.date||''), dateB=String(b.date||'');
       if (dateA!==dateB) return dateA.localeCompare(dateB);
@@ -1014,6 +1056,7 @@ function handler(req, res) {
   if (req.method === 'POST' && url.pathname.startsWith('/api/entities/') && !url.pathname.endsWith('/restore')) { const type=url.pathname.split('/')[3]; const module=entityModule(type); if(!module || !allowedContent(user,module,'create')) return json(res,403,{error:'Sem permissão'}); const blocked=rejectIfMondaySourced(type); if(blocked) return json(res,403,blocked); return body(req).then(input=>{
     const sanitized = sanitizeEntityInput(input, user);
     if(type==='legalDeadlines'){
+      for (const field of LEGAL_DEADLINE_TEXTUAL_RESPONSIBLE_FIELDS) delete sanitized[field];
       // Sprint 2, Fase 1: status é enum fechado, mas tem default server-side quando o cliente não o
       // informa na criação — 'ativo' é o único default seguro (nenhum Legal Deadline nasce suspenso/
       // cumprido/cancelado por omissão). Só o campo AUSENTE recebe o default; um valor explícito
@@ -1049,6 +1092,7 @@ function handler(req, res) {
     // não apenas sobre os campos enviados nesta requisição. Um PATCH que esvazia origin/date, ou troca
     // processId para um processo inexistente/fora de escopo, é rejeitado antes de qualquer gravação.
     if(isLegalDeadline){
+      for (const field of LEGAL_DEADLINE_TEXTUAL_RESPONSIBLE_FIELDS) delete sanitized[field];
       // Sprint 2, Fase 4B (D4.2/D4.3, homologadas): "desatribuir" responsável (responsibleUserId
       // explicitamente null quando já havia um valor) NÃO foi homologado — só atribuição/reatribuição
       // a outro usuário. Em vez de inventar esse comportamento, o PATCH rejeita explicitamente e
@@ -1090,5 +1134,5 @@ function handler(req, res) {
   return json(res,404,{error:'Rota não encontrada'});
 }
 if (require.main === module) { ensureStore(); http.createServer((req,res)=>handler(req,res)).listen(PORT,()=>console.log(`COEVO Alta Performance disponível em http://localhost:${PORT}`)); setInterval(()=>scheduledMondayTick().catch(error=>console.error('Monday scheduler:',error.message)),60000); }
-module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, ORIGIN_TYPE_LABELS, STATUS_LABELS, CATEGORY_LABELS, legalDeadlineLabels, legalDeadlineConfirmationLabel };
+module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, ORIGIN_TYPE_LABELS, STATUS_LABELS, CATEGORY_LABELS, legalDeadlineLabels, legalDeadlineConfirmationLabel, LEGAL_DEADLINE_TEXTUAL_RESPONSIBLE_FIELDS, filterCalendarEventsByWindow };
 

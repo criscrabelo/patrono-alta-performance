@@ -255,13 +255,21 @@ entidade nova nem tabela/coleção paralela:
 - **`legalDeadlines.responsibleUserId`** (opcional): campo simples adicionado ao registro já existente,
   não uma entidade nova. Validado em `validateLegalDeadline()` (mesma função central já usada por
   POST/PATCH): quando informado, deve referenciar um `user.id` existente; uma **nova** atribuição
-  (diferente da atribuição anterior a este PATCH/POST) exige que o usuário não esteja com `deletedAt`
-  preenchido. **Não existia nenhum campo `active`/`isActive`/`status` de usuário no modelo antes desta
-  rodada** — a auditoria confirmou que a única convenção de "registro não mais válido" já usada em toda a
-  plataforma é o soft-delete (`deletedAt`/`deletedBy`), hoje aplicado a `processos`/`agenda`/entidades
-  genéricas; esta rodada estende a MESMA convenção para `users`, em vez de inventar um segundo campo
-  paralelo. Não existe rota para inativar um usuário nesta fase (fora de escopo) — os testes atribuem
-  `deletedAt` diretamente, como já era feito para processos.
+  (diferente da atribuição anterior a este PATCH/POST) exige que o usuário (1) não esteja com `deletedAt`
+  preenchido, e (2) tenha acesso ao próprio Legal Deadline/processo relacionado pelo MESMO RBAC + `scoped()`
+  já vigente (`allowedContent(responsible,'juridico','read') && scoped(responsible,candidate) &&
+  scoped(responsible,relatedProcess)`) — revisão pós-PR #8 (P1.1): a checagem original só validava
+  existência/atividade, permitindo (na criação) registrar como responsável alguém de outro
+  departamento/companyId/speId, ou até administrador técnico, que não poderia sequer acessar o próprio
+  registro. Uma atribuição já existente que depois deixa de satisfazer este critério (ex.: o processo
+  muda de escopo) NÃO é revalidada retroativamente — só a NOVA atribuição é bloqueada (D4.11).
+  **Convenção de "usuário ativo":** não existia nenhum campo `active`/`isActive`/`status` de usuário no
+  modelo antes desta rodada — a auditoria confirmou que a única convenção de "registro não mais válido"
+  já usada em toda a plataforma é o soft-delete (`deletedAt`/`deletedBy`), hoje aplicado a
+  `processos`/`agenda`/entidades genéricas; esta rodada estende a MESMA convenção para `users`, agora de
+  forma consistente também na autenticação (`getUser()`/`POST /api/auth/login` negam usuário com
+  `deletedAt` — revisão pós-PR #8, P1.2). Não existe rota para inativar um usuário nesta fase (fora de
+  escopo) — os testes atribuem `deletedAt` diretamente, como já era feito para processos.
 - **"Desatribuir" responsável (`responsibleUserId: null`)** não foi homologado — o PATCH rejeita
   explicitamente (422) essa tentativa quando já existe um responsável, em vez de inventar o
   comportamento. Reatribuição para outro usuário válido/ativo continua permitida normalmente.
@@ -273,12 +281,18 @@ entidade nova nem tabela/coleção paralela:
   calculada por `civilWeekWindow()` a partir de `todayCivilDate()` — nunca "próximos 7 dias corridos".
   Contém: (a) Legal Deadlines cujo `responsibleUserId` é o usuário logado, reaproveitando
   `scopedLegalDeadlineRows()` (mesma defesa em profundidade — `responsibleUserId` nunca amplia
-  autorização); (b) a leitura (vazia, adapter) do Google Calendar. **Gap conhecido e não resolvido nesta
-  rodada:** eventos manuais de `store.agenda` não entram em Minha Semana — o campo `owner` desse
-  registro é texto livre, não um `user.id` canônico, e inferir a atribuição por nome seria a mesma
-  "substituição textual" que a Fase 4B proíbe explicitamente para `responsibleUserId`. Corrigir isso
-  exigiria uma decisão de modelo própria (um campo canônico de atribuição em `store.agenda`), fora do
-  escopo desta rodada.
+  autorização); (b) a leitura (adapter) do Google Calendar, filtrada pela MESMA janela civil via
+  `filterCalendarEventsByWindow()` (revisão pós-PR #8, P1.3 — a checagem original só aplicava a janela a
+  Legal Deadline, deixando eventos de Calendar sem filtro de semana quando a leitura real existir).
+  **Gap conhecido e não resolvido nesta rodada:** eventos manuais de `store.agenda` não entram em Minha
+  Semana — o campo `owner` desse registro é texto livre, não um `user.id` canônico, e inferir a
+  atribuição por nome seria a mesma "substituição textual" que a Fase 4B proíbe explicitamente para
+  `responsibleUserId`. Corrigir isso exigiria uma decisão de modelo própria (um campo canônico de
+  atribuição em `store.agenda`), fora do escopo desta rodada.
+- **Campos textuais de responsabilidade** (`responsible`/`responsibleName`/`ownerName`): removidos do
+  input de `legalDeadlines` antes de persistir (POST e PATCH), não apenas ignorados na validação —
+  revisão pós-PR #8, P2: evita que fiquem gravados como propriedades paralelas sem significado/validação
+  própria no registro.
 - **D4.15 (Agenda operacional):** `legalDeadlineAgendaItems(store, user, { includeInactive })` passa a
   filtrar `cumprido`/`cancelado`/`suspenso` por padrão (`isOperationallyVisible()`); nenhum registro é
   apagado ou tem o status alterado — os mesmos itens continuam acessíveis via detalhe, via listagem
