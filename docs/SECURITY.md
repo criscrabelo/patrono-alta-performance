@@ -292,3 +292,27 @@ produção.
 **Nenhum destes riscos bloqueia a Fase 4A (documental, já homologada) nem qualquer P0/P1 do escopo já
 entregue (Fases 1–3)** — são registrados para orientar o desenho de segurança da implementação funcional
 da Fase 4B.
+
+## Fase 4B — implementação e como cada risco acima foi tratado
+
+- **Exposição do próprio conteúdo do Calendar / sincronização externa:** nesta rodada, a integração real
+  não foi ativada — não há credenciais de OAuth (`GOOGLE_CALENDAR_CLIENT_ID`/`GOOGLE_CALENDAR_CLIENT_SECRET`)
+  neste ambiente. Em vez de improvisar armazenamento de token ou simular compromissos, o risco fica
+  estruturalmente eliminado por não haver nenhum token/segredo de Calendar no código: `GET
+  /api/calendar/status` sempre devolve `not_configured` e `GET /api/calendar/events` sempre devolve
+  `events: []` (verificado por teste HTTP: a resposta nunca contém as substrings `token`/`secret`).
+  Reportado como **blocker técnico** para uma futura ativação real, não resolvido nem contornado
+  nesta rodada.
+- **Sem escrita externa:** confirmado por teste de código-fonte (`tests/core.test.js`) — nenhum método de
+  escrita da API do Google Calendar existe em `server.js`.
+- **Usuário desligado/desativado como responsável (D4.11):** implementado exatamente como previsto —
+  `responsibleUserId` nunca é apagado; a view sinaliza `responsibleInactive: true` (testado em
+  `tests/security-integration.test.js`).
+- **Isolamento por usuário/identidade do Calendar:** como a leitura real não foi ativada, não há caminho
+  de código que misture o Calendar de um usuário com o de outro (não existe nenhum estado de conexão
+  persistido); quando a integração real for ativada, a mesma regra (D4.1: "compromissos pertencem à
+  identidade do usuário conectado, nunca uma agenda corporativa global por alçada de negócio") permanece
+  o requisito a ser validado antes de qualquer merge.
+- **`responsibleUserId` não amplia autorização:** testado explicitamente (companyId/speId fora de
+  escopo, TI, administrador técnico) em `tests/security-integration.test.js` — nenhum desses papéis ganha
+  visibilidade adicional por ser (ou não) responsável por um Legal Deadline.

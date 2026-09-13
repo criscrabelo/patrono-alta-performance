@@ -78,8 +78,31 @@ Legal Deadline no Patrono nem esconde/zera nada — mesma regra de "falha de fon
 válido" já aplicada ao Monday (D4.8, Anexo A regras 3/14); a indisponibilidade afeta apenas a
 visualização complementar dos compromissos pessoais do Google.
 
-Implementação (Fase 4B) ainda **não iniciada** — decisão homologada, matriz GO/NO-GO em GO DOCUMENTAL
-(`docs/DECISIONS.md`, D4.13); código a ser desenvolvido em PR separado.
+### Google Calendar — implementação (Sprint 2, Fase 4B)
+
+Implementado como **adapter somente leitura** (`googleCalendarStatus()`/`googleCalendarEvents()` em
+`server.js`), servindo `GET /api/calendar/status` e `GET /api/calendar/events`. Nenhum método de escrita
+da API do Google Calendar (criar/atualizar/remover evento) existe no código — verificado por teste
+automatizado de código-fonte (`tests/core.test.js`), não apenas por revisão manual.
+
+**Blocker técnico (não uma decisão de produto):** este ambiente não possui credenciais reais de OAuth do
+Google (variáveis `GOOGLE_CALENDAR_CLIENT_ID`/`GOOGLE_CALENDAR_CLIENT_SECRET` ausentes). Por isso, a
+ativação real da leitura (fluxo de consentimento OAuth, compromissos de verdade do usuário) permanece
+bloqueada por design: `googleCalendarStatus()` devolve `status: 'not_configured'` (ou `'unavailable'` se
+as variáveis existirem mas a conexão em si não estiver estabelecida) e `googleCalendarEvents()` sempre
+devolve `events: []` — nunca uma simulação/mock de compromissos reais. Nenhuma das duas funções expõe
+token/segredo em nenhuma circunstância (verificado por teste HTTP).
+
+Consequência prática: a leitura real de agenda pessoal do Google só é possível quando (a) credenciais de
+OAuth de app forem provisionadas neste ambiente e (b) um mecanismo seguro de armazenamento de token por
+usuário for definido — nenhum dos dois foi resolvido nesta rodada; a interface (`configured`/`connected`/
+`status`/`events`) já é o ponto de extensão para quando isso existir, sem exigir mudança de contrato para
+quem já consome a rota hoje.
+
+`GET /api/my-week` ("Minha Semana", D4.10) combina Legal Deadline (fonte canônica) com esta mesma leitura
+do Calendar, sem misturar as duas fontes: eventos de Calendar entram como `entityType: 'calendarEvent'`
+com `externalId` (nunca um id canônico Patrono), nunca viram Legal Deadline/Task, e a ausência/
+indisponibilidade do Calendar nunca afeta os itens de Legal Deadline na mesma resposta.
 
 ## Regras de segurança de integração aplicadas
 

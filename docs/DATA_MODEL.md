@@ -246,3 +246,67 @@ de Legal Deadline no Calendar), e a visão "Minha Semana" (D4.10 — **homologad
 `America/Sao_Paulo`, também sem nova entidade — view sobre `legalDeadlines` + `store.agenda`). Todos os
 pontos relevantes de modelo já estão homologados (ver D4.14); a implementação do modelo (adicionar o
 campo, construir as views) fica para a Fase 4B, em PR(s) separado(s) — nada foi implementado aqui.
+
+## Sprint 2, Fase 4B — implementação funcional (responsável, Minha Semana, Calendar read-only)
+
+Esta rodada implementa exatamente o que foi homologado documentalmente na Fase 4A, sem criar nenhuma
+entidade nova nem tabela/coleção paralela:
+
+- **`legalDeadlines.responsibleUserId`** (opcional): campo simples adicionado ao registro já existente,
+  não uma entidade nova. Validado em `validateLegalDeadline()` (mesma função central já usada por
+  POST/PATCH): quando informado, deve referenciar um `user.id` existente; uma **nova** atribuição
+  (diferente da atribuição anterior a este PATCH/POST) exige que o usuário (1) não esteja com `deletedAt`
+  preenchido, e (2) tenha acesso ao próprio Legal Deadline/processo relacionado pelo MESMO RBAC + `scoped()`
+  já vigente, extraída como função nomeada e testável isoladamente:
+  `canBeResponsibleForLegalDeadline(responsible, candidate, relatedProcess)` =
+  `allowedContent(responsible,'juridico','read') && scoped(responsible,candidate) &&
+  scoped(responsible,relatedProcess)` — revisão pós-PR #8 (P1.1): a checagem original só validava
+  existência/atividade, permitindo (na criação) registrar como responsável alguém de outro
+  departamento/companyId/speId, ou até administrador técnico, que não poderia sequer acessar o próprio
+  registro. Diretoria (alçada global) permanece elegível sem regra especial (`hasGlobalScope()` já cobre
+  isso dentro de `scoped()`). Uma atribuição já existente que depois deixa de satisfazer este critério (ex.: o processo
+  muda de escopo) NÃO é revalidada retroativamente — só a NOVA atribuição é bloqueada (D4.11).
+  **Convenção de "usuário ativo":** não existia nenhum campo `active`/`isActive`/`status` de usuário no
+  modelo antes desta rodada — a auditoria confirmou que a única convenção de "registro não mais válido"
+  já usada em toda a plataforma é o soft-delete (`deletedAt`/`deletedBy`), hoje aplicado a
+  `processos`/`agenda`/entidades genéricas; esta rodada estende a MESMA convenção para `users`, agora de
+  forma consistente também na autenticação (`getUser()`/`POST /api/auth/login` negam usuário com
+  `deletedAt` — revisão pós-PR #8, P1.2). Não existe rota para inativar um usuário nesta fase (fora de
+  escopo) — os testes atribuem `deletedAt` diretamente, como já era feito para processos.
+- **"Desatribuir" responsável (`responsibleUserId: null`)** não foi homologado — o PATCH rejeita
+  explicitamente (422) essa tentativa quando já existe um responsável, em vez de inventar o
+  comportamento. Reatribuição para outro usuário válido/ativo continua permitida normalmente.
+- **D4.11 (responsável que se torna inativo depois):** `responsibleUserId` nunca é apagado/alterado
+  automaticamente; a view (`responsibleInfo()`, reutilizada em Agenda/Atenção/detalhe/Minha Semana)
+  apenas adiciona um campo derivado `responsibleInactive: true`, sem tocar no registro.
+- **"Minha Semana" (`GET /api/my-week`)**: view pura, nenhuma coleção `myWeek`/`weeklyItems`/
+  `weekSnapshot` é criada. Janela = semana civil corrente (segunda a domingo, `America/Sao_Paulo`),
+  calculada por `civilWeekWindow()` a partir de `todayCivilDate()` — nunca "próximos 7 dias corridos".
+  Contém: (a) Legal Deadlines cujo `responsibleUserId` é o usuário logado, reaproveitando
+  `scopedLegalDeadlineRows()` (mesma defesa em profundidade — `responsibleUserId` nunca amplia
+  autorização); (b) a leitura (adapter) do Google Calendar, filtrada pela MESMA janela civil via
+  `filterCalendarEventsByWindow()` (revisão pós-PR #8, P1.3 — a checagem original só aplicava a janela a
+  Legal Deadline, deixando eventos de Calendar sem filtro de semana quando a leitura real existir).
+  **Gap conhecido e não resolvido nesta rodada:** eventos manuais de `store.agenda` não entram em Minha
+  Semana — o campo `owner` desse registro é texto livre, não um `user.id` canônico, e inferir a
+  atribuição por nome seria a mesma "substituição textual" que a Fase 4B proíbe explicitamente para
+  `responsibleUserId`. Corrigir isso exigiria uma decisão de modelo própria (um campo canônico de
+  atribuição em `store.agenda`), fora do escopo desta rodada.
+- **Campos textuais de responsabilidade** (`responsible`/`responsibleName`/`ownerName`): removidos do
+  input de `legalDeadlines` antes de persistir (POST e PATCH), não apenas ignorados na validação —
+  revisão pós-PR #8, P2: evita que fiquem gravados como propriedades paralelas sem significado/validação
+  própria no registro.
+- **D4.15 (Agenda operacional):** `legalDeadlineAgendaItems(store, user, { includeInactive })` passa a
+  filtrar `cumprido`/`cancelado`/`suspenso` por padrão (`isOperationallyVisible()`); nenhum registro é
+  apagado ou tem o status alterado — os mesmos itens continuam acessíveis via detalhe, via listagem
+  paginada (`?paginated=1&status=...`, já existente) e via o novo parâmetro explícito
+  `?includeInactive=1` na própria rota de Agenda (reaproveitando o padrão de parâmetro explícito já usado
+  no Sprint 2, sem criar uma API paralela).
+- **Google Calendar (Opção B homologada, D4.1):** implementado apenas como *adapter* somente leitura
+  (`googleCalendarStatus()`/`googleCalendarEvents()`, rotas `GET /api/calendar/status` e
+  `GET /api/calendar/events`). **Blocker técnico, não uma decisão de produto:** este ambiente não tem
+  credenciais reais de OAuth do Google (`GOOGLE_CALENDAR_CLIENT_ID`/`GOOGLE_CALENDAR_CLIENT_SECRET`), então
+  a ativação real (login OAuth, leitura de compromissos de verdade) permanece bloqueada por design —
+  `status: 'not_configured'` e `events: []` sempre, nunca uma simulação. Nenhum método de escrita da API
+  do Calendar existe no código (verificado por teste de código-fonte). Quando credenciais reais existirem,
+  a interface já definida (`configured`/`connected`/`status`/`events`) é o ponto de extensão.

@@ -545,12 +545,14 @@ flag `user.mfa` do cadastro. Testado em runtime: login como papel privilegiado s
 - **`/api/compliance` restrito a alçada global** (rodada 3, ADR-007) — nenhum papel departamental
   acessa até existir uma decisão de negócio sobre o módulo/escopo correto de Compliance.
 
-## Autorização esperada — Fase 4 do Sprint 2 (documental, ainda não implementada)
+## Autorização — Fase 4 do Sprint 2 (Fase 4B implementada conforme este princípio)
 
-**Nenhum RBAC novo foi implementado nesta rodada** — a Fase 4A (`docs/DECISIONS.md`, seção 1.2) é
-estritamente documental. Esta seção registra o **princípio de autorização esperado** para quando a Fase
-4B (implementação funcional) for autorizada, para que a implementação futura não invente uma regra nova
-de autorização fora do que já rege toda a plataforma:
+A Fase 4B (implementação funcional) aplicou exatamente o princípio descrito abaixo, sem introduzir
+nenhum caminho de autorização novo/paralelo — `GET /api/my-week` reaproveita `scopedLegalDeadlineRows()`
+(mesma defesa em profundidade de Agenda/Atenção), e `responsibleUserId` nunca é checado como substituto
+de `scoped()`/`allowedContent()`/`allowedInDepartment()` (testado em `tests/security-integration.test.js`,
+incluindo os cenários de `companyId`/`speId` fora de escopo e administrador técnico/TI sem conteúdo
+jurídico via Minha Semana).
 
 **Princípio único, sem exceção:** um usuário só vê um item de "Minha Semana", um compromisso na
 visualização complementar de Google Calendar, ou um Legal Deadline atribuído a um `responsibleUserId`,
@@ -578,8 +580,8 @@ paralelo ou mais permissivo que o já existente para o próprio Legal Deadline/A
   superfícies acima — mesmo padrão já testado em toda a Fase 1–3 (`scoped()` nega por ausência de
   `department`/alçada global).
 
-As decisões de negócio para estas três superfícies já foram homologadas (Fase 4A), mas nenhuma dessas
-regras foi implementada ainda — ficam registradas como restrição de design obrigatória para a Fase 4B.
+As três superfícies acima (Minha Semana, Google Calendar adapter, `responsibleUserId`) estão implementadas
+na Fase 4B seguindo este princípio à risca — nenhuma delas ganhou uma regra de autorização própria.
 
 ## Catálogo de testes de permissão
 

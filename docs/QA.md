@@ -408,13 +408,17 @@ Testes adicionados (4 unitários em `tests/core.test.js`, 2 HTTP em `tests/secur
   com diretoria vendo o consolidado.
 - HTTP: mesma comparação antes/depois para `speId`.
 
-## QA planejado — Fase 4 (Google Calendar, Minha Semana, responsável do Legal Deadline)
+## QA — Fase 4B (Google Calendar, Minha Semana, responsável do Legal Deadline) — implementada e testada
 
-> **Esta rodada é estritamente documental.** Nenhum teste de código foi adicionado ou executado para os
-> cenários abaixo — são critérios de aceite **futuros**, a serem implementados e executados somente após
-> a implementação funcional da Fase 4B (as decisões correspondentes já foram homologadas em
-> `docs/DECISIONS.md`, seção 1.2, D4.1–D4.15 — ver detalhe de cada uma). Nenhum destes cenários deve ser
-> lido como "já testado" ou "já passando".
+> A Fase 4B implementou e testou os cenários abaixo (`tests/core.test.js`/`tests/security-integration.test.js`,
+> `npm test` — 239 testes, todos passando). Os cenários 1–5 (Google Calendar Opção B) foram cobertos no
+> nível de *adapter* (sem credenciais reais de OAuth neste ambiente — blocker técnico registrado em
+> `docs/INTEGRATIONS.md`): a leitura real de compromissos não pôde ser exercitada de ponta a ponta, mas o
+> comportamento de somente-leitura, ausência de token exposto e não-afetação do Legal Deadline foram
+> testados com a integração no estado `not_configured`/`events: []`. Os cenários 6–11 (Opção C, escrita)
+> permanecem **não aplicáveis** — não homologados. Os cenários 12–21 (responsável/Minha Semana) e 25–26
+> (D4.15) estão testados integralmente. Os cenários 22–24 (copy/labels D4.4/D4.5/D4.6) estão testados via
+> `originTypeLabel`/`statusLabel`/`categoryLabel`/`confirmationLabel`.
 
 ### Cenários esperados — Google Calendar, Opção B homologada (D4.1: leitura apenas)
 
@@ -462,8 +466,10 @@ para o piloto atual):
 
 ### Cenários esperados — "Minha Semana" (D4.2/D4.3/D4.10 homologadas)
 
-18. "Minha Semana" reúne Legal Deadlines e Agenda Events atribuídos ao usuário logado, sem duplicar dado
-    de nenhum dos dois.
+18. "Minha Semana" reúne Legal Deadlines atribuídos ao usuário logado, sem duplicar dado. **Gap conhecido
+    (não resolvido nesta rodada):** Agenda Events manuais (`store.agenda`) NÃO entram em Minha Semana —
+    o campo `owner` é texto livre, sem `user.id` canônico, e inferir por nome seria a mesma "substituição
+    textual" vedada para `responsibleUserId` (ver `docs/DATA_MODEL.md`, seção "Fase 4B").
 19. Janela temporal é a semana civil homologada (D4.10 — segunda a domingo, `America/Sao_Paulo`; não
     janela móvel de 7 dias).
 20. Nenhuma Task é criada automaticamente a partir de um Legal Deadline exibido em "Minha Semana"
@@ -486,6 +492,7 @@ para o piloto atual):
 26. Legal Deadline `suspenso` não aparece como prazo ativo/vencido na Agenda operacional (consistente com
     a regra de que `suspenso` nunca é atraso).
 
-**Nenhum destes 26 cenários foi executado nesta rodada.** Ficam registrados como backlog de QA da Fase
-4B, a ser convertido em testes reais (`tests/core.test.js`/`tests/security-integration.test.js`) somente
-após a implementação correspondente ser autorizada.
+**Todos os cenários aplicáveis (12–26, exceto os de Opção C não homologada) foram convertidos em testes
+reais nesta rodada** (`tests/core.test.js`/`tests/security-integration.test.js`), todos passando. Os
+cenários 1–5 (Google Calendar Opção B) foram testados no nível de adapter — a leitura real depende de
+credenciais de OAuth ainda não provisionadas neste ambiente (blocker técnico, `docs/INTEGRATIONS.md`).

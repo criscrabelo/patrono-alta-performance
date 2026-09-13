@@ -177,10 +177,38 @@ B, `responsibleUserId`, Minha Semana) — **ainda não iniciada**; matriz GO/NO-
 - Nenhuma tela nova de UI foi criada na Fase 2 (listagem/detalhe ficaram como API); a semântica de copy
   "Confirmado pelo Jurídico" (D1.4) segue pendente para quando houver UI dedicada.
 
+## Fase 4B — implementada (responsável, Minha Semana, Agenda D4.15, Calendar read-only)
+
+Implementação funcional exata do que a Fase 4A homologou, sem alterar nenhuma decisão de negócio:
+
+- `legalDeadlines.responsibleUserId` (opcional): validado em `validateLegalDeadline()`; nova atribuição
+  exige usuário existente e não-inativo (`deletedAt`, mesma convenção de soft-delete já usada em toda a
+  plataforma — nenhum campo novo de "usuário ativo" foi inventado). "Desatribuir" (`responsibleUserId:
+  null` com valor anterior não-nulo) não foi homologado e é rejeitado (422) em vez de implementado por
+  suposição.
+- D4.11: usuário responsável que se torna inativo depois nunca tem o campo apagado; view sinaliza
+  `responsibleInactive: true` (Agenda/Atenção/detalhe/Minha Semana).
+- `GET /api/my-week` ("Minha Semana", D4.10): view pura sobre `legalDeadlines` (semana civil corrente,
+  segunda a domingo, `America/Sao_Paulo`, via `civilWeekWindow()`) combinada com a leitura (adapter) do
+  Google Calendar. **Gap conhecido:** eventos manuais de `store.agenda` não entram em Minha Semana —
+  `owner` é texto livre, sem `user.id` canônico; inferir por nome seria a mesma "substituição textual"
+  vedada para `responsibleUserId` (ver `docs/DATA_MODEL.md`, seção "Fase 4B").
+- D4.15: Agenda operacional (`GET /api/agenda-items`) não mostra `cumprido`/`cancelado`/`suspenso` por
+  padrão; `?includeInactive=1` devolve todos, reaproveitando o padrão de parâmetro explícito já usado no
+  Sprint 2. Nenhum registro é apagado ou tem status alterado.
+- Google Calendar (D4.1, Opção B): implementado como adapter somente leitura (`GET /api/calendar/status`,
+  `GET /api/calendar/events`). **Blocker técnico:** sem credenciais reais de OAuth do Google neste
+  ambiente, a ativação real fica bloqueada por design (`not_configured`/`events: []`), nunca simulada.
+  Nenhum método de escrita da API do Calendar existe no código (verificado por teste de código-fonte).
+
+Testes: `npm test` cobre as novas regras (unitários em `tests/core.test.js`, HTTP em
+`tests/security-integration.test.js`), sem remover nenhum teste anterior. Nenhuma automação, notificação,
+criação automática de Task, escrita no Calendar, deploy ou produção foi introduzida — permanece
+estritamente dentro do escopo homologado na Fase 4A.
+
 ---
 
-**Fases 1, 2 e 3 implementadas. Fase 4A (documental) implementada e HOMOLOGADA** — decisões de negócio
-registradas em `docs/DECISIONS.md`, seção 1.2 (D4.1–D4.15), homologadas pela Cristiane em 12/09/2026;
-matriz GO/NO-GO em GO DOCUMENTAL (D4.13). **Fase 4B (implementação funcional) continua não iniciada** —
-exige nova autorização explícita para começar a implementação, em PR(s) separado(s); GO DOCUMENTAL não
-autoriza deploy, produção nem escrita externa.
+**Fases 1, 2, 3 e 4A implementadas. Fase 4B (implementação funcional) implementada** — `responsibleUserId`,
+"Minha Semana", D4.15 na Agenda operacional e adapter somente leitura do Google Calendar, conforme
+homologado em `docs/DECISIONS.md` (D4.1–D4.15). Nenhum deploy, produção ou escrita externa foi realizado
+por esta implementação; aguarda revisão antes de qualquer merge/deploy.
