@@ -32,16 +32,51 @@ function createPostgresStore({ databaseUrl, ssl = false, seed }) {
   // como hoje — só `write()` a lê de volta.
   const VERSION = Symbol('storeVersion');
 
-  async function ensureSchema() {
-    // Idempotente: cria a tabela apenas se ainda não existir (a migration 003 já faz isso; isto é uma
-    // rede de segurança para ambientes onde a migration ainda não rodou, sem duplicar o DDL dela).
-    await pool.query(`CREATE TABLE IF NOT EXISTS app_store (
-      id smallint PRIMARY KEY DEFAULT 1,
-      data jsonb NOT NULL,
-      version integer NOT NULL DEFAULT 1,
-      updated_at timestamptz NOT NULL DEFAULT now(),
-      CONSTRAINT app_store_singleton CHECK (id = 1)
-    )`);
+  const REQUIRED_MIGRATION = '003_app_store';
+  const REQUIRED_COLUMNS = ['id', 'data', 'version', 'updated_at'];
+  const MIGRATE_HINT = 'Rode "npm run migrate" para aplicar as migrations pendentes antes de iniciar a aplicação.';
+
+  // Valida (nunca cria) o schema canônico. O runtime NUNCA deve substituir migration por
+  // `CREATE TABLE IF NOT EXISTS`: isso mascararia um banco sem `schema_migrations` populado ou com
+  // `app_store` em formato incompatível/antigo, fazendo a aplicação operar sobre um schema que ela não
+  // pode garantir ser o esperado. `scripts/migrate.js` continua sendo o único caminho responsável por
+  // criar/evoluir o schema (docs/PRODUCTION_GATE.md, PG-03).
+  async function validateSchema() {
+    const migrationsTable = await pool.query('SELECT to_regclass($1) AS reg', ['schema_migrations']);
+    if (!migrationsTable.rows[0] || !migrationsTable.rows[0].reg) {
+      throw new StoreUnavailableError(
+        `Schema do PostgreSQL não inicializado: tabela "schema_migrations" não existe. ${MIGRATE_HINT}`
+      );
+    }
+
+    const applied = await pool.query(
+      'SELECT 1 FROM schema_migrations WHERE version = $1',
+      [REQUIRED_MIGRATION]
+    );
+    if (!applied.rows.length) {
+      throw new StoreUnavailableError(
+        `Schema do PostgreSQL incompatível: migration obrigatória "${REQUIRED_MIGRATION}" não foi aplicada. ${MIGRATE_HINT}`
+      );
+    }
+
+    const appStoreTable = await pool.query('SELECT to_regclass($1) AS reg', ['app_store']);
+    if (!appStoreTable.rows[0] || !appStoreTable.rows[0].reg) {
+      throw new StoreUnavailableError(
+        `Schema do PostgreSQL incompatível: tabela "app_store" não existe. ${MIGRATE_HINT}`
+      );
+    }
+
+    const columns = await pool.query(
+      'SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1',
+      ['app_store']
+    );
+    const existingColumns = new Set(columns.rows.map(row => row.column_name));
+    const missingColumns = REQUIRED_COLUMNS.filter(column => !existingColumns.has(column));
+    if (missingColumns.length) {
+      throw new StoreUnavailableError(
+        `Schema do PostgreSQL incompatível: tabela "app_store" não possui a(s) coluna(s) esperada(s) (${missingColumns.join(', ')}). ${MIGRATE_HINT}`
+      );
+    }
   }
 
   async function bootstrapIfEmpty() {
@@ -54,17 +89,24 @@ function createPostgresStore({ databaseUrl, ssl = false, seed }) {
   }
 
   async function init() {
-    await ensureSchema();
+    await validateSchema();
     await bootstrapIfEmpty();
   }
 
   async function healthcheck() {
     try {
       await pool.query('SELECT 1');
-      const { rows } = await pool.query('SELECT to_regclass($1) AS reg', ['app_store']);
-      return { reachable: true, schemaReady: Boolean(rows[0] && rows[0].reg) };
     } catch {
       return { reachable: false, schemaReady: false };
+    }
+    try {
+      await validateSchema();
+      return { reachable: true, schemaReady: true };
+    } catch {
+      // Banco alcançável, porém schema ausente/incompatível: reportado como não pronto, nunca lançado
+      // aqui — quem decide se isso é fatal é o chamador (fail-fast no boot em init(); em healthcheck()
+      // isto só alimenta GET /api/health, que deve responder 200 com schemaReady:false, não 503).
+      return { reachable: true, schemaReady: false };
     }
   }
 

@@ -101,22 +101,46 @@ registerContractTests('json', async () => {
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 if (TEST_DATABASE_URL) {
   const { createPostgresStore } = require('../storage/postgres-store');
-  registerContractTests('postgres', async () => {
-    // Cada teste começa de uma tabela zerada — apaga qualquer linha residual de uma execução anterior,
-    // nunca aponta para um banco de produção (só usado quando o operador aponta TEST_DATABASE_URL
-    // explicitamente para um Postgres de teste isolado).
+
+  // Roda o runner real de migrations (scripts/migrate.js) contra TEST_DATABASE_URL. Nunca duplica o DDL
+  // aqui — os testes de Postgres devem provar o comportamento real de init()/healthcheck() contra um
+  // banco migrado (ou não) pelo MESMO caminho usado em produção, nunca por um atalho de teste.
+  async function runMigrations() {
+    const previous = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = TEST_DATABASE_URL;
+    try {
+      delete require.cache[require.resolve('../scripts/migrate')];
+      const { run } = require('../scripts/migrate');
+      const originalExitCode = process.exitCode;
+      process.exitCode = undefined;
+      await run();
+      assert.notEqual(process.exitCode, 1, 'scripts/migrate.js deve rodar com sucesso contra TEST_DATABASE_URL');
+      process.exitCode = originalExitCode;
+    } finally {
+      if (previous === undefined) delete process.env.DATABASE_URL; else process.env.DATABASE_URL = previous;
+    }
+  }
+
+  async function dropAll() {
     const { Pool } = require('pg');
     const cleanup = new Pool({ connectionString: TEST_DATABASE_URL });
     await cleanup.query('DROP TABLE IF EXISTS app_store');
+    await cleanup.query('DROP TABLE IF EXISTS schema_migrations');
     await cleanup.end();
+  }
+
+  registerContractTests('postgres', async () => {
+    // Cada teste começa de um banco zerado e MIGRADO de verdade (nunca um atalho que crie a tabela por
+    // fora de scripts/migrate.js) — nunca aponta para um banco de produção (só usado quando o operador
+    // aponta TEST_DATABASE_URL explicitamente para um Postgres de teste isolado).
+    await dropAll();
+    await runMigrations();
     return createPostgresStore({ databaseUrl: TEST_DATABASE_URL, seed: makeSeed() });
   }, async backend => { await backend.close(); });
 
   test('[storage:postgres] escrita sem versão anexada (ex.: restore de backup) grava incondicionalmente', async () => {
-    const { Pool } = require('pg');
-    const cleanup = new Pool({ connectionString: TEST_DATABASE_URL });
-    await cleanup.query('DROP TABLE IF EXISTS app_store');
-    await cleanup.end();
+    await dropAll();
+    await runMigrations();
     const { createPostgresStore } = require('../storage/postgres-store');
     const backend = createPostgresStore({ databaseUrl: TEST_DATABASE_URL, seed: makeSeed() });
     try {
@@ -125,6 +149,57 @@ if (TEST_DATABASE_URL) {
       await backend.write(bare);
       const reread = await backend.read();
       assert.deepEqual(reread.users, [{ id: 'restored-user' }]);
+    } finally { await backend.close(); }
+  });
+
+  test('[storage:postgres] init() falha em banco vazio sem migrations — e NÃO cria app_store sozinho (schema deve ser criado só por scripts/migrate.js)', async () => {
+    await dropAll();
+    const backend = createPostgresStore({ databaseUrl: TEST_DATABASE_URL, seed: makeSeed() });
+    try {
+      await assert.rejects(() => backend.init(), /schema_migrations|migrate/i);
+      const { Pool } = require('pg');
+      const check = new Pool({ connectionString: TEST_DATABASE_URL });
+      const { rows } = await check.query('SELECT to_regclass($1) AS reg', ['app_store']);
+      await check.end();
+      assert.equal(rows[0].reg, null, 'init() nunca deve criar app_store como efeito colateral de uma validação que falhou');
+    } finally { await backend.close(); }
+  });
+
+  test('[storage:postgres] init() falha quando app_store existe mas a migration "003_app_store" não está registrada em schema_migrations (schema incompatível)', async () => {
+    await dropAll();
+    const { Pool } = require('pg');
+    const setup = new Pool({ connectionString: TEST_DATABASE_URL });
+    // Simula um app_store criado fora do fluxo de migration (ex.: schema legado/manual) — sem a migration
+    // 003 registrada, o backend deve recusar operar mesmo com a tabela fisicamente presente.
+    await setup.query('CREATE TABLE schema_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())');
+    await setup.query("INSERT INTO schema_migrations (version) VALUES ('001_foundation'), ('002_projects_recovery')");
+    await setup.query('CREATE TABLE app_store (id smallint PRIMARY KEY DEFAULT 1, data jsonb NOT NULL, version integer NOT NULL DEFAULT 1, updated_at timestamptz NOT NULL DEFAULT now())');
+    await setup.end();
+    const backend = createPostgresStore({ databaseUrl: TEST_DATABASE_URL, seed: makeSeed() });
+    try {
+      await assert.rejects(() => backend.init(), /003_app_store|migrate/i);
+    } finally { await backend.close(); }
+  });
+
+  test('[storage:postgres] banco corretamente migrado — init() passa e healthcheck().schemaReady é true', async () => {
+    await dropAll();
+    await runMigrations();
+    const backend = createPostgresStore({ databaseUrl: TEST_DATABASE_URL, seed: makeSeed() });
+    try {
+      await backend.init();
+      const health = await backend.healthcheck();
+      assert.equal(health.reachable, true);
+      assert.equal(health.schemaReady, true);
+    } finally { await backend.close(); }
+  });
+
+  test('[storage:postgres] healthcheck() em schema incompleto retorna schemaReady:false sem lançar (nunca derruba GET /api/health)', async () => {
+    await dropAll();
+    const backend = createPostgresStore({ databaseUrl: TEST_DATABASE_URL, seed: makeSeed() });
+    try {
+      const health = await backend.healthcheck();
+      assert.equal(health.reachable, true, 'o banco está alcançável, só o schema está ausente');
+      assert.equal(health.schemaReady, false);
     } finally { await backend.close(); }
   });
 } else {

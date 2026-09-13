@@ -32,7 +32,13 @@ if (!TEST_DATABASE_URL) {
     // banco que não seja o TEST_DATABASE_URL isolado apontado explicitamente pelo operador/CI.
     const cleanup = new Pool({ connectionString: TEST_DATABASE_URL });
     await cleanup.query('DROP TABLE IF EXISTS app_store');
+    await cleanup.query('DROP TABLE IF EXISTS schema_migrations');
     await cleanup.end();
+
+    // storage.init() em Postgres agora VALIDA o schema em vez de criá-lo — o mesmo caminho de produção
+    // exige que scripts/migrate.js já tenha rodado antes do boot. Replica isso aqui explicitamente.
+    const { run: migrate } = require('../scripts/migrate');
+    await migrate();
 
     const { handler, readStore, writeStore, storage } = require('../server');
     // Fora do boot real (`require.main === module`), ninguém chama storage.init() automaticamente —

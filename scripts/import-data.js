@@ -111,7 +111,14 @@ async function run(argv = process.argv.slice(2)) {
 
   const client = pool();
   try {
-    await client.query('CREATE TABLE IF NOT EXISTS app_store (id smallint PRIMARY KEY DEFAULT 1, data jsonb NOT NULL, version integer NOT NULL DEFAULT 1, updated_at timestamptz NOT NULL DEFAULT now(), CONSTRAINT app_store_singleton CHECK (id = 1))');
+    const migrated = await client.query(
+      "SELECT 1 FROM schema_migrations WHERE version = '003_app_store'"
+    ).catch(() => ({ rows: [] }));
+    if (!migrated.rows.length) {
+      console.error('\nImportação abortada: schema do PostgreSQL não está migrado (migration "003_app_store" ausente). Rode "npm run migrate" antes de importar.');
+      process.exitCode = 1;
+      return;
+    }
     const { rows } = await client.query('SELECT version FROM app_store WHERE id = 1');
     if (rows.length && !args.force) {
       console.error(`\nImportação abortada: já existe uma store em PostgreSQL (version=${rows[0].version}). Use --force para sobrescrever explicitamente — o arquivo JSON de origem nunca é apagado por este script, então nada é perdido ao repetir a operação com cautela.`);
