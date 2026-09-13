@@ -37,6 +37,120 @@ const MFA_CHALLENGE_TTL_MS = 5 * 60 * 1000;
 const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000;
 const MAX_FAILED_LOGIN_ATTEMPTS = 5;
 const LOCKOUT_DURATION_MS = 15 * 60 * 1000;
+// Sprint 2, Hardening H4 (docs/PRODUCTION_GATE.md; docs/DECISIONS.md, PROD-H4-01): o Patrono é
+// same-origin por padrão — nenhuma origem cross-origin é necessária hoje (ver "Matriz H4 — Superfície
+// HTTP" em docs/SECURITY.md). `CORS_ALLOWED_ORIGINS` é uma allowlist EXPLÍCITA e opcional, para uma
+// futura separação de frontend/domínio — nunca um wildcard, nunca reflete automaticamente qualquer
+// Origin recebida. Formato: lista separada por vírgulas de origens EXATAS (scheme+host+porta), ex.:
+// "https://app.exemplo.com,https://admin.exemplo.com". Vazia/ausente = nenhuma origem cross-origin
+// adicional confiada — requisições same-origin continuam funcionando normalmente (navegadores nunca
+// exigem cabeçalhos CORS para requisições same-origin).
+const CORS_ALLOWED_ORIGINS = new Set(
+  String(process.env.CORS_ALLOWED_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean)
+);
+// Comparação SEMPRE por origem exata (scheme+host+porta), via `URL` nativo — nunca substring/`endsWith`
+// (`https://app.exemplo.com.evil.test` nunca deve casar com `https://app.exemplo.com` configurada).
+// `Origin: null` (ex.: iframes sandboxed, alguns redirects) nunca é confiado por padrão — só uma
+// decisão futura explícita poderia mudar isso, nunca implícito.
+function isAllowedOrigin(origin) {
+  if (!origin || origin === 'null') return false;
+  try {
+    const parsed = new URL(origin);
+    return CORS_ALLOWED_ORIGINS.has(`${parsed.protocol}//${parsed.host}`);
+  } catch { return false; }
+}
+// CSP construída a partir de uma auditoria real do frontend (public/index.html, public/app.js,
+// public/status.html/.js/.css e CSS) — nunca um wildcard amplo (nunca `default-src *`/`script-src *`).
+// Todo script/estilo/imagem/fonte é same-origin: nenhum CDN de terceiros é carregado pelo navegador;
+// Google Calendar/Monday são chamados apenas server-side (nunca pelo frontend — `auth/rate-limit.js`
+// e `server.js` fazem essas chamadas, nunca `public/app.js`), então `connect-src 'self'` já basta.
+//
+// `script-src` precisa de `'unsafe-inline'`: `public/app.js` usa manipuladores de evento inline
+// (`onclick=`/`onchange=`/`oninput=`/`onsubmit=`) extensivamente, gerados dinamicamente via
+// `innerHTML` — CSP não tem como aplicar nonce/hash a um atributo cujo conteúdo muda a cada render sem
+// `'unsafe-hashes'` por hash individual (inviável aqui). Migrar para `addEventListener()` eliminaria
+// essa necessidade, mas é um refactor estrutural amplo (~28 pontos de `innerHTML` em `public/app.js`),
+// fora do escopo desta rodada — documentado como limitação conhecida (`docs/SECURITY.md`), recomendado
+// para uma rodada futura de hardening de frontend.
+//
+// `style-src` também precisa de `'unsafe-inline'`, por um motivo INDEPENDENTE e mais restrito: só 5
+// pontos (barras de progresso com largura calculada em tempo de render, em `public/app.js` e
+// `public/dashboard-widgets.js`) usam `style="width:${...}%"` — os demais estilos inline estáticos já
+// foram eliminados nesta mesma rodada (`.btn-block`, `public/styles.css`) e o `<style>`/`<script>`
+// inline que existia em `public/status.html` foi extraído para arquivos externos
+// (`public/status.css`/`public/status.js`). Nunca usar `style-src 'unsafe-inline'` como desculpa para
+// abrir `script-src` — as duas diretivas têm justificativas técnicas independentes.
+const CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self'",
+  "font-src 'self'",
+  "connect-src 'self'",
+  "frame-src 'none'",
+  "frame-ancestors 'none'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'"
+].join('; ');
+// Nega por padrão qualquer recurso de navegador que o Patrono não usa (item 13 do escopo H4) — nenhum
+// dos recursos abaixo é utilizado em `public/*` (confirmado na auditoria: sem câmera/microfone/
+// geolocalização/pagamento/USB/bluetooth/sensores/fullscreen/clipboard).
+const PERMISSIONS_POLICY = [
+  'camera=()', 'microphone=()', 'geolocation=()', 'payment=()', 'usb=()', 'bluetooth=()',
+  'accelerometer=()', 'gyroscope=()', 'magnetometer=()', 'fullscreen=()',
+  'clipboard-read=()', 'clipboard-write=()'
+].join(', ');
+// Sprint 2, Hardening H4: camada centralizada de headers de segurança HTTP — chamada uma única vez, no
+// topo de `handler()`, ANTES de qualquer roteamento (estático, OPTIONS, ou `/api/*`). Usa
+// `res.setHeader()` (nunca `res.writeHead()` aqui) porque os headers definidos por `setHeader()` são
+// mesclados automaticamente com os headers passados a um `res.writeHead()` posterior (`json()`,
+// `rateLimited()`, `staticFile()`) — nenhuma rota relevante escapa destes headers, sem precisar
+// espalhar `res.setHeader(...)` manualmente em cada uma.
+function applySecurityHeaders(req, res) {
+  res.setHeader('x-content-type-options', 'nosniff');
+  res.setHeader('content-security-policy', CONTENT_SECURITY_POLICY);
+  // Defesa dupla contra clickjacking (item 10 do escopo): CSP frame-ancestors (moderno) + X-Frame-Options
+  // (compatibilidade com navegadores/ferramentas que não leem frame-ancestors).
+  res.setHeader('x-frame-options', 'DENY');
+  res.setHeader('referrer-policy', 'strict-origin-when-cross-origin');
+  res.setHeader('permissions-policy', PERMISSIONS_POLICY);
+  // Coerente com a política same-origin: este processo nunca precisa compartilhar contexto de
+  // navegação nem ser embedado/lido por outra origem.
+  res.setHeader('cross-origin-opener-policy', 'same-origin');
+  res.setHeader('cross-origin-resource-policy', 'same-origin');
+  // Item 14 do escopo: HSTS só em produção — nunca em dev/test HTTP local (quebraria o fluxo local sem
+  // TLS). Aplicado por AMBIENTE (`NODE_ENV`), nunca por inspeção do request/`X-Forwarded-Proto` — não
+  // reabre nem reaproveita `TRUST_PROXY_HOPS` (H3) para isso, propositalmente, para não acoplar duas
+  // políticas independentes. `includeSubDomains`/`preload` deliberadamente OMITIDOS nesta rodada — sem
+  // decisão formal sobre a topologia de subdomínios, ativá-los seria irreversível na prática
+  // (navegadores cacheiam HSTS agressivamente) para domínios que talvez nem sejam operados pelo Patrono.
+  if (process.env.NODE_ENV === 'production') res.setHeader('strict-transport-security', 'max-age=31536000');
+  // Itens 17-21 do escopo: CORS nunca reflete uma Origin arbitrária nem usa wildcard — só as origens
+  // explicitamente configuradas em CORS_ALLOWED_ORIGINS, por igualdade exata de scheme+host+porta.
+  // Requisições same-origin (sem header Origin, ou Origin igual à própria aplicação) nunca precisam
+  // deste header — navegadores não os exigem para same-origin.
+  const origin = req.headers.origin;
+  if (isAllowedOrigin(origin)) {
+    res.setHeader('access-control-allow-origin', origin);
+    res.setHeader('vary', 'Origin');
+    // Item 24: só expõe o que um cliente cross-origin legitimamente precisaria ler (Retry-After de H3).
+    res.setHeader('access-control-expose-headers', 'Retry-After');
+  }
+}
+// Item 25 do escopo H4: preflight OPTIONS nunca alcança o roteador de negócio — nunca retorna dado de
+// negócio, sempre 204. Os headers de segurança-base (CSP, X-Frame-Options, etc.) já foram aplicados por
+// `applySecurityHeaders()`, chamada antes desta função; para uma Origin não permitida, nenhum header de
+// permissão CORS adicional é concedido aqui (a authorização de origem em si já foi decidida acima).
+function handlePreflight(req, res) {
+  if (isAllowedOrigin(req.headers.origin)) {
+    res.setHeader('access-control-allow-methods', 'GET, POST, PATCH, PUT, DELETE, OPTIONS');
+    res.setHeader('access-control-allow-headers', 'Authorization, Content-Type');
+    res.setHeader('access-control-max-age', '600');
+  }
+  res.writeHead(204);
+  res.end();
+}
 const MONDAY_BOARDS = {
   processos: { id: process.env.MONDAY_BOARD_PROCESSOS || '5959705266', name: 'Processos Judiciais' },
   notificacoes: { id: process.env.MONDAY_BOARD_NOTIFICACOES || '5630368737', name: 'Notificações Clientes' },
@@ -711,13 +825,20 @@ function dashboardAuthorized(user, definition) {
   }
   return true;
 }
-function json(res, status, body) { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'x-content-type-options': 'nosniff' }); res.end(JSON.stringify(body)); }
+// Sprint 2, Hardening H4: `x-content-type-options` deixou de ser passado aqui — `applySecurityHeaders()`
+// já define esse (e os demais headers de segurança) via `res.setHeader()` antes de qualquer rota rodar;
+// `res.writeHead()` MESCLA automaticamente com headers já definidos por `setHeader()`, então repetir o
+// mesmo header aqui seria apenas duplicação inconsistente (item 11 do escopo H4). `Cache-Control:
+// no-store` é novo: toda resposta JSON é API (nunca um asset estático — `staticFile()` é a única outra
+// fonte de resposta, e não passa por aqui), então nunca deve ser cacheada, inclusive respostas de
+// autenticação/sessão.
+function json(res, status, body) { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); }
 // Sprint 2, Hardening H3 (docs/PRODUCTION_GATE.md; docs/DECISIONS.md, PROD-H3-01): resposta uniforme de
 // bloqueio por rate limit — sempre 429, sempre a mesma mensagem genérica (nunca revela contador, limite
 // interno, categoria ou motivo detalhado — preserva a anti-enumeração do H2). `Retry-After` reflete o
 // bloqueio real do bucket que disparou, sem expor nenhum detalhe de arquitetura interna.
 function rateLimited(res, retryAfterSeconds) {
-  res.writeHead(429, { 'content-type': 'application/json; charset=utf-8', 'x-content-type-options': 'nosniff', 'retry-after': String(Math.max(1, retryAfterSeconds || 1)) });
+  res.writeHead(429, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'retry-after': String(Math.max(1, retryAfterSeconds || 1)) });
   res.end(JSON.stringify({ error: 'Muitas tentativas. Tente novamente mais tarde.' }));
 }
 // Ator anônimo para o campo `responsible` da auditoria quando um bloqueio de rate limit ocorre ANTES de
@@ -979,17 +1100,46 @@ async function runMondaySync(store, requestedBy='Agendador COEVO') {
 function scheduleDueNow(now=new Date()){const local=now.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'America/Sao_Paulo'});return MONDAY_SYNC_TIMES.includes(local)?local:null;}
 async function scheduledMondayTick(){if(!process.env.MONDAY_TOKEN)return;const store=await readStore();const due=scheduleDueNow();if(!due)return;const date=new Date().toLocaleDateString('en-CA',{timeZone:'America/Sao_Paulo'});if((store.mondayRuns||[]).some(r=>r.trigger==='scheduled'&&r.scheduleTime===due&&String(r.startedAt).startsWith(date)))return;const run=await runMondaySync(store,'Agendador COEVO');run.trigger='scheduled';run.scheduleTime=due;audit(store,{name:'Agendador COEVO'},'SYNC_SCHEDULED','monday',run.id,null,run,'Sincronização automática programada');await writeStore(store);}
 
+// Sprint 2, Hardening H4 (item 35 do escopo): mapa explícito de MIME types — antes era uma cadeia
+// ternária sem ramos para `.json`/`.svg`/fontes, que caía silenciosamente em `application/octet-stream`
+// para qualquer extensão não prevista. Com `nosniff` global (via `applySecurityHeaders()`), um
+// Content-Type incorreto ativamente QUEBRA a renderização (o navegador não tenta adivinhar o tipo real)
+// em vez de só ser impreciso — por isso vale listar explicitamente mesmo extensões ainda não usadas
+// hoje em `public/` (nenhum arquivo `.svg`/fonte existe no momento desta rodada, mas ficam prontas).
+const STATIC_MIME_TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.otf': 'font/otf'
+};
 function staticFile(res, file) {
-  const type = file.endsWith('.html') ? 'text/html; charset=utf-8' : file.endsWith('.js') ? 'text/javascript; charset=utf-8' : file.endsWith('.css') ? 'text/css; charset=utf-8' : file.endsWith('.png') ? 'image/png' : file.endsWith('.jpg') || file.endsWith('.jpeg') ? 'image/jpeg' : 'application/octet-stream';
-  res.writeHead(200, { 'content-type': type, 'x-content-type-options': 'nosniff' });
+  const type = STATIC_MIME_TYPES[path.extname(file).toLowerCase()] || 'application/octet-stream';
+  res.writeHead(200, { 'content-type': type });
   return fs.createReadStream(file).pipe(res);
 }
 function handler(req, res) {
+  // Sprint 2, Hardening H4: aplicado ANTES de qualquer roteamento — estático, preflight ou `/api/*` —
+  // para que nenhuma resposta relevante escape dos headers de segurança/CORS (item 5 do escopo).
+  applySecurityHeaders(req, res);
+  // Item 25 do escopo: preflight OPTIONS nunca alcança o roteador de negócio, para NENHUM path — nunca
+  // retorna dado de negócio, sempre 204.
+  if (req.method === 'OPTIONS') return handlePreflight(req, res);
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   if (url.pathname.startsWith('/api/v1/')) url.pathname = url.pathname.replace('/api/v1/', '/api/');
   if (req.method === 'GET' && url.pathname === '/') return staticFile(res, path.join(ROOT, 'public', 'index.html'));
   if (req.method === 'GET' && url.pathname === '/status') return staticFile(res, path.join(ROOT, 'public', 'status.html'));
-  if (req.method === 'GET' && ['/app.js','/dashboard-widgets.js','/styles.css','/sidebar.css','/dashboard.css','/dashboard-widgets.css','/processes.css','/projects.css'].includes(url.pathname)) return staticFile(res, path.join(ROOT, 'public', path.basename(url.pathname)));
+  if (req.method === 'GET' && ['/app.js','/dashboard-widgets.js','/styles.css','/sidebar.css','/dashboard.css','/dashboard-widgets.css','/processes.css','/projects.css','/status.js','/status.css'].includes(url.pathname)) return staticFile(res, path.join(ROOT, 'public', path.basename(url.pathname)));
   if (req.method === 'GET' && /^\/logo-coevo[^/]*\.png$/.test(url.pathname)) { const file = path.join(ROOT, 'public', path.basename(url.pathname)); if (fs.existsSync(file)) return staticFile(res, file); return json(res,404,{error:'Não encontrado'}); }
   if (req.method === 'GET' && url.pathname.startsWith('/assets/')) { const file = path.join(ROOT, url.pathname); if (fs.existsSync(file)) return staticFile(res, file); return json(res,404,{error:'Não encontrado'}); }
   if (!url.pathname.startsWith('/api/')) return json(res,404,{error:'Não encontrado'});
@@ -1759,5 +1909,5 @@ if (require.main === module) {
     setInterval(()=>scheduledMondayTick().catch(error=>console.error('Monday scheduler:',error.message)),60000);
   }).catch(error => { console.error('Falha ao inicializar a persistência — processo não iniciado:', error.message); process.exit(1); });
 }
-module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, ORIGIN_TYPE_LABELS, STATUS_LABELS, CATEGORY_LABELS, legalDeadlineLabels, legalDeadlineConfirmationLabel, LEGAL_DEADLINE_TEXTUAL_RESPONSIBLE_FIELDS, filterCalendarEventsByWindow, canBeResponsibleForLegalDeadline, storage, migrateLegacyStore, validateAuthRuntimeConfig, resolveLoginIdentity, issuePasswordResetToken, auditRateLimitAndBlock };
+module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, ORIGIN_TYPE_LABELS, STATUS_LABELS, CATEGORY_LABELS, legalDeadlineLabels, legalDeadlineConfirmationLabel, LEGAL_DEADLINE_TEXTUAL_RESPONSIBLE_FIELDS, filterCalendarEventsByWindow, canBeResponsibleForLegalDeadline, storage, migrateLegacyStore, validateAuthRuntimeConfig, resolveLoginIdentity, issuePasswordResetToken, auditRateLimitAndBlock, isAllowedOrigin, CONTENT_SECURITY_POLICY, PERMISSIONS_POLICY };
 

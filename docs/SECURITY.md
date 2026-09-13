@@ -233,7 +233,7 @@ que não se confunda "PR mergeado" com "plataforma pronta para produção":
 | ~~Código MFA global (`COEVO_MFA_CODE`)~~ **FECHADO por H2** — TOTP individual por usuário (mesma referência acima) | ~~Alto~~ Fechado | Não | Não | ~~Sim~~ Fechado |
 | 2 vulnerabilidades altas em `image-size` (via `pptxgenjs`) | Alto | Não — não é exercitado pelos testes desta rodada, e o CI adicionado reporta via `npm audit` sem bloquear | Não, se a exportação PPTX/PDF não for usada com dados sensíveis | **Sim**, antes de expor exportação de apresentações a dado sensível real |
 | E-mail duplicado `usr-diretoria`/`usr-juridico` | Médio | Não | Não — é limitação de cadastro conhecida e aceita pela gestão | Recomendado corrigir, mas não é um controle de segurança per se |
-| ~~Ausência de rate limiting~~ **FECHADO por H3** (rotas de autenticação sensíveis — login/MFA/forgot-reset-password/reset-token administrativo, ver `docs/PRODUCTION_GATE.md` seção 20); CSRF/CSP/cabeçalhos adicionais continuam em aberto | ~~Alto~~ Fechado (rate limiting) / Alto (CSRF/CSP/headers) | Não | Recomendado antes de expor a instância além da rede controlada de homologação | ~~Sim~~ Fechado (rate limiting) / **Sim** (CSRF/CSP/headers, H4) |
+| ~~Ausência de rate limiting~~ **FECHADO por H3** (rotas de autenticação sensíveis, ver `docs/PRODUCTION_GATE.md` seção 20); ~~CSP/cabeçalhos adicionais~~ **FECHADO por H4** (seção 21) — CSRF (PG-14) continua em aberto, condicional a uma futura migração de Bearer token para cookie | ~~Alto~~ Fechado (rate limiting + headers) / Baixo hoje (CSRF, condicional) | Não | Recomendado antes de expor a instância além da rede controlada de homologação | ~~Sim~~ Fechado (rate limiting + headers) / NÃO hoje (CSRF, ver PG-14) |
 | Auditoria no mesmo arquivo mutável, sem append-only/assinatura | Médio | Não | Não | Recomendado antes de auditoria ser usada como evidência formal/legal |
 | Revogação de sessão/usuário/credencial (fora do TTL) | Alto | Não | Recomendado | **Sim** |
 | Plano mínimo de resposta a incidentes | Alto (operacional) | Não | Não | **Sim**, antes de dados reais em escala (§33.11) |
@@ -253,6 +253,8 @@ testado nas seções acima.
 | Auth e sessões | **Reforçado por H2** — credencial individual por usuário, sessão persistida (Postgres), revogação real (logout/logout-all/troca-reset de senha/inativação) |
 | MFA para perfis privilegiados | **Reforçado por H2** — TOTP individual (RFC 6238) por usuário, nunca ativo antes de confirmação, segredo cifrado em repouso |
 | Rate limiting em rotas sensíveis | **FECHADO por H3** — distribuído via PostgreSQL (sobrevive a restart/múltiplas instâncias), por IP/identidade/combinado, cobrindo login/MFA/forgot-reset-password/reset-token administrativo/enroll-confirm-disable de MFA/change-password/logout-all/aprovação de cadastro (`docs/PRODUCTION_GATE.md`, seção 20) |
+| Headers de segurança HTTP (CSP/HSTS/X-Frame-Options/Referrer-Policy/Permissions-Policy) | **FECHADO por H4** — CSP auditada a partir do frontend real, HSTS só em produção, clickjacking mitigado em dupla camada, `Cache-Control: no-store` em toda API (`docs/PRODUCTION_GATE.md`, seção 21) |
+| CORS explícito (allowlist, sem wildcard) | **FECHADO por H4** — same-origin por padrão, `CORS_ALLOWED_ORIGINS` com matching exato, `Origin: null` sempre negada, CORS nunca substitui autenticação |
 | Secrets fora do código | Presente — verificado nesta execução |
 | Service account por finalidade nos conectores | Presente para Monday (token único, finalidade de leitura jurídica) |
 | Menor privilégio nos conectores | Presente para Monday |
@@ -458,3 +460,27 @@ Ator identificado (`responsible` = o próprio usuário) só é usado em rotas qu
 autenticação de sessão válida (change-password, logout-all, admin-reset-token, MFA enroll/confirm/
 disable, aprovação de cadastro), onde o autor é genuinamente conhecido. Nenhum dado sensível adicional
 foi registrado para compensar. Gate como um todo permanece NO-GO.
+
+**H4 (HTTP security headers e política explícita de CORS) implementado — aguardando homologação**
+(`docs/DECISIONS.md`, PROD-H4-01; `docs/PRODUCTION_GATE.md`, seção 21): fecha PG-12/PG-13. Camada
+centralizada (`applySecurityHeaders()`/`handlePreflight()`, `server.js`) aplicada a TODA resposta —
+estática, preflight ou `/api/*` — via `res.setHeader()`, mesclado automaticamente com os headers de
+`json()`/`rateLimited()`/`staticFile()`. CSP construída a partir de uma auditoria real do frontend
+(nunca `default-src */script-src *`): `default-src 'self'`, `object-src 'none'`, `base-uri 'self'`,
+`frame-ancestors 'none'`, `img-src`/`font-src`/`connect-src 'self'` (Google Calendar/Monday são
+chamados só server-side, nunca pelo navegador). `script-src`/`style-src` precisam de `'unsafe-inline'`
+por dois motivos independentes e documentados no código: manipuladores de evento inline em
+`public/app.js` (`onclick=`/etc., ~28 pontos de `innerHTML` — refactor para `addEventListener()` fora
+do escopo desta rodada) e 5 barras de progresso com largura calculada em tempo de render; os demais
+usos ESTÁTICOS de estilo/script inline foram eliminados nesta rodada (`public/status.html` extraído
+para arquivos externos; `.btn-block` substituindo `style="width:100%..."` em `public/app.js`).
+Clickjacking mitigado em dupla camada (CSP `frame-ancestors 'none'` + `X-Frame-Options: DENY`). HSTS só
+em produção (`max-age=31536000`, sem `includeSubDomains`/`preload` por falta de decisão formal sobre
+subdomínios). Referrer-Policy `strict-origin-when-cross-origin`; Permissions-Policy nega todo recurso
+de navegador não usado pelo Patrono. `Cache-Control: no-store` em toda resposta de API.
+CORS same-origin por padrão, com allowlist explícita (`CORS_ALLOWED_ORIGINS`) — nunca wildcard, nunca
+reflete a Origin recebida, comparação sempre por igualdade EXATA de origem (nunca substring/`endsWith`
+— nega explicitamente um ataque de sufixo de domínio), `Origin: null` sempre negada. CORS nunca
+substitui autenticação. PG-14 (CSRF) permanece explicitamente NÃO fechado por esta rodada — continua
+P2, condicional a uma futura migração de Bearer token para cookie (não realizada). Gate como um todo
+permanece NO-GO.
