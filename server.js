@@ -514,9 +514,9 @@ function seedAuthFields(role) {
 }
 const seed = {
   users: [
-    { id: 'usr-diretoria', name: 'Cristiane Carneiro Rabelo', email: 'juridico@coevoconstrutora.com.br', role: 'diretoria', department: null, mfa: true, ...seedAuthFields('diretoria') },
-    { id: 'usr-juridico', name: 'Líder Jurídico', email: 'juridico@coevoconstrutora.com.br', role: 'lider', department: 'Jurídico', mfa: true, ...seedAuthFields('lider') },
-    { id: 'usr-ti', name: 'Líder de Tecnologia', email: 'ti@coevo.local', role: 'lider', department: 'TI', mfa: true, ...seedAuthFields('lider') }
+    { id: 'usr-diretoria', name: 'Cristiane Carneiro Rabelo', email: 'juridico@coevoconstrutora.com.br', role: 'diretoria', department: null, mfa: true, loginIdentifier: 'usr-diretoria', ...seedAuthFields('diretoria') },
+    { id: 'usr-juridico', name: 'Líder Jurídico', email: 'juridico@coevoconstrutora.com.br', role: 'lider', department: 'Jurídico', mfa: true, loginIdentifier: 'usr-juridico', ...seedAuthFields('lider') },
+    { id: 'usr-ti', name: 'Líder de Tecnologia', email: 'ti@coevo.local', role: 'lider', department: 'TI', mfa: true, loginIdentifier: 'usr-ti', ...seedAuthFields('lider') }
   ],
   departments: [
     { id: 'dep-juridico', name: 'Jurídico', color: '#20B5C7', source: 'Orcamento_JURIDICO_2026.xlsx · Painel/Planejado/Realizado', budget: { budgeted: 324730.42, planned: 209173.48, committed: 0, realized: 145499.77, forecast: 324730.42 } },
@@ -573,7 +573,16 @@ function backfillDevAuthFields(store) {
   if (IS_PRODUCTION) return false;
   let changed = false;
   for (const candidate of store.users || []) {
-    if (!candidate.passwordHash) {
+    // `temporaryPassword === true` sinaliza um usuário REALMENTE pendente de primeiro acesso (aprovação
+    // de cadastro real, ou o fluxo administrativo de emissão de token — ver
+    // POST /api/auth/requests/:id/approve e POST /api/auth/users/:id/reset-token): nunca ganha uma senha
+    // de conveniência "de graça", mesmo fora de produção. Não dá para distinguir `null` de `undefined`
+    // em `passwordHash` como sinal (uma vez que o usuário passa por um round-trip pelo Postgres, a coluna
+    // nulável sempre volta como `null`, nunca `undefined`, apagando essa diferença) — por isso o sinal
+    // usado é `temporaryPassword`, que é uma coluna `boolean NOT NULL` e sobrevive ao round-trip
+    // exatamente como gravada. Objetos de usuário legados/de teste anteriores a H2 nunca declaram
+    // `temporaryPassword` (portanto `false` por padrão) e continuam recebendo a senha de conveniência.
+    if (!candidate.passwordHash && candidate.temporaryPassword !== true) {
       candidate.passwordHash = authCrypto.hashPassword(DEV_SEED_PASSWORD);
       candidate.passwordChangedAt = candidate.passwordChangedAt || new Date().toISOString();
       candidate.temporaryPassword = false;
@@ -594,6 +603,11 @@ function backfillDevAuthFields(store) {
       } catch { /* MFA_ENCRYPTION_KEY ausente/curta — deixa o usuário sem MFA pré-configurado */ }
     }
     if (typeof candidate.failedLoginCount !== 'number') { candidate.failedLoginCount = 0; changed = true; }
+    // migrations/006_h2_unique_login_identity.sql faz este mesmo backfill (login_identifier = id) a nível
+    // de banco para o backend Postgres; replicado aqui para usuários legados/de teste no fallback local
+    // (JSON) e para objetos de usuário inseridos diretamente pela suíte de testes sem passar pela ponte
+    // relacional — nunca inventa um identificador de negócio, só reaproveita o id técnico já existente.
+    if (!candidate.loginIdentifier) { candidate.loginIdentifier = candidate.id; changed = true; }
   }
   return changed;
 }
@@ -782,6 +796,33 @@ function accountSetupRequired(user) { return Boolean(user.temporaryPassword) || 
 // o próprio objeto de usuário é devolvido ao cliente (ex.: GET /api/me).
 const SENSITIVE_USER_FIELDS = ['passwordHash', 'mfaSecretEncrypted'];
 function publicUser(user) { return Object.fromEntries(Object.entries(user).filter(([key]) => !SENSITIVE_USER_FIELDS.includes(key))); }
+// Revisão pós-PR #13 (docs/DECISIONS.md, PROD-H2-01): `email` nunca foi único em `app_users` (gap
+// preexistente de H1B, seed inclusive) — resolver por `find(first-match)` sobre e-mail duplicado não é
+// compatível com autenticação individual (não há garantia de qual conta de fato autentica). O
+// identificador PRIMÁRIO de login passa a ser `login_identifier` (técnico, único —
+// migrations/006_h2_unique_login_identity.sql); `email` continua aceito só por compatibilidade e SOMENTE
+// quando resolve para EXATAMENTE um usuário ativo — caso contrário (zero ou mais de um), o chamador trata
+// como "não encontrado" (mesma resposta genérica), nunca escolhendo uma conta arbitrária.
+function resolveLoginIdentity(store, input) {
+  const loginId = typeof input.login === 'string' ? input.login.trim() : '';
+  if (loginId) return store.users.find(u => u.loginIdentifier === loginId);
+  const email = String(input.email || '').toLowerCase();
+  if (!email) return undefined;
+  const matches = store.users.filter(u => u.email.toLowerCase() === email && !u.deletedAt);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+// Emissão de token de reset/primeiro acesso — usado tanto pelo fluxo público (forgot-password, só
+// quando o e-mail resolve para exatamente um usuário ativo) quanto pela rota administrativa
+// (POST /api/auth/users/:id/reset-token, por userId explícito, nunca por e-mail). Único ponto que cria
+// uma linha em password_reset_tokens — garante que toda emissão siga exatamente a mesma regra (CSPRNG,
+// hash apenas persistido, expiração, uso único).
+function issuePasswordResetToken(store, targetUser) {
+  if (!Array.isArray(store.passwordResetTokens)) store.passwordResetTokens = [];
+  const rawToken = authCrypto.generateOpaqueToken();
+  const record = { id: crypto.randomUUID(), userId: targetUser.id, tokenHash: authCrypto.hashToken(rawToken), createdAt: new Date().toISOString(), expiresAt: new Date(Date.now()+PASSWORD_RESET_TTL_MS).toISOString(), usedAt: null, version: 1 };
+  store.passwordResetTokens.push(record);
+  return { rawToken, record };
+}
 // P0 corrigido (rodada 2): antes, um registro SEM `department` era tratado como acessível a qualquer
 // usuário autenticado — ausência de classificação virava, na prática, "global" por acidente. Agora é
 // deny-by-default: um registro só é global se explicitamente marcado (`scopeType:'global'`); um
@@ -921,14 +962,17 @@ function handler(req, res) {
   // sessão completa antes da confirmação do segundo fator). Mensagem/HTTP genéricos em toda falha para
   // não revelar por timing/texto se o e-mail existe, está inativo ou está bloqueado.
   if (req.method === 'POST' && url.pathname === '/api/auth/login') return body(req).then(async input => {
-    const email = String(input.email || '').toLowerCase();
-    const found = store.users.find(u => u.email.toLowerCase() === email);
+    const found = resolveLoginIdentity(store, input);
     const genericInvalid = () => json(res,401,{error:'Credenciais inválidas'});
     if (!found || found.deletedAt) return genericInvalid();
+    // Item 18 do escopo (anti-enumeração): conta bloqueada nunca recebe uma resposta HTTP/mensagem
+    // diferente de "credenciais inválidas" — a diferença (423 vs 401) permitia inferir externamente que
+    // aquela conta específica existe e está bloqueada. Auditoria interna continua distinguindo
+    // ACCOUNT_LOCKED/LOGIN_FAILURE normalmente; só a superfície HTTP é uniforme.
     if (found.lockedUntil && new Date(found.lockedUntil).getTime() > Date.now()) {
       audit(store,found,'LOGIN_FAILURE','user',found.id,null,null,'Conta temporariamente bloqueada por excesso de tentativas');
       await writeStore(store);
-      return json(res,423,{error:'Conta temporariamente bloqueada. Tente novamente mais tarde.'});
+      return genericInvalid();
     }
     if (!found.passwordHash || !authCrypto.verifyPassword(input.password, found.passwordHash)) {
       found.failedLoginCount = (found.failedLoginCount || 0) + 1;
@@ -995,13 +1039,17 @@ function handler(req, res) {
   // de entrega de e-mail neste repositório; ver docs/SECURITY.md sobre o limite de escopo assumido),
   // o banco grava só o hash (`password_reset_tokens.token_hash`), uso único (`usedAt`), com expiração.
   // Resposta sempre genérica — nunca revela se o e-mail existe.
+  // Item 16 do escopo (revisão pós-PR #13): `email` não é único — nunca escolhe o primeiro registro
+  // correspondente. Só emite o token quando o e-mail resolve para EXATAMENTE um usuário ativo; havendo
+  // zero ou mais de um, a resposta externa é a mesma genérica (nunca revela ambiguidade nem existência).
+  // O fluxo administrativo por userId (POST /api/auth/users/:id/reset-token) continua funcionando para
+  // qualquer conta, mesmo com e-mail compartilhado.
   if (req.method === 'POST' && url.pathname === '/api/auth/forgot-password') return body(req).then(async input => {
     const email = String(input.email || '').toLowerCase();
-    const found = store.users.find(u => u.email.toLowerCase() === email && !u.deletedAt);
-    if (found) {
-      if (!Array.isArray(store.passwordResetTokens)) store.passwordResetTokens = [];
-      const rawToken = authCrypto.generateOpaqueToken();
-      store.passwordResetTokens.push({ id: crypto.randomUUID(), userId: found.id, tokenHash: authCrypto.hashToken(rawToken), createdAt: new Date().toISOString(), expiresAt: new Date(Date.now()+PASSWORD_RESET_TTL_MS).toISOString(), usedAt: null, version: 1 });
+    const matches = email ? store.users.filter(u => u.email.toLowerCase() === email && !u.deletedAt) : [];
+    if (matches.length === 1) {
+      const [found] = matches;
+      issuePasswordResetToken(store, found);
       audit(store,found,'PASSWORD_RESET_REQUEST','user',found.id,null,null,'Solicitação de reset de senha');
       if (!(await commitStore(res,store))) return;
     }
@@ -1048,6 +1096,27 @@ function handler(req, res) {
     audit(store,user,'LOGOUT_ALL','user',user.id,null,null,'Encerramento de todas as sessões do usuário');
     if (!(await commitStore(res,store))) return;
     return json(res,200,{loggedOut:true});
+  })();
+  // Revisão pós-PR #13 (docs/DECISIONS.md, PROD-H2-01): fluxo administrativo de primeiro acesso/reset —
+  // sem provedor de e-mail integrado neste repositório (docs/SECURITY.md), um usuário recém-aprovado
+  // (passwordHash:null, temporaryPassword:true) não tinha, até aqui, NENHUM caminho funcional para
+  // definir a própria senha em produção. Um operador com a MESMA alçada já usada para aprovar cadastro
+  // (`allowed(user,'*','approve')` — nunca uma nova escalada de privilégio; administrador técnico não
+  // ganha alçada de negócio além da já autorizada) pode emitir um token para um userId explícito (nunca
+  // por e-mail, que pode ser ambíguo). O token bruto só existe nesta resposta HTTP, uma única vez, para o
+  // próprio operador autorizado entregá-lo ao usuário por um canal operacional/fora de banda nesta fase
+  // (documentado como limitação — não exige integração de e-mail nesta rodada); o banco grava só o hash
+  // (mesmo mecanismo/tabela de forgot-password/reset-password — `issuePasswordResetToken()`), com
+  // expiração e uso único. Nunca aparece em log nem em evento de auditoria.
+  if (req.method === 'POST' && /^\/api\/auth\/users\/[^/]+\/reset-token$/.test(url.pathname)) return (async () => {
+    if (!allowed(user,'*','approve')) return json(res,403,{error:'Somente aprovadores podem emitir token de acesso'});
+    const targetId = url.pathname.split('/')[4];
+    const target = store.users.find(u => u.id === targetId);
+    if (!target || target.deletedAt) return json(res,404,{error:'Usuário não encontrado'});
+    const { rawToken, record } = issuePasswordResetToken(store, target);
+    audit(store,user,'PASSWORD_RESET_REQUEST','user',target.id,null,null,`Token de primeiro acesso/redefinição emitido administrativamente por ${user.name}`);
+    if (!(await commitStore(res,store))) return;
+    return json(res,200,{token:rawToken,userId:target.id,expiresAt:record.expiresAt});
   })();
   // Item 5/6 do escopo: troca de senha autenticada — exige a senha atual, aplica a política mínima,
   // incrementa credentialsVersion (invalida sessões anteriores) e desliga temporaryPassword.
@@ -1259,11 +1328,14 @@ function handler(req, res) {
   if (req.method === 'GET' && url.pathname.startsWith('/api/legal/')) { const moduleName=url.pathname.split('/')[3]; if(!allowedInDepartment(user,'juridico','read')) return json(res,403,{error:'Sem permissão para o módulo Jurídico'}); if(!LEGAL_MODULES.has(moduleName)) return json(res,404,{error:'Módulo jurídico não encontrado'}); if(moduleName==='honorariosJudiciais'){const processRows=collection(store,'processos').filter(x=>!x.deletedAt&&x.source==='monday'&&scoped(user,x));return json(res,200,{module:moduleName,...judicialHonorariumPayload(processRows)});}const rows=collection(store,moduleName).filter(x=>!x.deletedAt&&x.source==='monday'&&scoped(user,x)); if(moduleName==='processos'&&url.searchParams.get('paginated')==='1')return json(res,200,{module:moduleName,...filterProcesses(rows,url)});if(moduleName==='honorarios'&&url.searchParams.get('paginated')==='1')return json(res,200,{module:moduleName,...filterHonorariums(rows,url)});return json(res,200,{module:moduleName,count:rows.length,records:rows}); }
   if (req.method === 'POST' && url.pathname === '/api/monday/sync') { if(!allowedInDepartment(user,'juridico','create')) return json(res,403,{error:'Sem permissão para sincronizar'}); return await body(req).then(async input=>{const modules=input.modules?.length?input.modules:Object.keys(MONDAY_BOARDS);store.mondayRuns=store.mondayRuns||[];const run={id:crypto.randomUUID(),startedAt:new Date().toISOString(),requestedBy:user.name,modules:[],status:'running'};store.mondayRuns.push(run);let failed=0;for(const moduleName of modules){const board=MONDAY_BOARDS[moduleName];if(!board)continue;try{const items=await fetchMondayBoard(board.id);const list=collection(store,moduleName);let created=0,updated=0;for(const raw of items){const normalized=normalizeMondayItem(raw,moduleName,board);const existing=list.find(x=>x.source==='monday'&&x.externalId===normalized.externalId);if(existing){const before=structuredClone(existing);Object.assign(existing,normalized,{id:existing.id,version:(existing.version||1)+1});updated++;}else{list.push({...normalized,version:1});created++;}}run.modules.push({module:moduleName,board:board.name,read:items.length,created,updated,status:'ok'});}catch(error){failed++;run.modules.push({module:moduleName,board:board.name,status:'error',error:error.message});}}run.status=failed?'partial':'completed';run.finishedAt=new Date().toISOString();audit(store,user,'SYNC','monday',run.id,null,run,'Sincronização somente leitura com preservação de dados anteriores');if(!(await commitStore(res,store)))return;return json(res,failed?207:200,run);}); }
   if (req.method === 'GET' && url.pathname === '/api/auth/requests') { if(!allowed(user,'*','approve')) return json(res,403,{error:'Somente aprovadores podem consultar solicitações'}); return json(res,200,store.registrationRequests); }
-  if (req.method === 'POST' && url.pathname.match(/^\/api\/auth\/requests\/[^/]+\/approve$/)) { if(!allowed(user,'*','approve')) return json(res,403,{error:'Somente aprovadores podem aprovar'}); const id=url.pathname.split('/')[4]; const request=store.registrationRequests.find(r=>r.id===id&&r.status==='pending'); if(!request) return json(res,404,{error:'Solicitação não encontrada'}); request.status='approved';request.approvedAt=new Date().toISOString();request.approvedBy=user.name; // Sprint 2, Hardening H2 (item 27 do escopo): cadastro aprovado nasce SEM senha/MFA utilizáveis
-// (nenhuma credencial atribuída automaticamente) — o novo usuário só ganha acesso após o fluxo de
-// reset de senha (POST /api/auth/forgot-password → /api/auth/reset-password) definir sua própria
-// senha individual; `temporaryPassword:true` preserva a semântica pré-H2 até essa primeira definição.
-const created={id:crypto.randomUUID(),name:request.name,email:request.email,role:request.requestedRole,department:request.department,mfa:false,temporaryPassword:true,passwordHash:null,credentialsVersion:1,mfaEnabled:false,mfaMethod:null,mfaSecretEncrypted:null,failedLoginCount:0,lockedUntil:null}; store.users.push(created); audit(store,user,'APPROVE','registration',id,{status:'pending'},{status:'approved',userId:created.id},'Aprovação de cadastro por responsável humano'); if(!(await commitStore(res,store)))return; return json(res,200,{approved:true,user:created}); }
+  if (req.method === 'POST' && url.pathname.match(/^\/api\/auth\/requests\/[^/]+\/approve$/)) { if(!allowed(user,'*','approve')) return json(res,403,{error:'Somente aprovadores podem aprovar'}); const id=url.pathname.split('/')[4]; const request=store.registrationRequests.find(r=>r.id===id&&r.status==='pending'); if(!request) return json(res,404,{error:'Solicitação não encontrada'}); request.status='approved';request.approvedAt=new Date().toISOString();request.approvedBy=user.name; // Sprint 2, Hardening H2 (item 27 do escopo; revisão pós-PR #13): cadastro aprovado nasce SEM
+// senha/MFA utilizáveis (nenhuma credencial atribuída automaticamente) — o novo usuário só ganha acesso
+// após um token de primeiro acesso definir sua própria senha individual (POST /api/auth/reset-password),
+// emitido pelo fluxo administrativo (POST /api/auth/users/:id/reset-token) já que não há provedor de
+// e-mail integrado nesta fase; `temporaryPassword:true` preserva a semântica pré-H2 até essa primeira
+// definição. `loginIdentifier` é o próprio id técnico (único/estável) — email não é identidade de login.
+const newUserId=crypto.randomUUID();
+const created={id:newUserId,name:request.name,email:request.email,role:request.requestedRole,department:request.department,mfa:false,loginIdentifier:newUserId,temporaryPassword:true,passwordHash:null,credentialsVersion:1,mfaEnabled:false,mfaMethod:null,mfaSecretEncrypted:null,failedLoginCount:0,lockedUntil:null}; store.users.push(created); audit(store,user,'APPROVE','registration',id,{status:'pending'},{status:'approved',userId:created.id},'Aprovação de cadastro por responsável humano'); if(!(await commitStore(res,store)))return; return json(res,200,{approved:true,user:created}); }
   // P0 corrigido (rodada 3, item 6): a rota devolvia store.departments (com o objeto `budget` completo
   // de TODOS os departamentos) e store.agenda (de TODOS os departamentos) para qualquer usuário com
   // `allowed(user,'central')` — que é módulo comum a todos os papéis, inclusive colaborador. Um
@@ -1516,16 +1588,33 @@ const created={id:crypto.randomUUID(),name:request.name,email:request.email,role
   }
   })();
 }
+// Revisão pós-PR #13 (docs/DECISIONS.md, PROD-H2-01): MFA_ENCRYPTION_KEY é obrigatória em produção —
+// sem ela, nenhum segredo TOTP pode ser cifrado/decifrado em repouso (authCrypto.encryptSecret()/
+// decryptSecret() já falham explicitamente nesse caso), mas até esta correção essa ausência só era
+// descoberta na hora de um enrolamento/validação de MFA real, em runtime, tarde demais para um operador
+// perceber antes de expor o serviço. Falha explícita no BOOT, antes de escutar a porta — nunca imprime a
+// chave, nunca a expõe em `GET /api/health` ou qualquer outra rota. Fora de produção, a ausência da
+// chave continua degradando graciosamente (seedAuthFields()/backfillDevAuthFields() acima) — nunca
+// exigida para rodar testes/desenvolvimento que não usam MFA.
+// Lê `process.env.NODE_ENV` diretamente (nunca a constante `IS_PRODUCTION`, capturada uma única vez no
+// carregamento do módulo) — esta função é chamada no boot real com o ambiente já definido, e também
+// precisa ser testável isoladamente simulando produção/desenvolvimento sem exigir um `require('../server')`
+// separado por cenário.
+function validateAuthRuntimeConfig() {
+  if (process.env.NODE_ENV !== 'production') return;
+  if (!authCrypto.mfaEncryptionKey()) throw new Error('MFA_ENCRYPTION_KEY é obrigatória em produção (ausente ou com menos de 32 caracteres).');
+}
 // Sprint 2, Hardening H1A (docs/PRODUCTION_GATE.md, PG-22/seção 23): boot assíncrono — `storage.init()`
 // aguarda a persistência estar pronta ANTES de aceitar qualquer requisição. Em produção sem
 // DATABASE_URL, `storage.configure()` (acima) já lançou FailFastError antes de chegarmos aqui; se o
 // Postgres estiver configurado mas inalcançável/schema incompatível, `init()` lança e o processo
 // termina com código de saída ≠ 0 — nunca cai silenciosamente em modo arquivo.
 if (require.main === module) {
+  validateAuthRuntimeConfig();
   storage.init().then(() => {
     http.createServer((req,res)=>handler(req,res)).listen(PORT,()=>console.log(`COEVO Alta Performance disponível em http://localhost:${PORT}`));
     setInterval(()=>scheduledMondayTick().catch(error=>console.error('Monday scheduler:',error.message)),60000);
   }).catch(error => { console.error('Falha ao inicializar a persistência — processo não iniciado:', error.message); process.exit(1); });
 }
-module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, ORIGIN_TYPE_LABELS, STATUS_LABELS, CATEGORY_LABELS, legalDeadlineLabels, legalDeadlineConfirmationLabel, LEGAL_DEADLINE_TEXTUAL_RESPONSIBLE_FIELDS, filterCalendarEventsByWindow, canBeResponsibleForLegalDeadline, storage, migrateLegacyStore };
+module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, ORIGIN_TYPE_LABELS, STATUS_LABELS, CATEGORY_LABELS, legalDeadlineLabels, legalDeadlineConfirmationLabel, LEGAL_DEADLINE_TEXTUAL_RESPONSIBLE_FIELDS, filterCalendarEventsByWindow, canBeResponsibleForLegalDeadline, storage, migrateLegacyStore, validateAuthRuntimeConfig, resolveLoginIdentity, issuePasswordResetToken };
 

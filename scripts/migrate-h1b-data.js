@@ -80,12 +80,16 @@ function hasCriticalIssues(usersReport, processesReport, deadlinesReport, auditR
   );
 }
 
+// `login_identifier` (migrations/006_h2_unique_login_identity.sql) é NOT NULL/UNIQUE — este script
+// (H1A→H1B, anterior a H2) não conhece esse conceito, então usa a MESMA regra de fallback do
+// runtime/repository (users-repository.js `loginIdentifierOf()`): o próprio id técnico, já único e
+// estável, nunca um dado de negócio inventado.
 async function insertUserIdempotent(client, user) {
   await client.query(
-    `INSERT INTO app_users (id, name, email, role, department, mfa, temporary_password, company_id, spe_id, deleted_at, version)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+    `INSERT INTO app_users (id, name, email, role, department, mfa, temporary_password, company_id, spe_id, deleted_at, version, login_identifier)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
      ON CONFLICT (id) DO NOTHING`,
-    [user.id, user.name ?? null, user.email, user.role ?? null, user.department ?? null, Boolean(user.mfa), Boolean(user.temporaryPassword), user.companyId ?? null, user.speId ?? null, user.deletedAt ?? null, user.version || 1]
+    [user.id, user.name ?? null, user.email, user.role ?? null, user.department ?? null, Boolean(user.mfa), Boolean(user.temporaryPassword), user.companyId ?? null, user.speId ?? null, user.deletedAt ?? null, user.version || 1, user.loginIdentifier || user.id]
   );
 }
 

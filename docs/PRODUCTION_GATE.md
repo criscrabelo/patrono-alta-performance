@@ -553,6 +553,36 @@ permanecem inalterados — autenticação decide quem, autorização continua de
 **Por que "aguardando homologação" e não "concluído":** mesma razão do H1A/H1B — implementação testada e
 funcional, mas depende de revisão humana antes de qualquer autorização de uso.
 
+### Adendo ao H2 (revisão pós-PR #13): 5 blockers corrigidos antes do merge
+
+Correção de blockers identificados na revisão técnica humana do PR #13 (`docs/DECISIONS.md`,
+PROD-H2-01, adendo). Nenhum item abaixo fecha um critério adicional do gate além dos já fechados por H2
+(PG-04 a PG-09) — são correções de correção técnica, não avanço de escopo.
+
+- **Identidade de login única**: `app_users.email` nunca foi único (PROD-H1B-01, item 7) — login por
+  `find(first-match)` sobre e-mail duplicado não é compatível com autenticação individual. Migração
+  aditiva nova `migrations/006_h2_unique_login_identity.sql` acrescenta `login_identifier` (`UNIQUE NOT
+  NULL`, backfill = id técnico existente). Login aceita `login` como identificador primário; `email`
+  continua aceito só quando resolve para exatamente um usuário ativo, nunca escolhendo o primeiro
+  registro em caso de ambiguidade (o mesmo vale para `forgot-password`).
+- **Primeiro acesso/reset administrativo** (`POST /api/auth/users/:id/reset-token`): sem provedor de
+  e-mail integrado, um usuário recém-aprovado não tinha caminho funcional para definir a própria senha
+  em produção. Um operador com a mesma alçada de aprovação de cadastro (`allowed(user,'*','approve')`,
+  nunca uma nova escalada) emite, por `userId` explícito, um token de uso único (mesmo mecanismo de
+  `password_reset_tokens`) devolvido em texto puro uma única vez, para entrega operacional/fora de
+  banda nesta fase.
+- **`MFA_ENCRYPTION_KEY` validada no BOOT** (`validateAuthRuntimeConfig()`) quando `NODE_ENV=production`
+  — antes, a ausência só era descoberta no primeiro enrolamento/validação de MFA real, tarde demais.
+  Fora de produção continua degradando graciosamente (sem exigir a chave para testes que não usam MFA).
+- **Anti-enumeração no login**: conta bloqueada respondia `423` (status distinto que revelava
+  externamente que aquela conta existe e está bloqueada) — corrigido para o mesmo `401`/"Credenciais
+  inválidas" de qualquer outra falha; auditoria interna continua distinguindo os casos normalmente.
+- **TOTP verificado em teste automatizado contra os vetores oficiais do RFC 6238** (Apêndice B) —
+  antes só verificado manualmente durante o desenvolvimento original de H2.
+
+Testes: 352/352 com Postgres real (342 anteriores + 10 novos cenários cobrindo os 5 itens acima, em
+`tests/core.test.js` e `tests/h2-auth-sessions.test.js`), 0 falhando, nenhum teste removido.
+
 ## 16. Decisão final atual
 
 **NO-GO PARA PRODUÇÃO** — inalterado por esta rodada de hardening.

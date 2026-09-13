@@ -442,3 +442,28 @@ demais entidades (departments, financials, agenda, projetos, etc.) permanecem ex
 **`storage/postgres-store.js` (`REQUIRED_MIGRATIONS`/`REQUIRED_CORE_TABLES`) exige a migration
 `005_h2_auth_sessions` e as 3 tabelas novas** — mesma disciplina fail-closed de H1B: schema
 incompatível/ausente falha explicitamente em `init()`/`healthcheck()`, nunca silenciosamente.
+
+## Hardening H2 — Adendo (revisão pós-PR #13): identidade de login única
+(docs/PRODUCTION_GATE.md, docs/DECISIONS.md PROD-H2-01, adendo)
+
+**`app_users.login_identifier`** (`migrations/006_h2_unique_login_identity.sql`, aditiva — não altera
+001-005, inclusive a própria 005 já entregue na mesma rodada H2): `text NOT NULL`, com índice único
+(`uq_app_users_login_identifier`). É a identidade TÉCNICA de autenticação — separada e estável, nunca o
+`email` (que nunca foi único, PROD-H1B-01 item 7; o próprio seed tem dois usuários com o mesmo e-mail).
+Backfill dos registros existentes: `login_identifier = id` (o identificador técnico já existente, único
+e estável — nunca um dado de negócio inventado, como um nome de usuário comercial ou um e-mail
+fictício). Todo usuário novo (seed, aprovação de cadastro) recebe `login_identifier = id` por padrão
+nesta rodada; uma interface de login amigável (escolha de nome de usuário pelo próprio usuário) fica
+para uma rodada futura, fora deste escopo.
+
+`storage/repositories/users-repository.js` (`loginIdentifierOf()`) e `scripts/migrate-h1b-data.js`
+(`insertUserIdempotent()`) aplicam a MESMA regra de fallback ao inserir um usuário sem
+`loginIdentifier` explícito — nunca inventam um valor diferente entre os dois caminhos de escrita.
+
+`login_identifier` é imutável pela ponte relacional nesta rodada (só definido na criação — `update()`
+não o altera); uma futura rota de gestão de nome de login ficaria a cargo de uma implementação própria,
+com sua própria auditoria.
+
+`storage/postgres-store.js` (`REQUIRED_MIGRATIONS`) passa a exigir também `006_h2_unique_login_identity`
+— mesma disciplina fail-closed: schema sem essa migration falha explicitamente em `init()`/
+`healthcheck()`.

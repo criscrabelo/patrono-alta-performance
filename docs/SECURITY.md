@@ -393,3 +393,21 @@ aberto. Nenhum controle de autorização já auditado foi alterado: RBAC (`allow
 `allowedInDepartment()`/`allowedContent()`), segregação departamental, `scoped()` e "administrador
 técnico ≠ superusuário de conteúdo" permanecem exatamente como estavam — autenticação decide quem,
 autorização continua decidindo o quê. Gate como um todo permanece NO-GO.
+
+**Adendo ao H2 (revisão pós-PR #13)** (`docs/DECISIONS.md`, PROD-H2-01, adendo;
+`docs/PRODUCTION_GATE.md`, seção 19): 5 blockers corrigidos antes do merge —
+(1) **identidade de login única**: `email` nunca foi único (gap preexistente, PROD-H1B-01) — login
+passa a resolver primariamente por `login_identifier` (novo, `UNIQUE NOT NULL`,
+`migrations/006_h2_unique_login_identity.sql`); e-mail só é aceito quando resolve para exatamente um
+usuário ativo, nunca escolhendo o primeiro registro em caso de ambiguidade (login ou
+forgot-password);
+(2) **primeiro acesso administrativo** (`POST /api/auth/users/:id/reset-token`): sem provedor de
+e-mail integrado, um usuário recém-aprovado ganha um caminho real para definir a própria senha, via
+token de uso único emitido por um operador com a mesma alçada de aprovação já auditada, devolvido em
+texto puro uma única vez para entrega fora de banda;
+(3) **`MFA_ENCRYPTION_KEY` validada no boot** em produção (antes só descoberta no primeiro uso real de
+MFA);
+(4) **anti-enumeração**: conta bloqueada deixa de responder `423` (revelava externamente que aquela
+conta existe e está bloqueada) e passa a responder o mesmo `401` de qualquer outra falha de login;
+(5) **TOTP verificado em teste automatizado** contra os vetores oficiais do RFC 6238. Nenhum controle
+de autorização foi alterado. Gate como um todo permanece NO-GO.

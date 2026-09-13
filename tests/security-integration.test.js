@@ -125,8 +125,17 @@ async function api(method, pathname, { token, json } = {}) {
   return { status: res.status, body };
 }
 
+// Revisão pós-PR #13 (docs/DECISIONS.md, PROD-H2-01): `usr-diretoria`/`usr-juridico` compartilham o
+// mesmo e-mail no seed (gap conhecido, PROD-H1B-01) — login por e-mail agora exige exatamente UM
+// usuário ativo correspondente (nunca first-match), então esse e-mail específico deixou de resolver
+// por e-mail. Usa o `login_identifier` (login técnico único) para este caso conhecido; os demais
+// e-mails de teste neste arquivo são únicos e continuam funcionando normalmente por e-mail.
+const EMAIL_TO_LOGIN_IDENTIFIER = { [EMAILS.diretoria]: 'usr-diretoria' };
 async function loginAs(email) {
-  const login = await api('POST', '/api/auth/login', { json: { email, password: process.env.COEVO_DEMO_PASSWORD } });
+  const payload = EMAIL_TO_LOGIN_IDENTIFIER[email]
+    ? { login: EMAIL_TO_LOGIN_IDENTIFIER[email], password: process.env.COEVO_DEMO_PASSWORD }
+    : { email, password: process.env.COEVO_DEMO_PASSWORD };
+  const login = await api('POST', '/api/auth/login', { json: payload });
   assert.equal(login.status, 200, `login deveria aceitar credenciais válidas para ${email}: ${JSON.stringify(login.body)}`);
   if (login.body.token) return login.body.token;
   assert.equal(login.body.mfaRequired, true);

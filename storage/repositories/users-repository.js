@@ -1,9 +1,9 @@
 // Sprint 2, Hardening H1B/H2 (docs/PRODUCTION_GATE.md; docs/DECISIONS.md, PROD-H1B-01/PROD-H2-01):
 // repository enxuto para a tabela `app_users` (migrations/004_h1b_core_relational.sql,
-// migrations/005_h2_auth_sessions.sql; nome distinto de `users` porque 001_foundation.sql já criou uma
-// tabela `users` incompatível, nunca usada pelo runtime). `executor` é sempre um `pg` Pool ou Client já
-// em transação — este módulo nunca abre conexão própria, nunca decide se está dentro de uma transação
-// (isso é responsabilidade de quem chama).
+// migrations/005_h2_auth_sessions.sql, migrations/006_h2_unique_login_identity.sql; nome distinto de
+// `users` porque 001_foundation.sql já criou uma tabela `users` incompatível, nunca usada pelo runtime).
+// `executor` é sempre um `pg` Pool ou Client já em transação — este módulo nunca abre conexão própria,
+// nunca decide se está dentro de uma transação (isso é responsabilidade de quem chama).
 function rowToUser(row) {
   return {
     id: row.id,
@@ -17,6 +17,9 @@ function rowToUser(row) {
     speId: row.spe_id,
     deletedAt: row.deleted_at ? row.deleted_at.toISOString() : null,
     version: row.version,
+    // H2 revisão pós-PR #13 (docs/DECISIONS.md, PROD-H2-01): identidade TÉCNICA de login, separada e
+    // estável — nunca o e-mail (que não é único). Ver migrations/006_h2_unique_login_identity.sql.
+    loginIdentifier: row.login_identifier,
     // H2 — autenticação individual (nunca expostos em resposta HTTP; passwordHash/mfaSecretEncrypted
     // ficam só na memória do processo/servidor, nunca retornados por nenhuma rota).
     passwordHash: row.password_hash,
@@ -45,12 +48,17 @@ function h2Params(user) {
   ];
 }
 
+// `login_identifier` é NOT NULL/UNIQUE (migrations/006) — nunca inventa um valor de negócio: quando o
+// chamador não define um explicitamente, usa o próprio `id` técnico (já único/estável), exatamente como
+// o backfill da migration fez para os registros pré-existentes.
+function loginIdentifierOf(user) { return user.loginIdentifier || user.id; }
+
 async function insert(executor, user) {
   await executor.query(
-    `INSERT INTO app_users (id, name, email, role, department, mfa, temporary_password, company_id, spe_id, deleted_at, version,
+    `INSERT INTO app_users (id, name, email, role, department, mfa, temporary_password, company_id, spe_id, deleted_at, version, login_identifier,
        password_hash, password_changed_at, mfa_enabled, mfa_method, mfa_secret_encrypted, mfa_enrolled_at, failed_login_count, locked_until, last_login_at, credentials_version)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, $12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
-    [user.id, user.name, user.email, user.role, user.department ?? null, Boolean(user.mfa), Boolean(user.temporaryPassword), user.companyId ?? null, user.speId ?? null, user.deletedAt ?? null, user.version || 1,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, $13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
+    [user.id, user.name, user.email, user.role, user.department ?? null, Boolean(user.mfa), Boolean(user.temporaryPassword), user.companyId ?? null, user.speId ?? null, user.deletedAt ?? null, user.version || 1, loginIdentifierOf(user),
       ...h2Params(user)]
   );
 }
@@ -58,6 +66,10 @@ async function insert(executor, user) {
 // CAS por linha: 0 linhas afetadas ⇒ conflito de concorrência (StoreConflictError, mapeado pelo
 // chamador). `expectedVersion` é a versão lida na hidratação (baseline); a nova versão é sempre
 // baseline+1, decidida aqui — nunca confiando em `user.version` vindo da memória.
+//
+// `login_identifier` NÃO é atualizável por aqui — é a identidade técnica fixa atribuída na criação
+// (imutável nesta rodada; uma futura interface de nome de login amigável ficaria a cargo de uma rota
+// dedicada com sua própria auditoria, fora de escopo desta correção).
 async function update(executor, user, expectedVersion) {
   const nextVersion = expectedVersion + 1;
   const { rowCount } = await executor.query(

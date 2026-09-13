@@ -993,6 +993,58 @@ detalhamento técnico completo — esta decisão não o duplica, apenas registra
 Esta decisão não altera D1/D4/D2-CLOSE/PROD-GATE-01/PROD-H1-01/PROD-H1B-01 já homologadas — apenas
 registra o avanço específico do H2 dentro do gate de produção já aberto.
 
+### PROD-H2-01 — Adendo (revisão pós-PR #13): identidade de login única, primeiro acesso administrativo,
+### MFA_ENCRYPTION_KEY obrigatória em produção, respostas anti-enumeração
+
+**Status: IMPLEMENTADO / AGUARDANDO HOMOLOGAÇÃO.** Correção de 5 blockers identificados na revisão
+técnica humana do PR #13, antes de qualquer merge. Não reabre nem contradiz os 15 itens da decisão
+original acima — os complementa.
+
+16. **Identidade de login única (`login_identifier`).** `app_users.email` nunca foi único (gap
+    preexistente, PROD-H1B-01 item 7; o próprio seed tem dois usuários com o mesmo e-mail) — login por
+    `find(first-match)` sobre e-mail duplicado não é compatível com autenticação individual, pois não há
+    garantia de qual conta de fato autentica. Migração aditiva nova (`migrations/
+    006_h2_unique_login_identity.sql`, nunca uma edição de 001-005 já entregues) acrescenta
+    `app_users.login_identifier` (`UNIQUE NOT NULL`), backfilled para os registros existentes com o
+    próprio `id` técnico (já único/estável — nunca um dado de negócio inventado, nunca um e-mail
+    fictício). `email` continua sendo dado de contato, nunca é alterado por esta correção.
+17. **Login aceita `login` (identificador técnico) como identificador primário.** `email` continua
+    aceito só por compatibilidade e SOMENTE quando resolve para EXATAMENTE um usuário ativo — havendo
+    zero ou mais de um, a mesma resposta genérica de credenciais inválidas é usada, nunca escolhendo uma
+    conta arbitrária. A mesma regra vale para `POST /api/auth/forgot-password`: e-mail ambíguo não emite
+    token para nenhuma conta.
+18. **Primeiro acesso/reset administrativo (`POST /api/auth/users/:id/reset-token`).** Sem provedor de
+    e-mail integrado neste repositório, um usuário recém-aprovado (`passwordHash:null`,
+    `temporaryPassword:true`) não tinha, até esta correção, nenhum caminho funcional para definir a
+    própria senha em produção. Um operador com a MESMA alçada já usada para aprovar cadastro
+    (`allowed(user,'*','approve')` — nunca uma nova escalada de privilégio; administrador técnico não
+    ganha alçada de negócio além da já autorizada) pode emitir, por `userId` explícito (nunca por
+    e-mail, que pode ser ambíguo), um token de uso único que reaproveita EXATAMENTE o mesmo mecanismo de
+    `password_reset_tokens` (`issuePasswordResetToken()`, hash apenas persistido, expiração). O token
+    bruto existe só nesta resposta HTTP, uma única vez, para o operador entregá-lo por um canal
+    operacional/fora de banda nesta fase (documentado como limitação — não exige integração de e-mail
+    nesta rodada); nunca aparece em log nem em evento de auditoria.
+19. **`MFA_ENCRYPTION_KEY` passa a ser validada no BOOT quando `NODE_ENV=production`**
+    (`validateAuthRuntimeConfig()`), não apenas na hora de um enrolamento/validação de MFA real. Ausente
+    ou com menos de 32 caracteres: o processo falha explicitamente antes de escutar a porta, mensagem
+    segura (nunca imprime a chave). Fora de produção, a ausência da chave continua degradando
+    graciosamente (item 6 da decisão original) — nunca exigida para rodar testes/desenvolvimento que não
+    usam MFA.
+20. **Respostas de login nunca revelam bloqueio/inatividade/ambiguidade de e-mail.** Conta bloqueada
+    (`locked_until`) respondia `423` — status distinto de `401` que permitia inferir externamente que
+    aquela conta específica existe e está bloqueada. Corrigido para o mesmo `401`/"Credenciais inválidas"
+    de qualquer outra falha de login; a auditoria interna (`ACCOUNT_LOCKED`/`LOGIN_FAILURE`) continua
+    distinguindo os casos normalmente — só a superfície HTTP é uniforme.
+21. **TOTP verificado contra os vetores oficiais do RFC 6238** (Apêndice B, SHA1, 8 dígitos — a
+    implementação usa 6 por padrão em produção, mas `totpAt()` aceita `digits` como parâmetro,
+    permitindo testar contra o vetor publicado sem alterar o comportamento de produção), em teste
+    automatizado (`tests/core.test.js`) — não apenas verificado manualmente durante o desenvolvimento
+    original de H2.
+22. **Esta correção não fecha nenhum critério adicional do Gate de Produção além dos já fechados pela
+    decisão original (PG-04 a PG-09)** — apenas resolve blockers técnicos que impediam H2 de ser
+    considerado tecnicamente correto para revisão. O gate como um todo permanece **NO-GO PARA
+    PRODUÇÃO**. H3–H11 não foram alterados.
+
 ---
 
 ## 2. ADRs de Engenharia — Fase 0 (Sprint 1)

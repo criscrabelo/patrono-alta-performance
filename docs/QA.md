@@ -642,3 +642,50 @@ aqui; esta seção apenas consolida o estado de QA já registrado nas Fases 1–
   demais arquivos de teste rodando em paralelo no mesmo serviço `postgres:16`.
 - `npm audit`: inalterado (2 vulnerabilidades altas conhecidas, `image-size`/`pptxgenjs` — H9; não
   corrigidas nesta rodada, deliberadamente fora do escopo de H2).
+
+## QA — Adendo ao Hardening H2 (revisão pós-PR #13)
+
+Correção de 5 blockers identificados na revisão técnica humana do PR #13, antes do merge
+(`docs/DECISIONS.md`, PROD-H2-01, adendo).
+
+- **352 testes totais** com `TEST_DATABASE_URL` (342 anteriores + 10 novos), 0 falhando, nenhum teste
+  removido. `tests/h1b-core-relational.test.js` e `tests/security-integration.test.js` tiveram seus
+  `loginAs()` ajustados para usar `login_identifier` no único caso de e-mail deliberadamente duplicado
+  em cada arquivo (a diretoria do seed principal; o usuário líder duplicado propositalmente pelo próprio
+  teste [H1B-B] para provar a ausência de `UNIQUE(email)`).
+- **2 testes novos em `tests/core.test.js`**:
+  - TOTP verificado contra os 6 vetores de teste oficiais do RFC 6238 (Apêndice B, SHA1, 8 dígitos —
+    `totpAt()` aceita `digits` como parâmetro só para bater exatamente com o vetor publicado, sem alterar
+    o padrão de 6 dígitos usado em produção).
+  - `validateAuthRuntimeConfig()`: produção sem `MFA_ENCRYPTION_KEY` falha; produção com chave curta
+    (<32 caracteres) falha; produção com chave válida aceita; fora de produção, ausência da chave nunca
+    impede o carregamento do módulo.
+- **8 testes novos em `tests/h2-auth-sessions.test.js`** cobrindo o fluxo administrativo de primeiro
+  acesso/identidade única/anti-enumeração:
+  - Usuário recém-aprovado nasce com `passwordHash:null` e não consegue logar sem um token de ativação.
+  - Operador sem `allowed(user,'*','approve')` não consegue emitir token administrativo para outro
+    usuário (403).
+  - Operador autorizado emite o token (`POST /api/auth/users/:id/reset-token`): resposta contém o token
+    bruto uma única vez; o banco (`password_reset_tokens.token_hash`) contém só o hash, nunca o bruto; o
+    evento de auditoria correspondente nunca contém o token bruto; o token permite definir a primeira
+    senha; depois de usado, não pode ser reaproveitado; após definida a senha, o usuário segue o fluxo
+    normal de login.
+  - Dois usuários com o mesmo e-mail: login por e-mail ambíguo falha (nunca first-match); login por
+    `login_identifier` autentica exatamente o usuário correto; a senha de um nunca autentica o outro.
+  - `forgot-password` com e-mail ambíguo não cria nenhum token de reset (nunca escolhe um registro
+    arbitrário); o fluxo administrativo por `userId` continua funcionando corretamente mesmo com e-mail
+    compartilhado.
+  - `login_identifier` tem índice único no banco (`pg_indexes`) e todo usuário da suíte (seed, backfill
+    ou criado no teste) tem um valor próprio, sem colisões.
+  - Login inexistente, senha errada, usuário inativo, conta bloqueada e e-mail ambíguo respondem
+    exatamente o mesmo `401`/"Credenciais inválidas" — nenhum distingue o motivo externamente
+    (anti-enumeração).
+- **Descoberta durante a correção**: o backfill de conveniência de senha para usuários legados/de teste
+  (`backfillDevAuthFields()`) não podia mais usar `!candidate.passwordHash` como único sinal — depois de
+  um round-trip pelo Postgres, a coluna nulável sempre volta como `null` (nunca `undefined`), então
+  `null` deixou de distinguir "usuário legado sem o campo" de "usuário genuinamente pendente de primeiro
+  acesso real". Corrigido para usar `temporaryPassword === true` como sinal adicional (uma coluna
+  `boolean NOT NULL`, que sobrevive ao round-trip exatamente como gravada) — só objetos legados/de teste
+  que nunca declaram esse campo continuam recebendo a senha de conveniência.
+- CI roda a mesma bateria (Node 20.x/22.x, Postgres real) sem nenhum teste pulado.
+- `npm audit`: inalterado (2 vulnerabilidades altas conhecidas — H9, não corrigidas nesta rodada).

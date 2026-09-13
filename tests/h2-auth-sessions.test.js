@@ -94,10 +94,12 @@ if (!TEST_DATABASE_URL) {
   const EMAILS = {
     semMfa: 'h2.sem-mfa@coevo.local',
     comMfaA: 'h2.com-mfa-a@coevo.local',
-    comMfaB: 'h2.com-mfa-b@coevo.local'
+    comMfaB: 'h2.com-mfa-b@coevo.local',
+    aprovador: 'h2.aprovador@coevo.local'
   };
   const SECRET_A = authCrypto.generateTotpSecret();
   const SECRET_B = authCrypto.generateTotpSecret();
+  const SECRET_APROVADOR = authCrypto.generateTotpSecret();
 
   test.before(async () => {
     await createIsolatedDatabase();
@@ -119,7 +121,10 @@ if (!TEST_DATABASE_URL) {
       // Dois líderes com MFA individual JÁ confirmado, cada um com seu PRÓPRIO segredo — prova que o
       // segredo de A nunca valida o código de B (item de teste "MFA secret de A nunca valida B").
       { id: 'usr-h2-mfa-a', name: 'H2 Líder A', email: EMAILS.comMfaA, role: 'lider', department: 'Jurídico', mfa: true, passwordHash: authCrypto.hashPassword(process.env.COEVO_DEMO_PASSWORD), temporaryPassword: false, credentialsVersion: 1, mfaEnabled: true, mfaMethod: 'totp', mfaSecretEncrypted: authCrypto.encryptSecret(SECRET_A), mfaEnrolledAt: new Date().toISOString(), failedLoginCount: 0 },
-      { id: 'usr-h2-mfa-b', name: 'H2 Líder B', email: EMAILS.comMfaB, role: 'lider', department: 'TI', mfa: true, passwordHash: authCrypto.hashPassword(process.env.COEVO_DEMO_PASSWORD), temporaryPassword: false, credentialsVersion: 1, mfaEnabled: true, mfaMethod: 'totp', mfaSecretEncrypted: authCrypto.encryptSecret(SECRET_B), mfaEnrolledAt: new Date().toISOString(), failedLoginCount: 0 }
+      { id: 'usr-h2-mfa-b', name: 'H2 Líder B', email: EMAILS.comMfaB, role: 'lider', department: 'TI', mfa: true, passwordHash: authCrypto.hashPassword(process.env.COEVO_DEMO_PASSWORD), temporaryPassword: false, credentialsVersion: 1, mfaEnabled: true, mfaMethod: 'totp', mfaSecretEncrypted: authCrypto.encryptSecret(SECRET_B), mfaEnrolledAt: new Date().toISOString(), failedLoginCount: 0 },
+      // Aprovador (diretoria — `allowed(user,'*','approve')`, a MESMA alçada já usada para aprovar
+      // cadastro) usado pelos testes do fluxo administrativo de primeiro acesso/reset (item 3 do escopo).
+      { id: 'usr-h2-aprovador', name: 'H2 Aprovador', email: EMAILS.aprovador, role: 'diretoria', department: null, mfa: true, passwordHash: authCrypto.hashPassword(process.env.COEVO_DEMO_PASSWORD), temporaryPassword: false, credentialsVersion: 1, mfaEnabled: true, mfaMethod: 'totp', mfaSecretEncrypted: authCrypto.encryptSecret(SECRET_APROVADOR), mfaEnrolledAt: new Date().toISOString(), failedLoginCount: 0 }
     );
     await writeStore(store);
 
@@ -379,8 +384,13 @@ if (!TEST_DATABASE_URL) {
       const attempt = await loginRaw('h2.lockout@coevo.local', 'senha-errada');
       assert.equal(attempt.status, 401);
     }
+    // Item 18 do escopo (revisão pós-PR #13, anti-enumeração): a resposta externa de conta bloqueada é a
+    // MESMA de credenciais inválidas (401 genérico) — nunca um status/mensagem distinta que revelaria
+    // que aquela conta especificamente existe e está bloqueada. A auditoria interna (ACCOUNT_LOCKED)
+    // continua registrando o bloqueio normalmente, coberta pelo teste de auditoria [H2-S/T].
     const locked = await loginRaw('h2.lockout@coevo.local', 'SenhaCerta#123');
-    assert.equal(locked.status, 423, 'após 5 tentativas malsucedidas a conta deve ficar temporariamente bloqueada, mesmo com a senha correta');
+    assert.equal(locked.status, 401, 'conta bloqueada deve responder com o mesmo 401 genérico de credenciais inválidas, mesmo com a senha correta (anti-enumeração)');
+    assert.equal(locked.body.error, 'Credenciais inválidas');
 
     // Simula o fim do período de bloqueio (não depende de tempo real de espera no teste).
     const store2 = await readStore();
@@ -424,6 +434,152 @@ if (!TEST_DATABASE_URL) {
     await pool.end();
     const res = await api('POST', '/api/auth/reset-password', { json: { token: rawToken, newPassword: 'Senha#Nova222' } });
     assert.equal(res.status, 400);
+  });
+
+  // --- Revisão pós-PR #13: fluxo administrativo de primeiro acesso/reset (itens 1-5 do escopo) ---------
+  test('[H2-admin-A/B] usuário recém-aprovado nasce sem passwordHash e não consegue logar sem um token de ativação', async () => {
+    const store = await readStore();
+    assert.equal(store.users.some(u => u.id === 'usr-h2-recem-aprovado'), false);
+    store.users.push({ id: 'usr-h2-recem-aprovado', name: 'H2 Recém Aprovado', email: 'h2.recem-aprovado@coevo.local', role: 'colaborador', department: 'Jurídico', mfa: false, loginIdentifier: 'usr-h2-recem-aprovado', passwordHash: null, temporaryPassword: true, credentialsVersion: 1, mfaEnabled: false, failedLoginCount: 0 });
+    await writeStore(store);
+    const reread = await readStore();
+    const created = reread.users.find(u => u.id === 'usr-h2-recem-aprovado');
+    assert.equal(created.passwordHash, null, 'usuário recém-aprovado nasce sem passwordHash (nenhuma credencial atribuída automaticamente)');
+    const attempt = await loginRaw('h2.recem-aprovado@coevo.local', 'qualquer-senha');
+    assert.equal(attempt.status, 401, 'sem passwordHash definido, nenhuma senha pode autenticar esse usuário ainda');
+  });
+
+  test('[H2-admin-C] operador SEM alçada de aprovação não consegue emitir token de acesso para outro usuário', async () => {
+    const tokenSemAprovacao = await loginAs(EMAILS.semMfa);
+    const store = await readStore();
+    const target = store.users.find(u => u.id === 'usr-h2-recem-aprovado');
+    const res = await api('POST', `/api/auth/users/${target.id}/reset-token`, { token: tokenSemAprovacao, json: {} });
+    assert.equal(res.status, 403, 'colaborador comum (sem allowed(user,"*","approve")) não pode emitir token administrativo para outro usuário');
+  });
+
+  test('[H2-admin-D/E/F/G/H/I/J] operador autorizado emite token administrativo (bruto uma única vez, hash no banco, uso único) e o usuário completa o primeiro acesso', async () => {
+    const tokenAprovador = await loginAs(EMAILS.aprovador, process.env.COEVO_DEMO_PASSWORD, SECRET_APROVADOR);
+    const store = await readStore();
+    const target = store.users.find(u => u.id === 'usr-h2-recem-aprovado');
+
+    const issued = await api('POST', `/api/auth/users/${target.id}/reset-token`, { token: tokenAprovador, json: {} });
+    assert.equal(issued.status, 200, JSON.stringify(issued.body));
+    assert.equal(issued.body.userId, target.id, 'o token deve ser emitido para o userId explícito pedido, nunca por e-mail');
+    assert.ok(issued.body.token, 'a resposta deve conter o token bruto — a ÚNICA vez que ele existe fora do processo');
+
+    // F. banco contém somente o hash do token, nunca o bruto.
+    const pool = new Pool({ connectionString: isolatedDatabaseUrl });
+    const { rows } = await pool.query('SELECT token_hash FROM password_reset_tokens WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1', [target.id]);
+    await pool.end();
+    assert.equal(rows[0].token_hash, authCrypto.hashToken(issued.body.token));
+    assert.notEqual(rows[0].token_hash, issued.body.token);
+
+    // G. o evento de auditoria correspondente nunca contém o token bruto.
+    const auditedStore = await readStore();
+    const relatedEvents = auditedStore.audit.filter(e => e.entityId === target.id && e.action === 'PASSWORD_RESET_REQUEST');
+    assert.ok(relatedEvents.length > 0, 'a emissão administrativa deve gerar um evento de auditoria');
+    assert.doesNotMatch(JSON.stringify(relatedEvents), new RegExp(issued.body.token), 'o token bruto nunca pode aparecer em nenhum evento de auditoria');
+
+    // H. o token emitido permite definir a primeira senha do usuário.
+    const definePassword = await api('POST', '/api/auth/reset-password', { json: { token: issued.body.token, newPassword: 'PrimeiraSenha#123' } });
+    assert.equal(definePassword.status, 200, JSON.stringify(definePassword.body));
+
+    // I. o mesmo token não pode ser reutilizado depois de usado.
+    const reuse = await api('POST', '/api/auth/reset-password', { json: { token: issued.body.token, newPassword: 'OutraSenha#456' } });
+    assert.equal(reuse.status, 400, 'um token de primeiro acesso já usado não pode ser reaproveitado');
+
+    // J. depois de definida a primeira senha, o usuário segue o fluxo normal de login.
+    const normalLogin = await loginRaw('h2.recem-aprovado@coevo.local', 'PrimeiraSenha#123');
+    assert.equal(normalLogin.status, 200, JSON.stringify(normalLogin.body));
+  });
+
+  // --- Revisão pós-PR #13: identidade de login única (itens 10-19 do escopo) ---------------------------
+  test('[H2-identidade-A/B/C/D/E] dois usuários com o mesmo e-mail: login por e-mail ambíguo falha; login por login_identifier autentica cada um corretamente; senha de um nunca autentica o outro', async () => {
+    const store = await readStore();
+    const sharedEmail = 'h2.email-compartilhado@coevo.local';
+    store.users.push(
+      { id: 'usr-h2-dup-a', name: 'H2 Duplicado A', email: sharedEmail, role: 'colaborador', department: 'Jurídico', mfa: false, loginIdentifier: 'usr-h2-dup-a', passwordHash: authCrypto.hashPassword('SenhaDupA#111'), temporaryPassword: false, credentialsVersion: 1, mfaEnabled: false, failedLoginCount: 0 },
+      { id: 'usr-h2-dup-b', name: 'H2 Duplicado B', email: sharedEmail, role: 'colaborador', department: 'TI', mfa: false, loginIdentifier: 'usr-h2-dup-b', passwordHash: authCrypto.hashPassword('SenhaDupB#222'), temporaryPassword: false, credentialsVersion: 1, mfaEnabled: false, failedLoginCount: 0 }
+    );
+    await writeStore(store);
+
+    // B. login por e-mail ambíguo (dois usuários ativos) não autentica nenhum dos dois por first-match.
+    const ambiguous = await loginRaw(sharedEmail, 'SenhaDupA#111');
+    assert.equal(ambiguous.status, 401, 'e-mail que resolve para mais de um usuário ativo nunca autentica por first-match');
+
+    // C/D. login por login_identifier autentica exatamente o usuário correto.
+    const loginA = await api('POST', '/api/auth/login', { json: { login: 'usr-h2-dup-a', password: 'SenhaDupA#111' } });
+    assert.equal(loginA.status, 200, JSON.stringify(loginA.body));
+    const loginB = await api('POST', '/api/auth/login', { json: { login: 'usr-h2-dup-b', password: 'SenhaDupB#222' } });
+    assert.equal(loginB.status, 200, JSON.stringify(loginB.body));
+
+    // E. a senha de um nunca autentica o outro, mesmo por login_identifier correto.
+    const wrongPassword = await api('POST', '/api/auth/login', { json: { login: 'usr-h2-dup-a', password: 'SenhaDupB#222' } });
+    assert.equal(wrongPassword.status, 401);
+  });
+
+  test('[H2-identidade-F] forgot-password com e-mail ambíguo não seleciona o primeiro registro silenciosamente', async () => {
+    const store = await readStore();
+    const sharedEmail = 'h2.forgot-ambiguo@coevo.local';
+    store.users.push(
+      { id: 'usr-h2-forgot-a', name: 'H2 Forgot A', email: sharedEmail, role: 'colaborador', department: 'Jurídico', mfa: false, loginIdentifier: 'usr-h2-forgot-a', passwordHash: authCrypto.hashPassword('Senha#111'), temporaryPassword: false, credentialsVersion: 1, mfaEnabled: false, failedLoginCount: 0 },
+      { id: 'usr-h2-forgot-b', name: 'H2 Forgot B', email: sharedEmail, role: 'colaborador', department: 'TI', mfa: false, loginIdentifier: 'usr-h2-forgot-b', passwordHash: authCrypto.hashPassword('Senha#222'), temporaryPassword: false, credentialsVersion: 1, mfaEnabled: false, failedLoginCount: 0 }
+    );
+    await writeStore(store);
+    const before = await readStore();
+    const tokensBefore = before.passwordResetTokens.length;
+
+    const res = await api('POST', '/api/auth/forgot-password', { json: { email: sharedEmail } });
+    assert.equal(res.status, 200, 'resposta externa continua genérica mesmo diante de ambiguidade');
+
+    const after = await readStore();
+    assert.equal(after.passwordResetTokens.length, tokensBefore, 'nenhum token de reset deve ser criado quando o e-mail é ambíguo (nunca escolhe um registro arbitrário)');
+  });
+
+  test('[H2-identidade-G] fluxo administrativo por userId continua emitindo token corretamente mesmo com e-mail compartilhado', async () => {
+    const tokenAprovador = await loginAs(EMAILS.aprovador, process.env.COEVO_DEMO_PASSWORD, SECRET_APROVADOR);
+    const store = await readStore();
+    const targetB = store.users.find(u => u.id === 'usr-h2-forgot-b');
+    const issued = await api('POST', `/api/auth/users/${targetB.id}/reset-token`, { token: tokenAprovador, json: {} });
+    assert.equal(issued.status, 200, JSON.stringify(issued.body));
+    assert.equal(issued.body.userId, targetB.id, 'a rota administrativa atinge exatamente o usuário escolhido por id, mesmo com e-mail ambíguo entre contas');
+  });
+
+  test('[H2-identidade-H/I] login_identifier é UNIQUE no banco e todo novo usuário recebe um valor próprio', async () => {
+    const pool = new Pool({ connectionString: isolatedDatabaseUrl });
+    const { rows } = await pool.query(
+      "SELECT indexname FROM pg_indexes WHERE tablename = 'app_users' AND indexdef ILIKE '%UNIQUE%' AND indexdef ILIKE '%login_identifier%'"
+    );
+    await pool.end();
+    assert.ok(rows.length > 0, 'deve existir um índice único sobre app_users.login_identifier');
+
+    const store = await readStore();
+    const distinctIds = new Set(store.users.map(u => u.loginIdentifier));
+    assert.equal(distinctIds.size, store.users.length, 'todo usuário (seed, backfill ou criado nesta suíte) deve ter um login_identifier próprio, sem colisões');
+  });
+
+  // --- Revisão pós-PR #13: anti-enumeração (item 18-19 do escopo) --------------------------------------
+  test('[H2-anti-enumeração] login inexistente, senha errada, usuário inativo, conta bloqueada e e-mail ambíguo recebem a mesma resposta externa', async () => {
+    const store = await readStore();
+    store.users.push(
+      { id: 'usr-h2-anti-enum-inativo', name: 'H2 Anti Enum Inativo', email: 'h2.anti-enum-inativo@coevo.local', role: 'colaborador', department: 'Jurídico', mfa: false, loginIdentifier: 'usr-h2-anti-enum-inativo', passwordHash: authCrypto.hashPassword('Senha#Ativa1'), temporaryPassword: false, credentialsVersion: 1, mfaEnabled: false, failedLoginCount: 0, deletedAt: new Date().toISOString() },
+      { id: 'usr-h2-anti-enum-bloqueado', name: 'H2 Anti Enum Bloqueado', email: 'h2.anti-enum-bloqueado@coevo.local', role: 'colaborador', department: 'Jurídico', mfa: false, loginIdentifier: 'usr-h2-anti-enum-bloqueado', passwordHash: authCrypto.hashPassword('Senha#Certa1'), temporaryPassword: false, credentialsVersion: 1, mfaEnabled: false, failedLoginCount: 0, lockedUntil: new Date(Date.now()+900000).toISOString() },
+      { id: 'usr-h2-anti-enum-a', name: 'H2 Anti Enum A', email: 'h2.anti-enum-ambiguo@coevo.local', role: 'colaborador', department: 'Jurídico', mfa: false, loginIdentifier: 'usr-h2-anti-enum-a', passwordHash: authCrypto.hashPassword('Senha#111'), temporaryPassword: false, credentialsVersion: 1, mfaEnabled: false, failedLoginCount: 0 },
+      { id: 'usr-h2-anti-enum-b', name: 'H2 Anti Enum B', email: 'h2.anti-enum-ambiguo@coevo.local', role: 'colaborador', department: 'TI', mfa: false, loginIdentifier: 'usr-h2-anti-enum-b', passwordHash: authCrypto.hashPassword('Senha#222'), temporaryPassword: false, credentialsVersion: 1, mfaEnabled: false, failedLoginCount: 0 }
+    );
+    await writeStore(store);
+
+    const casos = await Promise.all([
+      loginRaw('h2.nao-existe-anti-enum@coevo.local', 'qualquer-senha'),
+      loginRaw('h2.anti-enum-inativo@coevo.local', 'senha-errada'),
+      loginRaw('h2.anti-enum-inativo@coevo.local', 'Senha#Ativa1'),
+      loginRaw('h2.anti-enum-bloqueado@coevo.local', 'Senha#Certa1'),
+      loginRaw('h2.anti-enum-ambiguo@coevo.local', 'Senha#111')
+    ]);
+    for (const res of casos) {
+      assert.equal(res.status, 401, `todos os casos devem responder 401 (nunca 423 nem qualquer outro status que distinga o motivo): ${JSON.stringify(res.body)}`);
+      assert.equal(res.body.error, 'Credenciais inválidas', 'a mensagem externa deve ser idêntica em todos os casos, sem revelar qual condição ocorreu');
+    }
   });
 
   // --- V. restart: sessão sobrevive ao reinício do processo (não é em memória) ------------------------

@@ -74,6 +74,49 @@ test('autenticação individual (H2): sem bypass usr-*, sem senha/MFA global, se
   assert.doesNotMatch(app, /Bearer usr-/, 'frontend não deve ter fallback de bearer privilegiado');
   assert.match(app, /window\.__coevoToken=result\.data\.token;state\.authenticated=true/, 'submitLogin deve guardar o token antes de autenticar');
 });
+test('TOTP (H2): implementação bate exatamente com os vetores de teste oficiais do RFC 6238 (Apêndice B, SHA1)', () => {
+  const authCrypto = require('../auth/crypto');
+  // Segredo padrão do RFC 6238 Apêndice B: os 20 bytes ASCII "12345678901234567890", codificados em
+  // base32 pela própria implementação (evita transcrever manualmente a string base32 equivalente).
+  const secret = authCrypto.base32Encode(Buffer.from('12345678901234567890', 'ascii'));
+  // O RFC especifica os vetores em 8 dígitos (nossa implementação usa 6 por padrão, mas totpAt() aceita
+  // `digits` como parâmetro — passamos 8 aqui só para validar contra o vetor oficial exatamente como
+  // publicado, sem alterar o comportamento de 6 dígitos usado em produção).
+  const vectors = [
+    [59, '94287082'],
+    [1111111109, '07081804'],
+    [1111111111, '14050471'],
+    [1234567890, '89005924'],
+    [2000000000, '69279037'],
+    [20000000000, '65353130']
+  ];
+  for (const [unixSeconds, expected] of vectors) {
+    assert.equal(authCrypto.totpAt(secret, unixSeconds * 1000, 30, 8), expected, `TOTP em T=${unixSeconds}s deveria bater com o vetor oficial do RFC 6238`);
+  }
+});
+test('MFA_ENCRYPTION_KEY (H2, revisão pós-PR #13): fail-fast em produção, degradação graciosa fora dela', () => {
+  const { validateAuthRuntimeConfig } = require('../server');
+  const originalEnv = process.env.NODE_ENV;
+  const originalKey = process.env.MFA_ENCRYPTION_KEY;
+  try {
+    process.env.NODE_ENV = 'production';
+    delete process.env.MFA_ENCRYPTION_KEY;
+    assert.throws(() => validateAuthRuntimeConfig(), /MFA_ENCRYPTION_KEY/, 'produção sem a chave deve falhar explicitamente antes de escutar a porta');
+
+    process.env.MFA_ENCRYPTION_KEY = 'curta-demais';
+    assert.throws(() => validateAuthRuntimeConfig(), /MFA_ENCRYPTION_KEY/, 'produção com chave curta (<32 caracteres) deve falhar explicitamente, igual à ausência');
+
+    process.env.MFA_ENCRYPTION_KEY = 'chave-de-producao-valida-com-32-caracteres-ou-mais';
+    assert.doesNotThrow(() => validateAuthRuntimeConfig(), 'produção com uma chave válida (>=32 caracteres) deve aceitar a configuração normalmente');
+
+    process.env.NODE_ENV = 'test';
+    delete process.env.MFA_ENCRYPTION_KEY;
+    assert.doesNotThrow(() => validateAuthRuntimeConfig(), 'fora de produção, a ausência da chave nunca impede o boot/carregamento do módulo');
+  } finally {
+    process.env.NODE_ENV = originalEnv;
+    if (originalKey === undefined) delete process.env.MFA_ENCRYPTION_KEY; else process.env.MFA_ENCRYPTION_KEY = originalKey;
+  }
+});
 test('processos e demais pastas oferecem filtros múltiplos e títulos do Monday', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
   for (const field of ['Polo','Tipo','Ano','Mês','Empreendimento/Grupo','Escopo','Status']) assert.match(source, new RegExp(field));
