@@ -296,3 +296,84 @@ test('import-data: --dry-run nunca grava (nem cria arquivo novo, nem exige DATAB
   assert.notEqual(process.exitCode, 1, '--dry-run com arquivo válido não deve reportar falha');
   process.exitCode = originalExitCode;
 });
+
+// ============================================================================================
+// scripts/migrate-h1b-data.js — validação pura (sem depender de Postgres) do relatório de
+// dry-run/pré-importação: duplicados, órfãos (processId/responsibleUserId inexistente), enum inválido.
+// ============================================================================================
+const {
+  validateUsers, validateLegalProcesses, validateLegalDeadlines, validateAudit, hasCriticalIssues, parseArgs: parseH1bArgs
+} = require('../scripts/migrate-h1b-data');
+
+test('migrate-h1b-data: parseArgs() reconhece --dry-run e --force', () => {
+  assert.deepEqual(parseH1bArgs(['--dry-run']), { dryRun: true, force: false });
+  assert.deepEqual(parseH1bArgs(['--force']), { dryRun: false, force: true });
+});
+
+test('migrate-h1b-data: validateUsers() conta total/válidos e detecta duplicados/inválidos', () => {
+  const report = validateUsers([{ id: 'u1', email: 'a@b.com' }, { id: 'u1', email: 'a@b.com' }, { id: 'u2' }]);
+  assert.equal(report.total, 3);
+  assert.deepEqual(report.duplicates, ['u1']);
+  assert.deepEqual(report.invalid, ['u2']);
+});
+
+test('migrate-h1b-data: validateLegalDeadlines() detecta processId órfão, responsibleUserId órfão e enum inválido', () => {
+  const processIds = new Set(['proc-1']);
+  const userIds = new Set(['usr-1']);
+  const report = validateLegalDeadlines([
+    { id: 'ld-ok', processId: 'proc-1', responsibleUserId: 'usr-1', originType: 'JUDICIAL_PROCESSUAL', status: 'ativo' },
+    { id: 'ld-orphan-process', processId: 'proc-inexistente', originType: 'JUDICIAL_PROCESSUAL', status: 'ativo' },
+    { id: 'ld-orphan-user', processId: 'proc-1', responsibleUserId: 'usr-inexistente', originType: 'JUDICIAL_PROCESSUAL', status: 'ativo' },
+    { id: 'ld-bad-enum', processId: 'proc-1', originType: 'INVALIDO', status: 'ativo' }
+  ], processIds, userIds);
+  assert.equal(report.total, 4);
+  assert.equal(report.valid, 1);
+  assert.deepEqual(report.orphanProcess, ['ld-orphan-process']);
+  assert.deepEqual(report.orphanResponsible, ['ld-orphan-user']);
+  assert.deepEqual(report.invalidEnum, ['ld-bad-enum']);
+});
+
+test('migrate-h1b-data: validateLegalDeadlines() aceita responsibleUserId ausente/null (opcional)', () => {
+  const report = validateLegalDeadlines([{ id: 'ld-1', processId: 'proc-1', originType: 'JUDICIAL_PROCESSUAL', status: 'ativo' }], new Set(['proc-1']), new Set());
+  assert.equal(report.valid, 1);
+  assert.deepEqual(report.orphanResponsible, []);
+});
+
+test('migrate-h1b-data: validateLegalProcesses()/validateAudit() contam total/válidos, duplicados E inválidos (correção da revisão final — antes o campo "invalid" era calculado mas nunca exposto no relatório)', () => {
+  const processes = validateLegalProcesses([{ id: 'p1' }, { id: 'p1' }, { notAnId: true }]);
+  assert.equal(processes.total, 3);
+  assert.deepEqual(processes.duplicates, ['p1']);
+  assert.deepEqual(processes.invalid, [undefined]);
+  assert.equal(processes.valid, 2);
+  const audit = validateAudit([{ id: 'a1', action: 'CREATE', entity: 'x', entityId: '1' }, { id: 'a2' }]);
+  assert.equal(audit.total, 2);
+  assert.equal(audit.valid, 1);
+  assert.deepEqual(audit.invalid, ['a2']);
+});
+
+test('migrate-h1b-data: hasCriticalIssues() sinaliza qualquer duplicado/órfão/enum inválido; relatório limpo não bloqueia', () => {
+  const clean = { invalid: [], duplicates: [] };
+  const cleanDeadlines = { orphanProcess: [], orphanResponsible: [], invalidEnum: [], duplicates: [] };
+  assert.equal(hasCriticalIssues(clean, clean, cleanDeadlines, clean), false);
+  const dirtyUsers = { invalid: ['u1'], duplicates: [] };
+  assert.equal(hasCriticalIssues(dirtyUsers, clean, cleanDeadlines, clean), true);
+});
+
+test('migrate-h1b-data: hasCriticalIssues() também bloqueia por processesReport.invalid/auditReport.invalid (correção da revisão final H1B — antes só users/deadlines eram checados)', () => {
+  const clean = { invalid: [], duplicates: [] };
+  const cleanDeadlines = { orphanProcess: [], orphanResponsible: [], invalidEnum: [], duplicates: [] };
+  const dirtyProcesses = { invalid: ['p1'], duplicates: [] };
+  assert.equal(hasCriticalIssues(clean, dirtyProcesses, cleanDeadlines, clean), true, 'processesReport.invalid precisa bloquear a importação');
+  const dirtyAudit = { invalid: ['a1'], duplicates: [] };
+  assert.equal(hasCriticalIssues(clean, clean, cleanDeadlines, dirtyAudit), true, 'auditReport.invalid precisa bloquear a importação');
+});
+
+test('migrate-h1b-data: --dry-run sem DATABASE_URL falha explicitamente (a migração de dados exige um destino PostgreSQL)', async () => {
+  delete process.env.DATABASE_URL;
+  const { run } = require('../scripts/migrate-h1b-data');
+  const originalExitCode = process.exitCode;
+  process.exitCode = undefined;
+  await run(['--dry-run']);
+  assert.equal(process.exitCode, 1, 'sem DATABASE_URL configurada, mesmo --dry-run deve falhar (nunca finge sucesso sem poder validar contra o schema_migrations real)');
+  process.exitCode = originalExitCode;
+});

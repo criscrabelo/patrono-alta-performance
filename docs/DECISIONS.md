@@ -835,6 +835,85 @@ do H1A dentro do gate de produção já aberto.
 
 ---
 
+## 1.6. Hardening H1B — Decisão PROD-H1B-01
+
+### PROD-H1B-01 — Normalização relacional progressiva do núcleo canônico
+
+**Status: IMPLEMENTADO / AGUARDANDO HOMOLOGAÇÃO** (ver `docs/PRODUCTION_GATE.md`, seção 18, para o
+detalhamento técnico completo — esta decisão não o duplica, apenas registra o que foi decidido).
+
+**Conteúdo da decisão:**
+
+1. **`users`, `legalProcesses` (=`store.records.processos`), `legalDeadlines`
+   (=`store.records.legalDeadlines`) e `audit` (=`store.audit`) passam a ter tabela relacional própria**
+   (`app_users`, `legal_processes`, `legal_deadlines`, `audit_log` —
+   `migrations/004_h1b_core_relational.sql`, nesta ordem, exatamente como definido em PROD-H1-01/item 7).
+   Deixam de ser canônicas dentro do documento JSONB `app_store` a partir do momento em que
+   `npm run migrate:h1b:data` roda.
+2. **FK real**: `legal_deadlines.process_id → legal_processes(id)` e
+   `legal_deadlines.responsible_user_id → app_users(id)`, ambas `ON DELETE RESTRICT` — nunca cascade
+   destrutivo, preserva histórico (um usuário/processo referenciado nunca pode ser fisicamente apagado;
+   inativação continua sendo só `deletedAt`, que a FK não impede).
+3. **Sem dual-write**: as 4 coleções nunca são serializadas dentro do blob depois de migradas — a ponte
+   relacional (`storage/index.js`) remove essas chaves do documento a cada escrita. `npm run
+   migrate:h1b:data` também as remove explicitamente do blob existente, na mesma transação que popula as
+   tabelas (cutover).
+4. **Sem fallback tabela→JSONB**: se a tabela existe e a migration `004_h1b_core_relational` está
+   registrada, ela é a única fonte — uma falha de leitura/escrita relacional nunca cai silenciosamente de
+   volta para o blob.
+5. **Concorrência otimista por linha**: cada tabela tem sua própria coluna `version`; o Legal Deadline
+   não depende mais apenas da `version` global do `app_store` para detectar conflito — duas edições
+   concorrentes do MESMO Legal Deadline colidem (409); edições concorrentes de deadlines diferentes
+   continuam adicionalmente protegidas pela `version` global do blob (efeito colateral aceito do desenho
+   — não um requisito relaxado).
+6. **Transação real**: mutação de uma das 4 entidades e o evento de auditoria correspondente são
+   persistidos na MESMA transação Postgres que atualiza o restante do blob — tudo ou nada.
+7. **`email` de `app_users` continua SEM constraint de unicidade.** A regra vigente no runtime nunca foi
+   de unicidade rígida (só bloqueia nova solicitação de registro, comparação case-insensitive, sem checar
+   apenas usuários ativos) — e o seed atual já tem dois usuários (`usr-diretoria`/`usr-juridico`)
+   compartilhando o mesmo email. Impor `UNIQUE(email)` agora quebraria esse dado existente e mudaria uma
+   regra de negócio sem homologação explícita. Registrado aqui como gap preexistente e conhecido, não
+   fechado por H1B — decisão de segurança/produto pendente para rodada futura (fora do escopo H1B/H2–H11
+   definido nesta rodada).
+8. **`companyId`/`speId`/`scopeType` continuam dormentes** — as colunas existem (nuláveis) nas novas
+   tabelas, mas nenhuma rotina real as popula ainda; nenhuma mudança de comportamento de `scoped()`.
+9. **Migração de dados H1A→H1B é um processo separado e explícito** (`scripts/migrate-h1b-data.js`, `npm
+   run migrate:h1b:data`), com `--dry-run` (relatório por coleção, nunca grava), transacional, idempotente
+   (`--force` para reimportar sem duplicar), e que aborta inteiramente diante de qualquer inconsistência
+   crítica (órfão de `processId`/`responsibleUserId`, duplicado, enum inválido) — nunca grava dado
+   parcial.
+10. **Runbook de deploy obrigatório, nesta ordem**: (a) `npm run migrate` (aplica
+    `004_h1b_core_relational`); (b) `npm run migrate:h1b:data` (extrai as 4 coleções do `app_store`
+    existente para as tabelas relacionais, com `--dry-run` disponível antes); só então (c) subir o
+    processo normalmente. **O runtime não depende apenas do operador seguir essa ordem** (correção da
+    revisão final do H1B, ver item 12 abaixo): "migration de SCHEMA" (passo (a), `schema_migrations`) é
+    DIFERENTE de "migração de DADOS" (passo (b)) — um marcador explícito e persistente
+    (`data_migrations`, chave `h1b_core_relational_cutover`, gravado por `scripts/migrate-h1b-data.js` na
+    MESMA transação que popula as tabelas e corta o blob) registra que o cutover de fato ocorreu.
+    `storage.init()` (a fachada em `storage/index.js`, chamada no boot real) falha explicitamente
+    (fail-closed) se o backend é PostgreSQL e esse marcador ainda não existe — nunca ativa a ponte
+    relacional sobre tabelas vazias enquanto o blob ainda tem o dado real, mesmo que o passo (a) já tenha
+    rodado.
+11. **Esta decisão não fecha o Gate de Produção nem declara H1 integralmente concluído** — apenas
+    os critérios PG-01/PG-02/PG-03 de `docs/PRODUCTION_GATE.md` ganham uma camada adicional de rigor (FK
+    real para o núcleo canônico). Demais entidades permanecem no documento JSONB único (H1A). O gate como
+    um todo permanece **NO-GO PARA PRODUÇÃO**. H2–H11 não foram alterados por esta decisão.
+12. **Correção de revisão final (blocker P1 corrigido antes da homologação)**: a versão original desta
+    decisão dependia apenas do runbook documentado (item 10) para a ordem migrate→migrate:h1b:data — sem
+    nenhuma checagem em runtime. Corrigido para o mecanismo fail-closed descrito no item 10: o marcador
+    de cutover em `data_migrations` é a fonte de verdade real (não uma contagem de linhas em `app_users`,
+    que poderia estar vazia por outro motivo), e `GET /api/health` (`schemaReady`) reflete o mesmo estado
+    — um schema fisicamente presente cujo cutover ainda não ocorreu nunca é reportado como pronto.
+    `scripts/migrate-h1b-data.js` também teve `hasCriticalIssues()` corrigido: `processesReport.invalid`/
+    `auditReport.invalid` já eram calculados mas nunca entravam na decisão de abortar o `--dry-run`/
+    importação real — corrigido para depender só da validação já conhecida, nunca de uma constraint SQL
+    posterior detectar algo que o relatório já sabia.
+
+Esta decisão não altera D1/D4/D2-CLOSE/PROD-GATE-01/PROD-H1-01 já homologadas — apenas registra o avanço
+específico do H1B dentro do gate de produção já aberto.
+
+---
+
 ## 2. ADRs de Engenharia — Fase 0 (Sprint 1)
 
 Decisões técnicas locais e reversíveis, permitidas pela v1.3 (§27, linhas D8/D9: "Não bloqueia decisão

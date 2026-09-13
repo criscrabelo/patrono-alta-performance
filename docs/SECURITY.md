@@ -358,3 +358,15 @@ PROD-H1-01): fecha PG-01/PG-02/PG-03 do gate. Segredos de conexão (`DATABASE_UR
 prática já auditada — server-side only, nunca expostos por `/api/health` ou qualquer outra rota (só
 `persistence`/`databaseConfigured`/`databaseReachable`/`schemaReady`, nunca host/usuário/senha). Gate
 como um todo permanece NO-GO.
+
+**H1B (normalização relacional do núcleo canônico) implementado — aguardando homologação**
+(`docs/DECISIONS.md`, PROD-H1B-01): `users`/`legalProcesses`/`legalDeadlines`/`audit` ganham tabela
+própria com FK real (Legal Deadline → Legal Process/usuário responsável), sem alterar nenhum controle de
+segurança já auditado — RBAC (`allowed()`/`allowedInDepartment()`/`allowedContent()`), segregação
+departamental, `scoped()` (companyId/speId/department) e "administrador técnico ≠ superusuário de
+conteúdo" permanecem exatamente como estavam, agora exercidos com os dados vindos das tabelas relacionais
+em vez do blob JSONB — cobertos por testes de regressão dedicados
+(`tests/h1b-core-relational.test.js`, itens U/V). FK usa `ON DELETE RESTRICT` (nunca cascade
+destrutivo) — inativação continua sendo exclusivamente `deletedAt` (soft-delete), nunca remoção física.
+`email` de `app_users` continua sem constraint de unicidade (gap preexistente, documentado e não fechado
+por H1B — `docs/DECISIONS.md`, PROD-H1B-01, item 7). Gate como um todo permanece NO-GO.

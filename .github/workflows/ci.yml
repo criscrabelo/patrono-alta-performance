@@ -15,11 +15,15 @@ jobs:
     strategy:
       matrix:
         node-version: [20.x, 22.x]
-    # Sprint 2, Hardening H1A (docs/PRODUCTION_GATE.md): serviço de PostgreSQL isolado só para esta
+    # Sprint 2, Hardening H1A/H1B (docs/PRODUCTION_GATE.md): serviço de PostgreSQL isolado só para esta
     # execução de CI — nunca aponta para nenhum banco real/produção. TEST_DATABASE_URL habilita os
-    # testes de tests/storage.test.js e tests/security-integration-postgres.test.js que exercitam o
-    # backend Postgres de verdade (concorrência real, transação, healthcheck); sem ela, esses mesmos
-    # testes são pulados explicitamente (nunca fingem cobertura que não existe).
+    # testes de tests/storage.test.js, tests/security-integration-postgres.test.js e
+    # tests/h1b-core-relational.test.js que exercitam o backend Postgres de verdade (concorrência real,
+    # transação, healthcheck, FK/CAS por linha do núcleo relacional H1B); sem ela, esses mesmos testes
+    # são pulados explicitamente (nunca fingem cobertura que não existe). O usuário `postgres` do serviço
+    # tem privilégio de CREATEDB, necessário porque tests/h1b-core-relational.test.js cria bancos
+    # isolados próprios (CREATE DATABASE/DROP DATABASE) para nunca colidir com os outros arquivos de
+    # teste rodando em paralelo no mesmo Postgres de CI.
     services:
       postgres:
         image: postgres:16

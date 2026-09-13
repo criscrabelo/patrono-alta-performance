@@ -312,12 +312,15 @@ fixo = 1, coluna `version` para concorrência otimista). Esta é uma arquitetura
 - **PG-03** (schema sem versionamento): `schema_migrations` + `npm run migrate` (`scripts/migrate.js`),
   determinístico, idempotente, `exit code` correto em falha. Testado rodando contra um Postgres real.
 
-**O que H1A NÃO fecha (H1B, deliberadamente fora desta rodada — não fechar silenciosamente):**
-- Nenhuma FK relacional real entre entidades — Legal Process → Legal Deadline, `responsibleUserId` →
-  `users` continuam validados só em JavaScript, exatamente como antes.
-- Nenhuma entidade ganhou tabela própria — `users`, `legalProcesses`, `legalDeadlines`, `audit` (nesta
-  ordem, conforme decidido) permanecem dentro do documento JSONB único até o H1B.
-- Nenhuma garantia de integridade referencial no nível do banco.
+**O que H1A NÃO fechou (H1B — ver seção 18, IMPLEMENTADO/AGUARDANDO HOMOLOGAÇÃO — fecha a lista abaixo
+para as 4 entidades do núcleo canônico; demais entidades permanecem no documento JSONB único):**
+- ~~Nenhuma FK relacional real entre entidades~~ — Legal Deadline → Legal Process e `responsibleUserId` →
+  `users` agora têm FK real no PostgreSQL (`migrations/004_h1b_core_relational.sql`).
+- ~~Nenhuma entidade ganhou tabela própria~~ — `users` (`app_users`), `legalProcesses`
+  (`legal_processes`), `legalDeadlines` (`legal_deadlines`) e `audit` (`audit_log`) têm tabela relacional
+  própria, canônica, sem dual-write com o blob.
+- ~~Nenhuma garantia de integridade referencial no nível do banco~~ — FK real, com `ON DELETE RESTRICT`
+  (nunca cascade destrutivo), mais CHECK constraints para os enums de `originType`/`status`.
 
 **Fail-fast em produção:** `NODE_ENV=production` sem `DATABASE_URL` lança `FailFastError` na configuração
 do storage — o processo não inicia; se `DATABASE_URL` está configurada mas o Postgres está
@@ -351,15 +354,96 @@ autorização de uso — e H1B (normalização relacional) permanece pendente, e
 fechados apenas no escopo específico que H1A se propôs a resolver (persistência real, concorrência real,
 versionamento de schema real), não como uma reescrita relacional completa.
 
+## 18. Status do Hardening H1B (IMPLEMENTADO — AGUARDANDO HOMOLOGAÇÃO)
+
+**Decisão relacionada:** `docs/DECISIONS.md`, PROD-H1B-01.
+
+**Arquitetura implementada (H1B):** normalização relacional progressiva do núcleo canônico — `users`,
+`legalProcesses` (=`store.records.processos`), `legalDeadlines` (=`store.records.legalDeadlines`) e
+`audit` (=`store.audit`) deixam de ser canônicos dentro do documento JSONB `app_store` e passam a viver
+em tabelas próprias (`app_users`, `legal_processes`, `legal_deadlines`, `audit_log` —
+`migrations/004_h1b_core_relational.sql`). A ponte relacional (`storage/index.js`) é TRANSPARENTE para
+`server.js`: `readStore()`/`writeStore()` continuam devolvendo `store.users`/
+`store.records.processos`/`store.records.legalDeadlines`/`store.audit` no mesmo formato de sempre — só a
+origem/destino mudou. Nenhuma das ~24 rotas de mutação de `server.js` precisou ser alterada. Mecanismo:
+a cada leitura, a ponte hidrata essas 4 coleções a partir das tabelas e guarda um baseline; a cada
+escrita, compara o conteúdo atual contra o baseline (diff por `id`) e emite só os INSERT/UPDATE
+necessários, dentro da MESMA transação Postgres que grava o restante do blob (atomicidade real:
+Legal Deadline + evento de auditoria são persistidos juntos ou nenhum dos dois).
+
+**Critérios fechados de fato, com teste real:**
+- FK real `legal_deadlines.process_id → legal_processes(id)` e
+  `legal_deadlines.responsible_user_id → app_users(id)`, ambas `ON DELETE RESTRICT` (nunca cascade
+  destrutivo). Testado: processId/responsibleUserId inexistente é rejeitado tanto na validação de
+  aplicação quanto (segunda linha de defesa) pela FK real, bypassando a aplicação.
+- CHECK constraints reproduzindo os enums fechados de `originType`/`status` — testado bypassando a
+  validação de aplicação diretamente contra o repository.
+- Concorrência otimista POR LINHA (`version` própria em cada tabela, não apenas a `version` global do
+  `app_store`) — testado com duas leituras concorrentes do mesmo Legal Deadline.
+- Transação/rollback: falha simulada na gravação do evento de auditoria impede que o Legal Deadline
+  correspondente seja persistido — nenhum dos dois, nunca estado parcial.
+- `audit_log` append-only — múltiplas mutações no mesmo registro geram múltiplos eventos, nenhum é
+  sobrescrito.
+- `deletedAt` de usuário preservado através da ponte relacional; login continua rejeitando usuário
+  inativo.
+- Agenda, Atenção e Minha Semana continuam funcionando exatamente como antes, agora lendo da tabela
+  relacional em vez do blob.
+- RBAC/`scoped()`/segregação departamental (TI ≠ Jurídico) e "administrador técnico ≠ superusuário de
+  conteúdo" preservados sem alteração de semântica.
+- `npm run migrate:h1b:data`: importação H1A→H1B com `--dry-run` (relatório por coleção: total/válidos/
+  duplicados/órfãos/enum inválido, nunca grava), importação real transacional e idempotente (recusa
+  reimportar sem `--force`; com `--force`, `ON CONFLICT DO NOTHING` nunca duplica), aborta inteiramente
+  (nenhum dado gravado) diante de qualquer inconsistência crítica (órfão, duplicado, enum inválido).
+  Cutover: a importação real remove as 4 chaves do blob e grava o marcador de cutover
+  (`data_migrations`, chave `h1b_core_relational_cutover`) na MESMA transação.
+- `storage.init()`/`healthcheck()` (backend) também exigem a migration `004_h1b_core_relational` e as 4
+  tabelas do núcleo relacional — schema incompatível/ausente falha explicitamente, nunca silenciosamente.
+- **Migration de schema ≠ migração de dados (blocker P1 corrigido antes da homologação):** a migration
+  004 aplicada (schema_migrations) NÃO significa que o cutover de dados já ocorreu — as 4 tabelas podem
+  existir fisicamente, vazias, enquanto o blob ainda tem o dado real. `storage.init()` (a fachada em
+  `storage/index.js`, chamada no boot real) valida ADICIONALMENTE o marcador de cutover e falha
+  explicitamente (fail-closed, mensagem apontando para `npm run migrate:h1b:data`) se ele ainda não
+  existe — nunca ativa a ponte relacional sobre tabelas vazias. Nenhum bootstrap automático de
+  `app_users` acontece nesse meio-tempo (único caminho de população é o cutover real).
+  `GET /api/health` (`schemaReady`) reflete o mesmo estado: um schema fisicamente presente cujo cutover
+  ainda não ocorreu nunca é reportado como pronto. Testado com Postgres real: init() falha sem o
+  marcador; app_users permanece vazio; as 4 coleções continuam no blob; após o cutover, init() passa e
+  healthcheck reporta pronto; falha no meio da transação de cutover reverte tabelas relacionais, blob e
+  marcador juntos (nunca estado parcial).
+
+**O que H1B NÃO fecha (deliberadamente fora desta rodada):**
+- Demais coleções (departments, financials, agenda, projetos, etc.) permanecem no documento JSONB único
+  — só as 4 entidades do núcleo canônico foram normalizadas nesta rodada.
+- `companyId`/`speId`/`scopeType` continuam dormentes (nunca populados por nenhuma rotina real) — as
+  colunas existem e são nuláveis, mas nada os preenche ainda.
+- `email` de `app_users` continua SEM constraint de unicidade — a regra vigente no runtime nunca foi de
+  unicidade rígida (só bloqueia nova solicitação de registro; o seed já tinha dois usuários com o mesmo
+  email) e H1B preserva esse comportamento deliberadamente, sem fechar esse gap silenciosamente. Ver
+  `docs/DECISIONS.md`, PROD-H1B-01.
+- H2–H11 permanecem inalterados (sessão/senha/MFA individual, rate limiting, hardening HTTP, backup/
+  restore de produção, logging, incident response, retenção/legal hold, dependências, OAuth Calendar,
+  deploy).
+
+**Testes:** 29 em `tests/h1b-core-relational.test.js` (mais 1 "pulado explicitamente" sem
+`TEST_DATABASE_URL`) + 11 testes puros de validação de `scripts/migrate-h1b-data.js` em
+`tests/storage.test.js`. Total: 319 testes passam com Postgres real conectado (0 pulados); 280 (277 +
+3 pulados explicitamente) sem Postgres disponível (fallback local). CI (Node 20.x/22.x) roda
+`tests/h1b-core-relational.test.js` contra bancos Postgres isolados criados/derrubados pelo próprio teste
+(evita colidir com os demais arquivos de teste rodando em paralelo no mesmo serviço `postgres:16`).
+
+**Por que "aguardando homologação" e não "concluído":** mesma razão do H1A — implementação testada e
+funcional, mas depende de revisão humana antes de qualquer autorização de uso; e a normalização relacional
+cobre só o núcleo canônico definido nesta rodada, não o restante do modelo de dados.
+
 ## 16. Decisão final atual
 
 **NO-GO PARA PRODUÇÃO** — inalterado por esta rodada de hardening.
 
-Após o H1A: **8 P0 abertos** (credenciais/MFA compartilhados, ausência de rate limiting, ausência de
+Após o H1A/H1B: **8 P0 abertos** (credenciais/MFA compartilhados, ausência de rate limiting, ausência de
 retenção/legal hold, ausência de incident response, backup/restore de produção não validado — H5,
 ausência de infraestrutura de deploy como código), **9 P1 abertos**, **5 P2** — 22 achados abertos, **3
-fechados** (PG-01/PG-02/PG-03, ver seção 17). Na matriz da seção 5, a linha "Persistência" deixa de
+fechados** (PG-01/PG-02/PG-03, ver seções 17/18). Na matriz da seção 5, a linha "Persistência" deixa de
 bloquear; os demais 12 gates bloqueantes permanecem. Nenhum waiver foi emitido. O Sprint 2 permanece
 concluído no escopo homologado (`docs/DECISIONS.md`, D2-CLOSE) — este documento não o reabre nem
 contradiz; apenas formaliza que produção é um gate técnico/de negócio separado, ainda não atendido, e que
-o H1A avançou um dos seus critérios sem declarar o gate inteiro atendido.
+o H1A/H1B avançaram critérios específicos de persistência sem declarar o gate inteiro atendido.

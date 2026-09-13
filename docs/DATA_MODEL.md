@@ -342,9 +342,63 @@ todo este documento, agora guardada como um único documento JSONB (`app_store`,
 `migrations/003_app_store.sql`) em vez de um arquivo `.json` no disco. `readStore()`/`writeStore()`
 mantêm exatamente a mesma assinatura e o mesmo formato de retorno usados por toda a aplicação.
 
-**Isso significa que nenhuma FK relacional real existe entre entidades** — Legal Process → Legal
-Deadline, `responsibleUserId` → `users`, continuam validados exclusivamente em JavaScript
-(`validateLegalDeadline()`, `canBeResponsibleForLegalDeadline()`), exatamente como antes do H1A. Uma
-normalização relacional real (tabela própria por entidade, com FK) é H1B — deliberadamente não iniciada
-nesta rodada, começando por `users`, `legalProcesses`, `legalDeadlines`, `audit`, nesta ordem, quando
-autorizada.
+**Isso significa que nenhuma FK relacional real existia entre entidades no H1A** — Legal Process → Legal
+Deadline, `responsibleUserId` → `users`, eram validados exclusivamente em JavaScript
+(`validateLegalDeadline()`, `canBeResponsibleForLegalDeadline()`). Essa normalização relacional real é
+**H1B** — ver seção abaixo.
+
+## Hardening H1B — normalização relacional do núcleo canônico (docs/PRODUCTION_GATE.md, docs/DECISIONS.md
+PROD-H1B-01)
+
+**Nenhum modelo de dados foi redesenhado.** Os campos, invariantes de negócio (enums de
+`originType`/`status`, `validateLegalDeadline()`, `canBeResponsibleForLegalDeadline()`, herança de
+escopo do processo relacionado) continuam exatamente os mesmos descritos em todo este documento. O que
+muda é ONDE `users`/`legalProcesses` (=`store.records.processos`)/`legalDeadlines`
+(=`store.records.legalDeadlines`)/`audit` (=`store.audit`) são persistidos: tabelas próprias
+(`app_users`, `legal_processes`, `legal_deadlines`, `audit_log` —
+`migrations/004_h1b_core_relational.sql`), não mais dentro do documento JSONB `app_store`. A ponte
+relacional (`storage/index.js`) hidrata essas 4 coleções a partir das tabelas a cada leitura e persiste
+os diffs a cada escrita — `server.js` continua lendo/escrevendo `store.users`/
+`store.records.processos`/`store.records.legalDeadlines`/`store.audit` exatamente como sempre fez.
+
+**FK real, finalmente:**
+- `legal_deadlines.process_id → legal_processes(id)` — um Legal Deadline nunca pode referenciar um
+  processo inexistente (FK `ON DELETE RESTRICT`, além da checagem já existente em
+  `validateLegalDeadline()`).
+- `legal_deadlines.responsible_user_id → app_users(id)` — idem para `responsibleUserId` (opcional,
+  nulável).
+- Nenhum cascade destrutivo: apagar um processo/usuário referenciado por um Legal Deadline é bloqueado
+  pela FK — a única forma de "desativar" continua sendo `deletedAt` (soft-delete), que a FK não impede.
+
+**Tabela `app_users` (não `users`):** nome escolhido para não colidir com a tabela `users` já criada por
+`migrations/001_foundation.sql` (schema incompatível — `department_id` uuid FK, `mfa_enrolled`, `active`
+boolean, `email UNIQUE` — nunca usada pelo runtime, permanece intocada). Pelo mesmo motivo, a tabela de
+auditoria se chama `audit_log`, não `audit_events` (nome já usado por 001, também incompatível/inerte).
+
+**`email` de `app_users` continua SEM `UNIQUE`** — deliberado (ver `docs/DECISIONS.md`, PROD-H1B-01,
+item 7): a regra vigente no runtime nunca foi de unicidade rígida, e o seed atual tem dois usuários
+compartilhando o mesmo email. Registrado como gap preexistente, não fechado por H1B.
+
+**`companyId`/`speId`/`scopeType` continuam dormentes** nas novas tabelas (colunas nuláveis, nada as
+popula ainda) — sem mudança de comportamento de `scoped()`.
+
+**Concorrência por linha:** cada tabela tem sua própria coluna `version` — um Legal Deadline agora detecta
+conflito de concorrência pela SUA PRÓPRIA versão (não apenas pela versão global do `app_store`, como no
+H1A).
+
+**Entidades que permanecem no documento JSONB único (fora do escopo H1B desta rodada):** departments,
+financials, agenda, committees, compliance, registrationRequests, mondayRuns, dashboardPreferences,
+budgetImports, e todas as coleções de projetos/recuperação. Nenhuma normalização adicional foi feita
+nesta rodada — big-bang rewrite explicitamente evitado, conforme decidido.
+
+**Marcador explícito de cutover (`data_migrations`, blocker P1 corrigido em revisão final):**
+`migrations/004_h1b_core_relational.sql` também cria a tabela `data_migrations` (key/completed_at),
+vazia por padrão. Migration de SCHEMA (a própria 004 aplicada, registrada em `schema_migrations`) é
+DIFERENTE de migração de DADOS — as 4 tabelas do núcleo relacional podem existir fisicamente sem que
+users/legalProcesses/legalDeadlines/audit tenham sido de fato extraídos do `app_store` ainda. Só quando
+`scripts/migrate-h1b-data.js` roda com sucesso é que a chave `h1b_core_relational_cutover` é gravada
+nessa tabela — na MESMA transação que popula as 4 tabelas e remove as 4 coleções do blob. `storage.init()`
+(a fachada em `storage/index.js`) exige esse marcador antes de considerar o backend PostgreSQL pronto:
+sem ele, o boot falha explicitamente (fail-closed), com mensagem apontando para
+`npm run migrate:h1b:data` — nunca ativa a ponte relacional sobre tabelas vazias enquanto o blob ainda
+tem o dado real. `GET /api/health` (`schemaReady`) reflete o mesmo estado.
