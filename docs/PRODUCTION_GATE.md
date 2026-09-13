@@ -91,7 +91,7 @@ e um checklist mínimo de LGPD. Não cobre: desenho de novas funcionalidades de 
 | PG-18 | Auditoria | Eventos de auditoria não capturam IP/sessão/user-agent; sem rotação/retenção | Rastreabilidade incompleta para investigação; crescimento não controlado do arquivo | **P2** | NÃO (MVP aceitável) | Adicionar metadados de origem e política de retenção ao evoluir para produção | Auditoria permite reconstruir "quem, quando, de onde, o quê" | H8 |
 | PG-19 | Retenção/Legal Hold | Nenhuma política de retenção/exclusão/legal hold definida para nenhuma entidade | Impossível responder a obrigação legal de retenção ou a um pedido de exclusão (LGPD) | **P0** | SIM | Definir política por tipo de dado (audit, Legal Deadline, documentos, backups) | Política documentada e aplicável tecnicamente (mesmo que manual no início) | H8 |
 | PG-20 | Incident Response | Nenhum processo de resposta a incidente definido | Sem detecção/contenção/comunicação formal em caso de violação | **P0** | SIM | Checklist mínimo de IR (ver seção 8) | Checklist existe, tem responsável nomeado e canal de comunicação definido | H7 |
-| PG-21 | Backup/Restore | Backup/restore só sob demanda via API; sem agendamento, offsite, RPO/RTO ou teste de restore evidenciado | Perda de dado sem recuperação viável em caso de incidente | **P0** | SIM | Backup agendado, offsite, com RPO/RTO definidos e teste de restore documentado | Restore de um backup real é executado e validado ao menos uma vez, com evidência | H5, PG-01 |
+| PG-21 | Backup/Restore | **H5 IMPLEMENTADO PARCIALMENTE (ver seção 22) — PERMANECE ABERTO.** `pg_dump`/`pg_restore` reais do PostgreSQL canônico, RPO=6h/RTO=4h definidos e comprovados por restore real, manifesto com integridade (SHA-256), política de ambiente/confirmação/replace, revogação de estado efêmero pós-restore — tudo implementado e testado (`tests/h5-backup-restore-postgres.test.js`, 18/18). Falta apenas: o adapter de storage offsite real (`s3`) nunca foi exercitado contra um bucket real (só testado com cliente S3 injetado) — nenhuma infraestrutura foi provisionada nesta rodada (fora de escopo de H5, ver H11); agendamento de produção real (cron/scheduler) também é H11 | Perda de dado sem recuperação viável em caso de incidente | **P0** | SIM | Backup agendado, offsite, com RPO/RTO definidos e teste de restore documentado | Restore de um backup real é executado e validado ao menos uma vez, com evidência — **atendido para o mecanismo em si; falta a validação com storage offsite real** | H5 (parcial), H11 |
 | PG-22 | Deploy/Infra | Não existe `fly.toml` nem `Dockerfile` no repositório — nenhuma infraestrutura como código versionada | Deploy depende de processo manual/tácito, não reprodutível | **P0** | SIM | Criar infraestrutura como código (container + config de deploy), healthcheck, variáveis de ambiente documentadas | Deploy reproduzível a partir do repositório, sem passo manual não documentado | H11 |
 | PG-23 | LGPD | Sem política formal de minimização, finalidade, retenção, descarte e direitos do titular | Exposição legal/regulatória em produção | **P1** | SIM | Checklist mínimo de LGPD (seção 9) formalizado com o time jurídico | Checklist preenchido e aprovado pelo responsável de negócio/jurídico | — |
 | PG-24 | LGPD | Monday.com e (futuramente) Google Calendar são suboperadores/subprocessadores sem lista/DPA documentado | Ausência de rastreabilidade de para onde dados pessoais trafegam | **P1** | SIM | Documentar suboperadores e base legal de transferência | Lista de suboperadores mantida em `docs/SECURITY.md`/`docs/INTEGRATIONS.md` | — |
@@ -135,6 +135,17 @@ e um checklist mínimo de LGPD. Não cobre: desenho de novas funcionalidades de 
   (nenhuma migração desse tipo ocorreu nesta rodada).
 - **Fechados = 13** — PG-01 a PG-13.
 
+**Após o Hardening H5 (ver seção 22) — nenhum fechamento de contagem:**
+
+- **P0 aberto = 4** — inalterado (PG-19, PG-20, PG-21, PG-22). PG-21 permanece aberto DELIBERADAMENTE:
+  o mecanismo de backup/restore production-grade do PostgreSQL está implementado e testado com
+  evidência real (`pg_dump`/`pg_restore` reais, RPO/RTO definidos e comprovados), mas o storage offsite
+  real (`s3`) nunca foi exercitado contra um bucket real (sem infraestrutura provisionada nesta rodada —
+  item 53 do escopo H5 proibiu criar bucket real). Fechar PG-21 sem essa evidência seria fechar por
+  intenção, não por comprovação — nunca feito neste projeto (mesma disciplina de todo H1A-H4).
+- **P1/P2 inalterados** — H5 não altera nenhum outro achado.
+- **Fechados = 13** — inalterado (PG-01 a PG-13).
+
 PG-01/PG-02 são exibidos como dois achados por clareza de causa raiz (persistência sem transação e sem
 lock são sintomas distintos do mesmo problema), mas compartilham a mesma correção (H1) — contados
 separadamente na tabela e nesta soma, não duplicados fora dela. PG-24 foi reclassificado de P2 para P1
@@ -154,8 +165,8 @@ própria classificação declarada.
 | Headers HTTP | **FECHADO por H4** — CSP/HSTS(produção)/X-Frame-Options/frame-ancestors/Referrer-Policy/Permissions-Policy/nosniff presentes; CORS same-origin por padrão com allowlist explícita (ver seção 21) | NÃO (fechado) | ~~CSP/HSTS/X-Frame-Options/Referrer-Policy/Permissions-Policy presentes~~ atendido |
 | CSRF | Mitigado estruturalmente (Bearer, sem cookie) — **PG-14 permanece não fechado por H4**, deliberadamente | NÃO (hoje) | Reavaliar se o modelo de sessão mudar |
 | Secrets | Server-side only, sem vazamento identificado | NÃO | Manter prática atual + revisão contínua |
-| Backup | Sob demanda, sem agendamento/offsite/RPO/RTO | SIM | Backup agendado + offsite + RPO/RTO definidos |
-| Restore | Endpoint existe, sem teste de restore evidenciado | SIM | Restore testado e documentado ao menos uma vez |
+| Backup | **H5 (parcial, ver seção 22)** — `pg_dump` real, RPO=6h definido, manifesto/integridade/criptografia opcional implementados; falta storage offsite real exercitado (só `s3` testado com cliente injetado) | SIM (até offsite real ser validado) | Backup agendado + offsite real + RPO/RTO definidos |
+| Restore | **H5 (parcial)** — `pg_restore` real testado ponta a ponta com evidência (seção 22/`BACKUP_RESTORE_RUNBOOK.md`), RTO=4h comprovado; falta restaurar a partir de um backup que tenha passado por storage offsite real | SIM (até offsite real ser validado) | Restore testado e documentado ao menos uma vez — mecanismo atendido, falta o offsite real |
 | Logging/Monitoramento | Mínimo, sem estrutura/alerta | SIM | Logging estruturado + alerta básico de erro/disponibilidade |
 | Auditoria | Existe, sem IP/sessão/retenção | NÃO (MVP aceitável) | Evoluir metadados/retenção antes de escala maior |
 | Incident Response | Inexistente | SIM | Checklist mínimo formalizado com responsável nomeado |
@@ -776,20 +787,170 @@ CORS nunca dependem do backend de persistência.
 **Por que "aguardando homologação" e não "concluído":** mesma razão do H1A/H1B/H2/H3 — implementação
 testada e funcional, mas depende de revisão humana antes de qualquer autorização de uso.
 
+## 22. Status do Hardening H5 (IMPLEMENTADO PARCIALMENTE — PG-21 PERMANECE ABERTO)
+
+**Decisão relacionada:** `docs/DECISIONS.md`, PROD-H5-01. **Runbook operacional:**
+`docs/BACKUP_RESTORE_RUNBOOK.md`.
+
+**Não fecha PG-21** — ver justificativa detalhada abaixo. **Não fecha** nenhum outro achado (PG-19,
+PG-20, PG-22 permanecem exatamente como estavam).
+
+### Matriz H5 — Backup/Restore (auditoria pré-implementação)
+
+| Componente | Estado atual (antes de H5) | Risco | Controle implementado | Evidência/teste |
+|---|---|---|---|---|
+| Backup do PostgreSQL canônico | Só `POST /api/backup` — snapshot cifrado do documento JSON, sob demanda, nunca do PostgreSQL em si | Perda de dado sem backup real do banco canônico | `scripts/backup-postgres.js` — `pg_dump -Fc` real, automatizável (`npm run backup:postgres`), nunca depende só de HTTP | `tests/h5-backup-restore-postgres.test.js` (`[H5-real-A/B]`) |
+| Formato/integridade do artefato | Nenhum backup real do Postgres existia para avaliar | Artefato corrompido/parcial aceito como válido | Custom format + smoke validation (`pg_restore --list`) + SHA-256 calculado e conferido no restore | `[H5-real-A]`, `[H5-real-G]` |
+| Armazenamento offsite | Nenhum — `COEVO_BACKUP_KEY`/snapshot ficam onde o processo grava | Um incidente que destrua o filesystem também destrói o backup | Abstração de storage adapter (`backup/storage-adapter.js`) — `filesystem` só fora de produção, `s3` obrigatório em produção (fail-fast) | `[H5-factory-A/B]`; **s3 nunca exercitado contra bucket real (ver limitações)** |
+| RPO/RTO | Nenhum definido | Sem meta objetiva de perda de dado/tempo de recuperação | RPO=6h, RTO=4h definidos e comprovados por restore real (`docs/BACKUP_RESTORE_RUNBOOK.md`, seções 2/10) | `[H5-real-F]`, `[H5-real-R]` |
+| Restore | Bloqueado para PostgreSQL (`501 RESTORE_NOT_SUPPORTED_FOR_POSTGRES`) desde H1A | Nenhum caminho de disaster recovery validado | `scripts/restore-postgres.js` — `pg_restore` real, validado ponta a ponta | `[H5-real-C]` |
+| Cross-environment restore | N/A (restore nem existia) | Restaurar staging/dev sobre produção por engano | Bloqueado por padrão; override explícito `RESTORE_ALLOW_CROSS_ENVIRONMENT=I_ACCEPT_THE_RISK` | `[H5-real-H/I]` |
+| Restore em produção | N/A | Restore acidental sobre produção | Exige `RESTORE_CONFIRM_PRODUCTION=YES_I_UNDERSTAND` (string longa, nunca booleano trivial) | `[H5-real-J]` |
+| Sobrescrita de banco já populado | N/A | Restore apaga dado mais recente silenciosamente | Exige `RESTORE_REPLACE=YES_REPLACE_TARGET_DATA` explícito | `[H5-real-K/L]` |
+| Dados efêmeros pós-restore | N/A | Sessões/rate-limit de antes do incidente ressuscitadas cegamente | Política de revogação: `auth_sessions`/`auth_challenges`/`password_reset_tokens`/`rate_limit_buckets` truncadas após restore | `[H5-real-D]` |
+| Evidência operacional | Nenhuma | Sem forma de saber se o último backup funcionou | Tabelas `backup_runs`/`restore_runs` (migration 008) — nunca segredo, sempre consultável | `[H5-real-B/E]` |
+| Segredos em log de erro | `pg_dump`/`pg_restore` podem incluir a connection string na mensagem de erro | Vazamento de credencial em log | `backup/sanitize.js` — redação de `postgres://...`/`password=...` antes de logar/persistir | `[H5-sanitize-A]` |
+| Criptografia do artefato | Nenhuma (Postgres não tinha backup próprio) | Artefato legível por qualquer um com acesso ao storage | `BACKUP_ENCRYPTION_KEY` opcional, AES-256-GCM, `encryptionKeyId` lógico no manifesto (nunca a chave) | `[H5-crypto-A/B/C/D]` |
+
+### O que foi implementado
+
+- **Backup real do PostgreSQL** via `pg_dump -Fc` (`scripts/backup-postgres.js`), nunca do snapshot JSON.
+  Automatizável (`npm run backup:postgres`) — não depende de uma requisição HTTP feita por um usuário.
+- **Manifesto** (`backup/manifest.js`) com `backupId`, timestamps, ambiente, versão do PostgreSQL, versão
+  de migration aplicada, commit da aplicação, formato, criptografia (com `encryptionKeyId` lógico, nunca
+  a chave), SHA-256, tamanho e referência ao objeto no storage — validado tanto na criação quanto no
+  restore (nunca confia cegamente em metadata vinda de fora).
+- **Storage adapter abstrato** (`backup/storage-adapter.js`) com dois providers: `filesystem` (stand-in
+  explícito de desenvolvimento/teste, recusado em produção) e `s3` (S3-compatible via
+  `@aws-sdk/client-s3`, único aceito em produção). Nenhum bucket real foi criado (item 53 do escopo H5).
+- **Criptografia opcional** do artefato (AES-256-GCM, `BACKUP_ENCRYPTION_KEY`, independente de
+  `COEVO_BACKUP_KEY`), com identificador lógico de chave preparando rotação futura sem invalidar backups
+  antigos.
+- **RPO=6h/RTO=4h**, definidos com justificativa e comprovados por execução real (ver
+  `docs/BACKUP_RESTORE_RUNBOOK.md`).
+- **Restore real** (`scripts/restore-postgres.js`) via `pg_restore`, nunca assume um banco "atual"
+  implicitamente (`DATABASE_URL_TARGET` sempre explícita), com todas as guardas do escopo H5: integridade
+  (tamanho + SHA-256, antes de qualquer ação no banco), validação de formato (`pg_restore --list`),
+  bloqueio de cross-environment restore por padrão (override explícito e auditável), confirmação forte
+  obrigatória para produção, bloqueio de sobrescrita silenciosa de banco já populado (`RESTORE_REPLACE`
+  explícito), e revogação de dados efêmeros pós-restore (`auth_sessions`/`auth_challenges`/
+  `password_reset_tokens`/`rate_limit_buckets` — nunca restaurados cegamente, ver
+  `docs/DECISIONS.md`).
+- **Evidência operacional durável**: `backup_runs`/`restore_runs` (migration 008), nunca um arquivo local
+  paralelo — mesmo padrão arquitetural de `rate_limit_buckets` (H3).
+- **Endpoints legados preservados**: `POST /api/backup`/`POST /api/backup/restore` continuam existindo
+  (snapshot JSON administrativo), agora com comentários explícitos de que H5 é o mecanismo canônico —
+  nunca duas implementações concorrentes fingindo a mesma garantia.
+
+### Correção técnica pós-implementação (revisão técnica independente)
+
+Uma revisão técnica independente do H5 original identificou 6 P1 corrigidos nesta mesma rodada, antes de
+qualquer homologação:
+
+1. **Credencial do PostgreSQL nunca em argv.** `pg_dump`/`pg_restore` recebiam `DATABASE_URL`/
+   `DATABASE_URL_TARGET` completas (usuário:senha incluídos) como argumento de linha de comando —
+   qualquer processo capaz de listar processos do sistema (`ps aux`, `/proc/<pid>/cmdline`) conseguiria
+   ler a senha. Corrigido: `backup/pg-connection.js` parseia a connection string uma única vez; apenas
+   host/porta/usuário/banco (não-segredo) viram argv, a senha vai exclusivamente via `PGPASSWORD` no
+   `env` do processo filho (nunca em `process.env` global). Testado com senha contendo caracteres
+   especiais (`@`, `:`, `/`, `%`) em backup/restore reais (`[H5-real-W]`).
+2. **`BACKUP_ENCRYPTION_KEY` passou a ser OBRIGATÓRIA em produção.** Até existir validação real de
+   SSE/KMS do provider de storage, um backup de produção sem criptografia application-side seria um
+   artefato em texto claro — `scripts/backup-postgres.js` agora falha explicitamente (fail-fast) se
+   `APP_ENVIRONMENT=production` e a chave estiver ausente/curta. Fora de produção continua opcional.
+3. **`BACKUP_ENDPOINT` só aceita `https:` em produção.** Um storage S3-compatible customizado com
+   endpoint `http:` em produção exporia as credenciais de acesso em texto claro — recusado
+   explicitamente; fora de produção, endpoint HTTP local (MinIO/testes) continua permitido.
+4. **Criptografia e upload/download S3 passaram a usar streaming REAL.** `backup/crypto.js` usava
+   `fs.readFileSync()`/`fs.writeFileSync()` apesar do comentário original dizer "streaming" — corrigido
+   para `createReadStream`/`createWriteStream` reais (formato de arquivo cifrado versionado: `versão(1)
+   || iv(12) || ciphertext || tag(16)`, tag no final para permitir streaming de fato). O adapter `s3`
+   usava `fs.readFileSync()` no upload e acumulava toda a resposta em um array de chunks no download —
+   corrigido para `createReadStream`+`ContentLength` explícito (via `fs.statSync`, nunca lendo o
+   arquivo) no upload, e `pipeline()` direto para o arquivo de destino no download.
+5. **Nome real do banco no manifesto.** O manifesto registrava `database: 'postgres'` fixo — corrigido
+   para `current_database()`, o nome real do banco de origem.
+6. **RTO redigido como META (target), não como prova em escala.** O tempo de restore observado
+   (< 1s) é do dataset SINTÉTICO de teste, não de um volume representativo de produção — a documentação
+   (`docs/BACKUP_RESTORE_RUNBOOK.md`) e este documento passam a deixar isso explícito, e isso se torna
+   mais um motivo (além do storage offsite real) para manter PG-21 aberto.
+
+### Por que PG-21 permanece ABERTO (não fechado por intenção)
+
+O escopo H5 (item 52) é explícito: "se offsite real não puder ser exercitado no CI por falta de
+credencial... PG-21 só deve ser fechado se a arquitetura e configuração production-grade estiverem
+completas E houver evidência suficiente do restore real" — caso contrário, registrar
+"H5 IMPLEMENTADO PARCIALMENTE / PG-21 AINDA ABERTO" em vez de fechar falsamente. É exatamente o cenário
+aqui: a arquitetura está completa e o restore real foi comprovado (ver seção acima e
+`docs/BACKUP_RESTORE_RUNBOOK.md`, seção 10), mas o adapter `s3` — o único aceito em produção — nunca foi
+exercitado contra um bucket real (testado apenas com um cliente S3 injetado,
+`tests/h5-backup-restore.test.js`), porque nenhuma infraestrutura foi provisionada nesta rodada (item 53
+do escopo H5 proibiu explicitamente criar bucket real/gerar custo). Sem essa validação, declarar PG-21
+fechado seria declarar por intenção, não por comprovação. **Adicionalmente**: o RTO de 4h é uma meta
+comprovada apenas com um dataset sintético pequeno, ainda não validada em volume representativo de
+produção (ver correção 6 acima) — mais um motivo concreto para o gate permanecer aberto.
+
+**Limitações registradas (ver também `docs/BACKUP_RESTORE_RUNBOOK.md`, seção 18):** adapter `s3` não
+exercitado contra storage real; sem multipart upload; sem exclusão automática de backups expirados; sem
+Object Lock/immutability configurado; sem agendamento de produção real (cron/scheduler — isso é H11);
+RTO ainda não validado em volume representativo de produção.
+
+### Terceira correção técnica pós-implementação: evidência operacional fail-closed
+
+Uma revisão técnica adicional identificou que `backup_runs`/`restore_runs` podiam ser perdidos
+silenciosamente (tracking fail-open) — um backup/restore de produção podia ser tratado como bem-sucedido
+sem nenhuma linha de evidência durável. Corrigido (ver `docs/DECISIONS.md`, PROD-H5-01, segunda
+correção, para o detalhamento completo):
+
+- Backup em produção é **fail-closed** se `backup_runs` não puder nem ser iniciada — aborta ANTES do
+  `pg_dump`.
+- Dois erros dedicados (`backup/errors.js`) distinguem resultado da OPERAÇÃO de resultado da EVIDÊNCIA:
+  `BackupTrackingError` (artefato já válido no storage, só o registro `completed` falhou — artefato
+  nunca apagado) e `RestoreEvidenceError` (`pg_restore` já executado, só `insertRestoreRun()` falhou —
+  `executionResult: 'success'|'failed'` explícito, nunca sugere reexecução).
+- CLI usa exit code **2** para esses dois cenários (distinto do exit code 1 de falha real) — um
+  scheduler externo nunca deve tratar "sucesso com evidência pendente" como "tente de novo".
+- Falha de evidência sobre falha original nunca é escondida (ambas preservadas na mesma mensagem).
+- Testado com PostgreSQL real: fail-closed em produção via banco sem migration 008; `BackupTrackingError`
+  real via role com privilégio `INSERT`-only em `backup_runs`; `RestoreEvidenceError` via injeção de
+  `runsRepositoryOverride` (mesmo padrão de injeção já usado para `s3Client`/`tempDir`).
+- Não expande H6 — nenhum alerta/observabilidade implementado, apenas integridade do requisito já
+  existente de evidência operacional durável.
+
+### Testes
+
+**485/485 passando** com Postgres real (478 anteriores + 7 novos em
+`tests/h5-backup-restore-postgres.test.js` — `[H5-real-X/Y/Z/AA/AB/AC/AD]`: fail-closed de produção sem
+`backup_runs`, tolerância explícita fora de produção, `BackupTrackingError` real via privilégio
+restrito, `RestoreEvidenceError` para sucesso/falha via injeção de dependência, ausência de evidência
+inventada quando nenhum banco é tocado, e verificação estática de que nenhum `catch(() => {})` de código
+permanece sem justificativa), 0 falhando, nenhum teste removido. Sem `TEST_DATABASE_URL`: 358 passam +
+7 pulados (inalterado — os novos testes são todos gated por Postgres real). `npm audit`: inalterado (2
+vulnerabilidades altas conhecidas — H9).
+
+**Por que "implementado parcialmente" e não "aguardando homologação" como H1A-H4:** as rodadas
+anteriores completavam integralmente o critério de fechamento do(s) PG correspondente(s); H5 tem uma
+dependência externa (storage offsite real) que este projeto não está autorizado a provisionar nesta
+rodada — a diferença é registrada explicitamente, nunca escondida atrás de uma "homologação pendente"
+que sugeriria que só falta revisão humana.
+
 ## 16. Decisão final atual
 
 **NO-GO PARA PRODUÇÃO** — inalterado por esta rodada de hardening.
 
-Após o H1A/H1B/H2/H3/H4: **4 P0 abertos** (ausência de retenção/legal hold — H8, ausência de incident
-response — H7, backup/restore de produção não validado — H5, ausência de infraestrutura de deploy como
-código — H11), **4 P1 abertos**, **4 P2 abertos** — 12 achados abertos, **13 fechados** (PG-01 a PG-13,
-ver seções 17/18/19/20/21). Na matriz da seção 5, as linhas "Persistência", "Sessões", "Autenticação
-(credenciais)", "Rate limiting" e "Headers HTTP" deixam de bloquear; os demais 7 gates bloqueantes
-(Backup, Restore, Logging/Monitoramento, Incident Response, Retenção/Legal Hold, Dependências, Deploy/
-Infra) permanecem, mais o LGPD (P1, não bloqueante técnico mas pendente de decisão de negócio/jurídico).
+Após o H1A/H1B/H2/H3/H4/H5(parcial): **4 P0 abertos** (ausência de retenção/legal hold — H8, ausência de
+incident response — H7, backup/restore de produção com offsite real ainda não validado — H5/PG-21,
+ausência de infraestrutura de deploy como código — H11), **4 P1 abertos**, **4 P2 abertos** — 12 achados
+abertos, **13 fechados** (PG-01 a PG-13, ver seções 17/18/19/20/21). Na matriz da seção 5, as linhas
+"Persistência", "Sessões", "Autenticação (credenciais)", "Rate limiting" e "Headers HTTP" deixam de
+bloquear; "Backup"/"Restore" avançaram substancialmente (mecanismo real, RPO/RTO comprovados) mas
+continuam bloqueando até o storage offsite real ser exercitado; os demais 5 gates bloqueantes
+(Logging/Monitoramento, Incident Response, Retenção/Legal Hold, Dependências, Deploy/Infra) permanecem
+inalterados, mais o LGPD (P1, não bloqueante técnico mas pendente de decisão de negócio/jurídico).
 Nenhum waiver foi emitido.
 O Sprint 2 permanece concluído no escopo homologado (`docs/DECISIONS.md`, D2-CLOSE) — este documento não
 o reabre nem contradiz; apenas formaliza que produção é um gate técnico/de negócio separado, ainda não
 atendido, e que
 o H1A/H1B/H2/H3/H4 avançaram critérios específicos de persistência/sessão/autenticação/rate limiting/
-headers HTTP sem declarar o gate inteiro atendido.
+headers HTTP sem declarar o gate inteiro atendido, e H5 avançou substancialmente o mecanismo de
+backup/restore sem ainda fechar PG-21 (pendência específica e documentada: storage offsite real).

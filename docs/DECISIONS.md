@@ -1367,6 +1367,157 @@ homologadas — apenas registra o avanço específico do H4 dentro do gate de pr
 
 ---
 
+## 1.10. Hardening H5 — Decisão PROD-H5-01
+
+### PROD-H5-01 — Backup/Restore production-grade do PostgreSQL canônico
+
+**Status: IMPLEMENTADO PARCIALMENTE / PG-21 PERMANECE ABERTO** (ver `docs/PRODUCTION_GATE.md`, seção 22,
+para o detalhamento técnico completo; ver `docs/BACKUP_RESTORE_RUNBOOK.md` para o runbook operacional).
+
+**Conteúdo da decisão:**
+
+1. **Backup real do PostgreSQL canônico**, nunca do snapshot JSON legado. `scripts/backup-postgres.js`
+   executa `pg_dump -Fc` (custom format — permite `pg_restore` seletivo, é o formato binário padrão
+   recomendado pelo próprio PostgreSQL) contra `DATABASE_URL`, automatizável via
+   `npm run backup:postgres` — nunca depende apenas de uma requisição HTTP feita por um usuário.
+2. **Smoke validation obrigatória**: um `pg_dump` que termina sem lançar não é considerado suficiente —
+   `pg_restore --list` confirma que o artefato é um archive válido e listável antes de qualquer upload.
+   Tamanho zero é sempre rejeitado.
+3. **Manifesto** (`backup/manifest.js`) com `backupId`, timestamps, ambiente de origem, versão do
+   PostgreSQL, versão de migration aplicada, commit da aplicação, formato, criptografia (com
+   `encryptionKeyId` lógico — nunca a chave), SHA-256 e tamanho do artefato final, e referência ao
+   objeto no storage. Validado tanto na criação quanto no restore — nunca confia cegamente em metadata
+   vinda de fora.
+4. **Storage adapter abstrato** (`backup/storage-adapter.js`), dois providers: `filesystem` (stand-in
+   explícito de desenvolvimento/teste — `/data`, `/tmp` ou qualquer disco da mesma VM/processo nunca são
+   "offsite") e `s3` (S3-compatible via `@aws-sdk/client-s3` — AWS S3 real ou qualquer alternativa via
+   `BACKUP_ENDPOINT`, único provider aceito em produção). Em produção, `filesystem` é recusado
+   explicitamente (fail-fast) — backup local-only nunca é production-grade.
+5. **Nenhum bucket real foi criado nesta rodada** — proibido explicitamente pelo escopo H5 (não
+   provisionar infraestrutura, não gerar custo). O adapter `s3` foi implementado e testado com um
+   cliente S3 injetado (`tests/h5-backup-restore.test.js`), cobrindo a lógica de upload/download/
+   existência de objeto, mas nunca exercitado contra um bucket real com credenciais reais.
+6. **Criptografia application-side OPCIONAL** do artefato (AES-256-GCM, `BACKUP_ENCRYPTION_KEY`,
+   independente de `COEVO_BACKUP_KEY` — que cifra só o snapshot JSON legado, para não acoplar a rotação
+   de uma chave à da outra). O manifesto registra `encrypted`/`encryptionKeyId` (identificador lógico,
+   não-reversível, nunca a chave em si) — preparando rotação futura sem tornar backups antigos
+   irrecuperáveis, desde que a chave antiga usada para gerá-los continue disponível ao operador.
+7. **RPO = 6 horas.** Justificativa: o Jurídico opera com prazos processuais (`legal_deadlines`) com
+   consequência legal direta — um RPO de 24h (sugestão inicial do escopo) arriscaria perder atualizações
+   do mesmo dia de um incidente; 6h é tecnicamente executável via `npm run backup:postgres` agendado
+   4x/dia (o agendamento de produção em si é H11).
+8. **RTO = 4 horas.** Baseado no tempo observado no teste de restore real (tipicamente < 1 segundo para
+   o volume de dados atual) — 4h dá margem generosa para localização do backup, provisionamento do banco
+   de destino, coordenação da decisão de qual ambiente restaurar e validação manual. Nunca uma meta
+   puramente aspiracional — comprovada por execução real (`tests/h5-backup-restore-postgres.test.js`).
+9. **Restore real** (`scripts/restore-postgres.js`) via `pg_restore`, nunca assume um banco "atual"
+   implicitamente — `DATABASE_URL_TARGET` sempre explícita. Guardas, todas fail-closed:
+   - **Integridade primeiro**: tamanho e SHA-256 do artefato baixado são conferidos contra o manifesto
+     ANTES de qualquer ação no banco; mismatch bloqueia incondicionalmente.
+   - **Cross-environment restore bloqueado por padrão**: só um backup do MESMO ambiente do alvo pode ser
+     restaurado; qualquer divergência (ex.: staging/development sobre production) exige
+     `RESTORE_ALLOW_CROSS_ENVIRONMENT=I_ACCEPT_THE_RISK` explícito — um override raro e auditável, nunca
+     o comportamento padrão.
+   - **Confirmação forte obrigatória para produção**: `RESTORE_CONFIRM_PRODUCTION=YES_I_UNDERSTAND` —
+     string longa e intencional, nunca um booleano trivial (`true`).
+   - **Nunca sobrescreve silenciosamente**: um banco de destino já populado exige
+     `RESTORE_REPLACE=YES_REPLACE_TARGET_DATA` explícito.
+   - **Formato validado** (`pg_restore --list`) antes de qualquer restauração real.
+10. **Política pós-restore: dados efêmeros são REVOGADOS, nunca restaurados cegamente.** Após um
+    `pg_restore` bem-sucedido, `auth_sessions`/`auth_challenges`/`password_reset_tokens`/
+    `rate_limit_buckets` são truncadas no banco de destino — sempre. Nenhuma delas é dado de negócio; a
+    causa raiz de um disaster recovery pode ter sido justamente um incidente de segurança, e reautenticar
+    todos os usuários é mais seguro do que ressuscitar estado de segurança potencialmente comprometido.
+11. **Evidência operacional durável**: tabelas `backup_runs`/`restore_runs`
+    (`migrations/008_h5_backup_restore_runs.sql`) — mesmo padrão arquitetural de `rate_limit_buckets`
+    (H3): estado operacional em uma tabela Postgres própria, nunca um arquivo local paralelo. Nunca
+    contêm segredo — só metadata. `restore_runs` é gravada no banco de DESTINO (a evidência viaja com o
+    ambiente restaurado), nunca na origem.
+12. **Segredos nunca logados**: `backup/sanitize.js` redige qualquer connection string/`password=...`
+    de mensagens de erro antes de logar/persistir — `pg_dump`/`pg_restore` podem incluir a própria
+    connection string na mensagem de erro de conexão.
+13. **Endpoints legados preservados, não substituídos**: `POST /api/backup`/`POST /api/backup/restore`
+    continuam existindo (snapshot JSON administrativo, útil no fallback local) — nunca fingem substituir
+    o mecanismo canônico de H5; comentários no código apontam explicitamente para
+    `docs/BACKUP_RESTORE_RUNBOOK.md`.
+14. **Nova dependência**: `@aws-sdk/client-s3` (SDK oficial, modular — só o cliente S3, nunca o pacote
+    monolítico v2) para o adapter `s3`, em vez de reimplementar a assinatura SigV4 manualmente — mesma
+    disciplina de não reinventar primitivas que uma biblioteca madura resolve com mais segurança.
+15. **Retenção operacional de backups documentada** (não implementada como rotina de exclusão
+    automática nesta rodada): 6h→7 dias, diário→30 dias, mensal→12 meses — sujeita a revisão quando H8
+    (retenção/legal hold formal) definir regras jurídicas adicionais. Excluir automaticamente hoje, sem
+    essa camada, arriscaria remover um backup que uma obrigação legal futura exigiria preservar.
+16. **PG-21 permanece explicitamente ABERTO por esta decisão** — a arquitetura e o mecanismo de
+    backup/restore estão completos e testados com evidência real (18 testes de ponta a ponta,
+    `pg_dump`/`pg_restore` reais, nunca mock), mas o storage offsite real (`s3`) nunca foi exercitado
+    contra um bucket real — sem essa validação, fechar PG-21 seria fechar por intenção, não por
+    comprovação. Registrado como "H5 IMPLEMENTADO PARCIALMENTE", nunca como concluído.
+17. **Esta decisão não fecha o Gate de Produção** — nenhum outro achado (PG-19/PG-20/PG-22) é alterado.
+    O gate como um todo permanece **NO-GO PARA PRODUÇÃO**. H6-H11 não foram alterados por esta decisão.
+
+**Correção técnica pós-implementação (mesma decisão PROD-H5-01) — revisão técnica independente, 6 P1
+corrigidos.** PG-21 continua ABERTO após esta correção.
+
+1. **Credencial do PostgreSQL nunca em argv.** `pg_dump`/`pg_restore` recebiam a connection string
+   COMPLETA (usuário:senha incluídos) como argumento de processo — visível a qualquer inspetor de
+   processos do sistema (`ps`/`/proc`). Corrigido: `backup/pg-connection.js` parseia a URL uma única vez
+   e devolve argv sem segredo (host/porta/usuário/banco) mais um `env` específico carregando a senha via
+   `PGPASSWORD` (nunca `process.env` global). Testado com senha contendo `@`/`:`/`/`/`%` em backup/
+   restore reais.
+2. **`BACKUP_ENCRYPTION_KEY` passou a ser OBRIGATÓRIA em produção.** Até existir validação real de
+   SSE/KMS do provider de storage, um backup de produção sem criptografia application-side seria texto
+   claro — nunca aceito. Fora de produção, continua opcional.
+3. **`BACKUP_ENDPOINT` só aceita `https:` em produção** — um endpoint S3-compatible customizado em
+   `http:` exporia credenciais de acesso ao storage em texto claro; fora de produção, HTTP local
+   (MinIO/testes) continua permitido.
+4. **Criptografia e S3 passaram a usar streaming REAL**, corrigindo uma inconsistência (o código dizia
+   "streaming" mas usava `readFileSync`/`writeFileSync`). Formato do arquivo cifrado versionado:
+   `versão(1) || iv(12) || ciphertext || tag(16)` (tag no final, permitindo processar em streaming).
+5. **Manifesto passou a registrar o nome REAL do banco** (`current_database()`), não mais o valor fixo
+   `"postgres"`.
+6. **RTO redigido como META (target), não prova em escala** — o tempo observado é do dataset sintético
+   de teste, não de um volume representativo de produção; mais um motivo para PG-21 permanecer aberto.
+
+Nenhuma dessas correções altera H1-H4, autenticação, MFA, sessões, rate limiting, CORS/CSP, Monday,
+Calendar. `docs/MASTER_HANDOFF.md` permanece intocado.
+
+**Segunda correção técnica pós-implementação (mesma decisão PROD-H5-01) — evidência operacional
+fail-closed.** Uma revisão técnica adicional identificou que o rastreamento operacional
+(`backup_runs`/`restore_runs`) podia falhar silenciosamente sem impedir que um backup/restore fosse
+tratado como bem-sucedido — inaceitável para production-grade. Corrigido:
+
+1. **Backup em produção é fail-closed se `backup_runs` não puder ser iniciada** — aborta ANTES do
+   `pg_dump` rodar. Fora de produção, permanece tolerante, mas de forma explícita e documentada.
+2. **`backup/errors.js`** introduz dois erros dedicados que distinguem resultado da OPERAÇÃO de
+   resultado do REGISTRO DE EVIDÊNCIA: `BackupTrackingError` (`BACKUP_COMPLETED_BUT_TRACKING_FAILED`) —
+   lançado quando o artefato já foi enviado ao storage com sucesso mas `markBackupRunCompleted()`
+   falhou; o artefato nunca é apagado, o manifesto vai anexado ao erro para reconciliação manual.
+   `RestoreEvidenceError` (`RESTORE_COMPLETED_BUT_EVIDENCE_NOT_RECORDED`) — lançado quando `pg_restore`
+   já foi executado (com sucesso ou falha) mas `insertRestoreRun()` falhou; carrega
+   `executionResult: 'success'|'failed'` e o relatório/erro original, e a mensagem é explícita: nunca
+   reexecutar o restore a partir desse sinal.
+3. **CLI usa exit code distinto (2)** para esses dois cenários — diferente do exit code 1 de uma falha
+   real — para que um scheduler externo nunca trate "operação teve sucesso, evidência não registrada"
+   como "tente de novo".
+4. **Falha de evidência sobre falha de evidência nunca é escondida**: se o restore falha E a gravação
+   dessa falha em `restore_runs` também falha, ambos os erros (original + de evidência) são preservados
+   na mesma mensagem.
+5. **Nenhuma tentativa de evidência é feita quando nenhum banco de destino foi tocado** (falha antes de
+   qualquer conexão com o alvo) — nunca se inventa uma evidência que não existe.
+6. Testado com PostgreSQL real (nunca mock): fail-closed de produção via banco sem migration 008;
+   `BackupTrackingError` real via role com privilégio `INSERT`-only em `backup_runs` (tabela pré-existente,
+   dona é o superusuário de migração — restrição de privilégio genuína); `RestoreEvidenceError` via
+   injeção de `runsRepositoryOverride` (documentado por que `restore_runs`, recriada pelo próprio
+   `pg_restore` com `--no-owner`, não permite a mesma restrição de privilégio real que `backup_runs`).
+
+Não expande H6 (nenhum alerta/observabilidade implementado) — apenas garante a integridade do requisito
+já existente de H5 (evidência operacional durável). PG-21 continua aberto.
+
+Esta decisão não altera D1/D4/D2-CLOSE/PROD-GATE-01/PROD-H1-01/PROD-H1B-01/PROD-H2-01/PROD-H3-01/
+PROD-H4-01 já homologadas — apenas registra o avanço parcial do H5 dentro do gate de produção já aberto.
+
+---
+
 ## 2. ADRs de Engenharia — Fase 0 (Sprint 1)
 
 Decisões técnicas locais e reversíveis, permitidas pela v1.3 (§27, linhas D8/D9: "Não bloqueia decisão

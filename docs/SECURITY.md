@@ -493,3 +493,44 @@ rejeita por inteiro — fail-closed, nunca trunca silenciosamente — qualquer e
 ou esquema diferente de `http:`/`https:`. Em produção, uma entrada malformada em `CORS_ALLOWED_ORIGINS`
 interrompe o boot explicitamente (`validateAuthRuntimeConfig()`); fora de produção é apenas descartada.
 Não altera PG-12/PG-13/PG-14, não reabre H3, não expande o escopo de H4.
+
+**H5 (Backup/Restore production-grade do PostgreSQL) implementado PARCIALMENTE — PG-21 permanece
+aberto** (`docs/DECISIONS.md`, PROD-H5-01; `docs/PRODUCTION_GATE.md`, seção 22;
+`docs/BACKUP_RESTORE_RUNBOOK.md`): backup real via `pg_dump -Fc` (`scripts/backup-postgres.js`,
+`npm run backup:postgres`), nunca dependente apenas do endpoint HTTP legado; manifesto com integridade
+(SHA-256), ambiente de origem, versão do PostgreSQL/migration/commit da aplicação; criptografia
+application-side (AES-256-GCM, `BACKUP_ENCRYPTION_KEY`, independente de `COEVO_BACKUP_KEY`,
+com `encryptionKeyId` lógico — nunca a chave — preparando rotação futura; OBRIGATÓRIA em produção,
+fail-fast se ausente/curta) em streaming real (`createReadStream`/`createWriteStream`, nunca o arquivo
+inteiro em memória). Storage adapter abstrato:
+`filesystem` só fora de produção (fail-fast se tentado em produção), `s3` (S3-compatible, via
+`@aws-sdk/client-s3`, upload/download em streaming real) único aceito em produção — nenhum bucket real
+foi criado nesta rodada (proibido pelo escopo); em produção, `BACKUP_ENDPOINT` customizado só aceita
+`https:` (nunca `http:`). RPO=6h/RTO TARGET=4h (meta comprovada com dataset sintético, ainda não
+validada em volume representativo de produção) definidos e exercitados por restore real
+(`tests/h5-backup-restore-postgres.test.js`, 23 testes, `pg_dump`/`pg_restore` reais contra PostgreSQL
+real, nunca mock — incluindo round-trip com criptografia habilitada e senha com caracteres especiais).
+Credencial do PostgreSQL NUNCA em argv de `pg_dump`/`pg_restore` (`backup/pg-connection.js` — só
+host/porta/usuário/banco em argv, senha via `PGPASSWORD` no env do processo filho). Restore
+(`scripts/restore-postgres.js`, `npm run restore:postgres`) nunca assume banco "atual" implicitamente;
+verifica integridade (tamanho+SHA-256) ANTES de tocar o banco; bloqueia cross-environment restore por
+padrão (override explícito `RESTORE_ALLOW_CROSS_ENVIRONMENT=I_ACCEPT_THE_RISK`); exige confirmação forte
+para produção (`RESTORE_CONFIRM_PRODUCTION=YES_I_UNDERSTAND`); nunca sobrescreve banco populado sem
+`RESTORE_REPLACE=YES_REPLACE_TARGET_DATA` explícito; após restore bem-sucedido, revoga (trunca)
+`auth_sessions`/`auth_challenges`/`password_reset_tokens`/`rate_limit_buckets` no destino — dados
+efêmeros nunca restaurados cegamente, decisão de segurança deliberada (reautenticar é mais seguro que
+ressuscitar estado potencialmente comprometido). Evidência operacional durável em `backup_runs`/
+`restore_runs` (migration 008), nunca segredo. Mensagens de erro sanitizadas (`backup/sanitize.js`)
+antes de log/persistência — `pg_dump`/`pg_restore` podem incluir a connection string no erro.
+**PG-21 permanece explicitamente ABERTO**: a arquitetura e o restore real estão comprovados, mas o
+adapter `s3` nunca foi exercitado contra um bucket real (só testado com cliente S3 injetado) — sem
+infraestrutura provisionada nesta rodada. Gate como um todo permanece NO-GO.
+
+**Correção pós-H5 — evidência operacional fail-closed** (`docs/DECISIONS.md`, PROD-H5-01): backup em
+produção aborta ANTES do `pg_dump` se `backup_runs` não puder ser iniciada. `BackupTrackingError`/
+`RestoreEvidenceError` (`backup/errors.js`) distinguem resultado da operação de resultado do registro de
+evidência — um artefato de backup válido nunca é apagado por falha de tracking, um restore já aplicado
+nunca sugere reexecução automática (exit code 2, distinto de falha real). Testado com PostgreSQL real
+(role com privilégio restrito para o cenário de backup; injeção de dependência para o de restore, cuja
+tabela é recriada pelo próprio `pg_restore` e por isso não é restringível por GRANT/REVOKE real). Não
+expande H6.
