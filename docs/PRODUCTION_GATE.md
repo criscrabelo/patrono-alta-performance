@@ -748,20 +748,30 @@ headers, sem espalhar `res.setHeader(...)` manualmente rota por rota.
   `Access-Control-Allow-Methods`/`-Headers` só quando a Origin é permitida. CORS nunca substitui
   autenticação: uma Origin permitida ainda exige Bearer token válido nas rotas autenticadas.
 - **Integração com H3 preservada**: resposta 429 continua com `Retry-After` e todos os headers de H4.
+- **Correção pós-implementação — normalização da allowlist CORS**: `CORS_ALLOWED_ORIGINS` passou a ser
+  normalizada pelo MESMO helper usado para a Origin recebida (`normalizeCorsOrigin()`), eliminando um
+  descompasso em que a configuração era guardada como string crua enquanto a comparação usava `URL`
+  nativo — configurações com barra final, host em caixa alta ou porta padrão explícita passam a casar
+  corretamente; uma entrada com path/query/hash é rejeitada por inteiro (fail-closed), nunca truncada
+  silenciosamente. Em produção, uma entrada malformada em `CORS_ALLOWED_ORIGINS` agora interrompe o
+  boot explicitamente (`validateAuthRuntimeConfig()`); fora de produção é apenas descartada. Ver
+  `docs/DECISIONS.md`, PROD-H4-01 (correção pós-implementação), para o detalhamento completo.
 
 **O que H4 NÃO fecha (deliberadamente fora desta rodada):** PG-14 (CSRF, continua condicional); refactor
 de `onclick=`/etc. para `addEventListener()`; cabeçalhos `X-RateLimit-*` completos (H3/H4); qualquer
 item de H5-H11. Gate como um todo permanece **NO-GO PARA PRODUÇÃO**.
 
-**Testes:** 407/407 com Postgres real (384 anteriores + 23 novos em `tests/h4-http-hardening.test.js` —
-CSP, HSTS, frame protection, Referrer-Policy, Permissions-Policy, ausência de header Server/
-X-Powered-By, CORS same-origin/permitida/negada/ataque-de-sufixo/Origin-null, preflight permitido/
-negado, auth+CORS, erros (401/404/403) com headers, healthcheck, MIME types, e um teste dedicado
-confirmando que o 429 de H3 preserva Retry-After + headers H4), 0 falhando, nenhum teste removido. O
-único teste deste arquivo que exige Postgres (429 de H3) é explicitamente pulado sem
-`TEST_DATABASE_URL`, nunca fingindo cobertura que não existe; os demais 22 rodam idênticos em ambos os
-backends (JSON fallback e Postgres), confirmando que os headers de segurança nunca dependem do backend
-de persistência.
+**Testes:** 418/418 com Postgres real (384 anteriores + 23 do H4 original + 11 da correção de
+normalização CORS, em `tests/h4-http-hardening.test.js` — CSP, HSTS, frame protection, Referrer-Policy,
+Permissions-Policy, ausência de header Server/X-Powered-By, CORS same-origin/permitida/negada/ataque-de-
+sufixo/Origin-null, preflight permitido/negado, auth+CORS, erros (401/404/403) com headers, healthcheck,
+MIME types, um teste dedicado confirmando que o 429 de H3 preserva Retry-After + headers H4, e os novos
+`[H4-CORS-NORM-*]` — unitários de `normalizeCorsOrigin()` e observáveis via servidor isolado para
+trailing slash/caixa alta/porta padrão/rejeição de path/fail-fast e tolerância de boot), 0 falhando,
+nenhum teste removido. O único teste deste arquivo que exige Postgres (429 de H3) é explicitamente
+pulado sem `TEST_DATABASE_URL`, nunca fingindo cobertura que não existe; os demais 33 rodam idênticos em
+ambos os backends (JSON fallback e Postgres), confirmando que os headers de segurança e a normalização
+CORS nunca dependem do backend de persistência.
 
 **Por que "aguardando homologação" e não "concluído":** mesma razão do H1A/H1B/H2/H3 — implementação
 testada e funcional, mas depende de revisão humana antes de qualquer autorização de uso.

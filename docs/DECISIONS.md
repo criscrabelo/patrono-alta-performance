@@ -1331,6 +1331,37 @@ detalhamento técnico completo — esta decisão não o duplica, apenas registra
     aberto, deliberadamente. O gate como um todo permanece **NO-GO PARA PRODUÇÃO**. H5–H11 não foram
     alterados por esta decisão.
 
+**Correção pós-implementação (mesma decisão PROD-H4-01) — normalização da allowlist CORS.**
+A configuração `CORS_ALLOWED_ORIGINS` era armazenada como string crua (só `trim()`), enquanto a Origin
+recebida em cada requisição já passava por `new URL()` e era comparada por `protocol + '//' + host` —
+duas semânticas diferentes, o que fazia configurações semanticamente válidas mas escritas de forma
+diferente (barra final, host em caixa alta, porta padrão explícita) falharem silenciosamente no match.
+Corrigido com um único helper, `normalizeCorsOrigin(value)`, usado tanto para construir
+`CORS_ALLOWED_ORIGINS` quanto dentro de `isAllowedOrigin()` — nunca duas normalizações divergentes:
+- Aceita apenas os esquemas `http:`/`https:`; rejeita qualquer outro (`file:`, `javascript:`, `data:`,
+  etc.), vazio, e o literal `"null"`.
+- Usa `new URL(value).origin` — host tratado sem diferenciar maiúsculas/minúsculas e porta padrão do
+  esquema (`:443` para https, `:80` para http) omitida, exatamente como o navegador normaliza o header
+  `Origin` que envia.
+- Uma entrada com `pathname` (diferente de `/`), `query` ou `hash` é **rejeitada por inteiro**
+  (`null`) — decisão fail-closed: nunca trunca silenciosamente `"https://app.exemplo.com/algo"` para
+  `"https://app.exemplo.com"`, porque um operador que escreveu algo além de uma origem pura
+  provavelmente cometeu um erro, e mudar isso sem avisar é mais arriscado do que simplesmente não
+  confiar na entrada.
+- **Fail-fast de configuração**: em produção, `validateAuthRuntimeConfig()` agora também rejeita o
+  boot se qualquer entrada de `CORS_ALLOWED_ORIGINS` for malformada (mensagem
+  `"CORS_ALLOWED_ORIGINS inválida"`, sem revelar segredo) — uma allowlist mal escrita nunca deve ser
+  silenciosamente ignorada em produção. Fora de produção, uma entrada inválida é apenas descartada
+  (mais tolerante, para não travar desenvolvimento/teste por uma env var local malformada) —
+  documentado como assimetria deliberada.
+- Testes adicionados em `tests/h4-http-hardening.test.js` (`[H4-CORS-NORM-*]`): unitários do helper
+  (trailing slash, caixa alta, porta padrão, rejeição de path/query/hash/esquemas não-HTTP/vazio/
+  `null`), comportamento observável via servidor isolado (config com barra final/caixa alta/porta
+  padrão continua permitindo a Origin canônica; config com path é descartada por inteiro; ataque de
+  sufixo de domínio continua negado com a allowlist normalizada) e o fail-fast/tolerância de boot.
+- Esta correção não altera PG-12/PG-13/PG-14 (já registrados acima), não reabre H3, e não expande o
+  escopo de H4 — é uma correção de exatidão da mesma allowlist já decidida no item 9.
+
 Esta decisão não altera D1/D4/D2-CLOSE/PROD-GATE-01/PROD-H1-01/PROD-H1B-01/PROD-H2-01/PROD-H3-01 já
 homologadas — apenas registra o avanço específico do H4 dentro do gate de produção já aberto.
 

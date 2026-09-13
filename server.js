@@ -45,19 +45,39 @@ const LOCKOUT_DURATION_MS = 15 * 60 * 1000;
 // "https://app.exemplo.com,https://admin.exemplo.com". Vazia/ausente = nenhuma origem cross-origin
 // adicional confiada — requisições same-origin continuam funcionando normalmente (navegadores nunca
 // exigem cabeçalhos CORS para requisições same-origin).
-const CORS_ALLOWED_ORIGINS = new Set(
-  String(process.env.CORS_ALLOWED_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean)
-);
-// Comparação SEMPRE por origem exata (scheme+host+porta), via `URL` nativo — nunca substring/`endsWith`
-// (`https://app.exemplo.com.evil.test` nunca deve casar com `https://app.exemplo.com` configurada).
-// `Origin: null` (ex.: iframes sandboxed, alguns redirects) nunca é confiado por padrão — só uma
-// decisão futura explícita poderia mudar isso, nunca implícito.
+// Correção pós-H4 (docs/DECISIONS.md, PROD-H4-01): a configuração de CORS_ALLOWED_ORIGINS e a Origin
+// recebida em cada requisição precisam da MESMA normalização — antes disso, a env var era armazenada
+// como string crua (`split(',').map(trim)`), enquanto a Origin do request já passava por `new URL()` e
+// era comparada como `protocol + '//' + host`; um valor semanticamente idêntico mas escrito de forma
+// diferente na configuração (barra final, host em caixa alta, porta padrão explícita) falhava
+// silenciosamente no match. `normalizeCorsOrigin()` é o único ponto que decide o que é uma origem
+// válida, usado tanto para construir `CORS_ALLOWED_ORIGINS` quanto em `isAllowedOrigin()` — nunca duas
+// semânticas diferentes de normalização coexistindo.
+//
+// Decisão (documentada também em docs/SECURITY.md/DECISIONS.md): uma entrada de configuração com
+// pathname/query/hash (ex.: "https://app.exemplo.com/algum/caminho") é REJEITADA (retorna null) em vez
+// de silenciosamente truncada para a origem — fail-closed. Um operador que configurou algo além de uma
+// origem pura provavelmente cometeu um erro de digitação/entendimento, e transformar isso em uma origem
+// diferente da que ele escreveu, sem avisar, é mais perigoso do que simplesmente não confiar em nada.
+function normalizeCorsOrigin(value) {
+  if (!value) return null;
+  const trimmed = String(value).trim();
+  if (!trimmed || trimmed === 'null') return null;
+  let parsed;
+  try { parsed = new URL(trimmed); } catch { return null; }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+  if ((parsed.pathname && parsed.pathname !== '/') || parsed.search || parsed.hash) return null;
+  return parsed.origin;
+}
+const CORS_ALLOWED_ORIGINS_RAW = String(process.env.CORS_ALLOWED_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean);
+const CORS_ALLOWED_ORIGINS = new Set(CORS_ALLOWED_ORIGINS_RAW.map(normalizeCorsOrigin).filter(Boolean));
+// Comparação SEMPRE por origem normalizada (scheme+host+porta, via `URL.origin` nativo) — nunca
+// substring/`endsWith` (`https://app.exemplo.com.evil.test` nunca deve casar com `https://app.exemplo.com`
+// configurada). `Origin: null` (ex.: iframes sandboxed, alguns redirects) nunca é confiado por padrão —
+// só uma decisão futura explícita poderia mudar isso, nunca implícito.
 function isAllowedOrigin(origin) {
-  if (!origin || origin === 'null') return false;
-  try {
-    const parsed = new URL(origin);
-    return CORS_ALLOWED_ORIGINS.has(`${parsed.protocol}//${parsed.host}`);
-  } catch { return false; }
+  const normalized = normalizeCorsOrigin(origin);
+  return normalized !== null && CORS_ALLOWED_ORIGINS.has(normalized);
 }
 // CSP construída a partir de uma auditoria real do frontend (public/index.html, public/app.js,
 // public/status.html/.js/.css e CSS) — nunca um wildcard amplo (nunca `default-src *`/`script-src *`).
@@ -1896,6 +1916,15 @@ function validateAuthRuntimeConfig() {
   // como alternativa), e o processo nunca deve subir em produção acreditando estar protegido contra
   // força bruta quando não está.
   if (!rateLimit.hasValidHmacKeyForProduction()) throw new Error('RATE_LIMIT_HMAC_KEY é obrigatória em produção (ausente ou com menos de 32 caracteres).');
+  // Correção pós-H4 (docs/DECISIONS.md, PROD-H4-01): uma entrada malformada em CORS_ALLOWED_ORIGINS
+  // (esquema não http(s), path/query/hash, URL inválida) nunca deve ser silenciosamente ignorada em
+  // produção — um operador que pretendia liberar uma origem legítima, mas digitou algo que a validação
+  // rejeita, precisa descobrir isso no boot, não meses depois ao investigar por que o CORS "não
+  // funciona". Fora de produção o comportamento é mais tolerante (só ignora a entrada inválida, sem
+  // interromper o boot) para não travar desenvolvimento/teste por uma env var local malformada.
+  if (CORS_ALLOWED_ORIGINS_RAW.some(value => normalizeCorsOrigin(value) === null)) {
+    throw new Error('CORS_ALLOWED_ORIGINS inválida: contém ao menos uma origem malformada (verifique esquema http(s), ausência de caminho/query/hash e sintaxe da URL).');
+  }
 }
 // Sprint 2, Hardening H1A (docs/PRODUCTION_GATE.md, PG-22/seção 23): boot assíncrono — `storage.init()`
 // aguarda a persistência estar pronta ANTES de aceitar qualquer requisição. Em produção sem
@@ -1909,5 +1938,5 @@ if (require.main === module) {
     setInterval(()=>scheduledMondayTick().catch(error=>console.error('Monday scheduler:',error.message)),60000);
   }).catch(error => { console.error('Falha ao inicializar a persistência — processo não iniciado:', error.message); process.exit(1); });
 }
-module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, ORIGIN_TYPE_LABELS, STATUS_LABELS, CATEGORY_LABELS, legalDeadlineLabels, legalDeadlineConfirmationLabel, LEGAL_DEADLINE_TEXTUAL_RESPONSIBLE_FIELDS, filterCalendarEventsByWindow, canBeResponsibleForLegalDeadline, storage, migrateLegacyStore, validateAuthRuntimeConfig, resolveLoginIdentity, issuePasswordResetToken, auditRateLimitAndBlock, isAllowedOrigin, CONTENT_SECURITY_POLICY, PERMISSIONS_POLICY };
+module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, ORIGIN_TYPE_LABELS, STATUS_LABELS, CATEGORY_LABELS, legalDeadlineLabels, legalDeadlineConfirmationLabel, LEGAL_DEADLINE_TEXTUAL_RESPONSIBLE_FIELDS, filterCalendarEventsByWindow, canBeResponsibleForLegalDeadline, storage, migrateLegacyStore, validateAuthRuntimeConfig, resolveLoginIdentity, issuePasswordResetToken, auditRateLimitAndBlock, isAllowedOrigin, normalizeCorsOrigin, CONTENT_SECURITY_POLICY, PERMISSIONS_POLICY };
 

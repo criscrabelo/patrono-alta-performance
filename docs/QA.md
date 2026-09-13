@@ -868,7 +868,8 @@ PROD-H3-01, 2º adendo; `docs/PRODUCTION_GATE.md`, seção 20).
   `tests/h4-http-hardening.test.js`), 0 falhando, nenhum teste removido. **288 testes** sem
   `TEST_DATABASE_URL` (287 passam + 1 pulado explicitamente — o único cenário deste arquivo que
   depende de Postgres, `[H4-429]`) — confirma que os headers de segurança nunca dependem do backend
-  de persistência (item 53 do escopo H4).
+  de persistência (item 53 do escopo H4). *(Ver correção de normalização CORS ao final desta seção —
+  os totais passam a 418/418 com Postgres e 321 passam + 6 pulados sem Postgres.)*
 - `tests/h4-http-hardening.test.js` roda sobre o fallback JSON local (mesma técnica de
   `tests/security-integration.test.js`, diretório de dados isolado), deliberadamente SEM depender de
   Postgres — os headers são aplicados antes de qualquer lógica de persistência rodar.
@@ -919,4 +920,35 @@ PROD-H3-01, 2º adendo; `docs/PRODUCTION_GATE.md`, seção 20).
 - CI roda a mesma bateria (Node 20.x/22.x, Postgres real) sem nenhum teste pulado (exceto o único
   cenário gated por Postgres quando `TEST_DATABASE_URL` não está definida, explicitamente reportado
   como pulado, nunca fingindo cobertura que não existe).
+- `npm audit`: inalterado (2 vulnerabilidades altas conhecidas — H9, não corrigidas nesta rodada).
+
+## QA — Correção pós-H4 (normalização da allowlist CORS)
+
+Correção da mesma decisão PROD-H4-01 (`docs/DECISIONS.md`) — `CORS_ALLOWED_ORIGINS` passou a ser
+normalizada pelo mesmo helper (`normalizeCorsOrigin()`) usado para a Origin recebida, eliminando um
+descompasso em que a configuração era guardada como string crua enquanto a comparação já usava `URL`
+nativo.
+
+- **418 testes totais** com `TEST_DATABASE_URL` (407 anteriores + 11 novos em
+  `tests/h4-http-hardening.test.js`), 0 falhando, nenhum teste removido. **321 testes passam + 6
+  pulados** sem `TEST_DATABASE_URL` (mesmo padrão — todos os novos testes de normalização rodam
+  idênticos em ambos os backends, exceto o `[H4-429]` já gated).
+- **11 testes novos (`[H4-CORS-NORM-*]`)**:
+  - **unitários de `normalizeCorsOrigin()`**: barra final/host em caixa alta/porta padrão do esquema
+    são equivalentes à origem canônica; path/query/hash/esquemas não-HTTP (`file:`/`javascript:`/
+    `data:`)/vazio/`null`/string inválida são rejeitados (retornam `null`).
+  - **[H4-CORS-NORM-A/B/C]**: configuração com barra final, caixa alta ou porta padrão explícita
+    (`:443`) continua permitindo a Origin escrita da forma canônica (sem barra, minúscula, sem porta).
+  - **[H4-CORS-NORM-D]**: configuração com path (`https://app.exemplo.com/algum/caminho`) é
+    descartada por INTEIRO — nunca truncada silenciosamente para a origem (decisão fail-closed).
+  - **[H4-CORS-NORM-E]**: Origin recebida com esquema `file:`/`javascript:`/`data:` nunca recebe ACAO.
+  - **[H4-CORS-NORM-F/G]**: `Origin: null` e o ataque de sufixo de domínio continuam negados com a
+    allowlist normalizada (regressão dos comportamentos já cobertos por `[H4-CORS-E]`/`[H4-CORS-D]`).
+  - **[H4-CORS-NORM-failfast]**: `validateAuthRuntimeConfig()` lança em produção quando
+    `CORS_ALLOWED_ORIGINS` contém uma entrada malformada, com a mensagem `"CORS_ALLOWED_ORIGINS
+    inválida"` (sem revelar segredo).
+  - **[H4-CORS-NORM-tolerant]**: fora de produção, a mesma entrada malformada não interrompe o boot —
+    é apenas descartada.
+- Não altera PG-12/PG-13/PG-14, não reabre H3, não expande o escopo de H4.
+- CI roda a mesma bateria (Node 20.x/22.x, Postgres real) sem nenhum teste pulado.
 - `npm audit`: inalterado (2 vulnerabilidades altas conhecidas — H9, não corrigidas nesta rodada).

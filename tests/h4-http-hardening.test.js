@@ -25,7 +25,7 @@ process.env.NODE_ENV = 'test';
 delete process.env.MONDAY_TOKEN;
 delete process.env.CORS_ALLOWED_ORIGINS;
 
-const { handler, readStore, writeStore } = require('../server');
+const { handler, readStore, writeStore, normalizeCorsOrigin, validateAuthRuntimeConfig } = require('../server');
 const authCrypto = require('../auth/crypto');
 
 let server, baseUrl;
@@ -218,6 +218,152 @@ test('[H4-CORS-D] ataque de sufixo de domínio (domain-suffix attack) é negado 
 test('[H4-CORS-E] Origin: null é sempre negada por padrão', async () => {
   const res = await api('GET', '/api/health', { headers: { Origin: 'null' } });
   assert.equal(res.headers.get('access-control-allow-origin'), null);
+});
+
+// --- CORREÇÃO PÓS-H4: NORMALIZAÇÃO DA ALLOWLIST CORS (docs/DECISIONS.md, PROD-H4-01) ----------------
+// normalizeCorsOrigin() é o único ponto de normalização, usado tanto para CORS_ALLOWED_ORIGINS quanto
+// para a Origin recebida — os testes abaixo cobrem diretamente o helper (unitário) e, por servidor
+// isolado, o comportamento observável de isAllowedOrigin()/applySecurityHeaders() a partir dele.
+test('[H4-CORS-NORM-unit] normalizeCorsOrigin: trailing slash, host case-insensitive e porta padrão são equivalentes à origem canônica', () => {
+  assert.equal(normalizeCorsOrigin('https://app.exemplo.com/'), 'https://app.exemplo.com');
+  assert.equal(normalizeCorsOrigin('https://APP.EXEMPLO.COM'), 'https://app.exemplo.com');
+  assert.equal(normalizeCorsOrigin('https://app.exemplo.com:443'), 'https://app.exemplo.com');
+  assert.equal(normalizeCorsOrigin('http://app.exemplo.com:80'), 'http://app.exemplo.com');
+});
+test('[H4-CORS-NORM-unit] normalizeCorsOrigin: rejeita pathname/query/hash, esquemas não http(s), vazio e "null" (fail-closed)', () => {
+  assert.equal(normalizeCorsOrigin('https://app.exemplo.com/algum/caminho'), null, 'entrada com path deve ser rejeitada, nunca truncada silenciosamente');
+  assert.equal(normalizeCorsOrigin('https://app.exemplo.com?x=1'), null);
+  assert.equal(normalizeCorsOrigin('https://app.exemplo.com#frag'), null);
+  assert.equal(normalizeCorsOrigin('file:///etc/passwd'), null);
+  assert.equal(normalizeCorsOrigin('javascript:alert(1)'), null);
+  assert.equal(normalizeCorsOrigin('data:text/html,x'), null);
+  assert.equal(normalizeCorsOrigin(''), null);
+  assert.equal(normalizeCorsOrigin(null), null);
+  assert.equal(normalizeCorsOrigin('null'), null);
+  assert.equal(normalizeCorsOrigin('not a url'), null);
+});
+
+test('[H4-CORS-NORM-A] config com trailing slash ("https://app.exemplo.com/") permite Origin sem barra', async () => {
+  delete require.cache[require.resolve('../server')];
+  process.env.CORS_ALLOWED_ORIGINS = 'https://app.exemplo.com/';
+  const { handler: handlerWithCors } = require('../server');
+  const s2 = http.createServer(handlerWithCors);
+  await new Promise(resolve => s2.listen(0, '127.0.0.1', resolve));
+  const base2 = `http://127.0.0.1:${s2.address().port}`;
+  try {
+    const res = await fetch(`${base2}/api/health`, { headers: { Origin: 'https://app.exemplo.com' } });
+    assert.equal(res.headers.get('access-control-allow-origin'), 'https://app.exemplo.com');
+  } finally {
+    await new Promise(resolve => s2.close(resolve));
+    delete process.env.CORS_ALLOWED_ORIGINS;
+    delete require.cache[require.resolve('../server')];
+  }
+});
+
+test('[H4-CORS-NORM-B] config em caixa alta ("https://APP.EXEMPLO.COM") permite Origin em minúsculas após normalização de host', async () => {
+  delete require.cache[require.resolve('../server')];
+  process.env.CORS_ALLOWED_ORIGINS = 'https://APP.EXEMPLO.COM';
+  const { handler: handlerWithCors } = require('../server');
+  const s2 = http.createServer(handlerWithCors);
+  await new Promise(resolve => s2.listen(0, '127.0.0.1', resolve));
+  const base2 = `http://127.0.0.1:${s2.address().port}`;
+  try {
+    const res = await fetch(`${base2}/api/health`, { headers: { Origin: 'https://app.exemplo.com' } });
+    assert.equal(res.headers.get('access-control-allow-origin'), 'https://app.exemplo.com');
+  } finally {
+    await new Promise(resolve => s2.close(resolve));
+    delete process.env.CORS_ALLOWED_ORIGINS;
+    delete require.cache[require.resolve('../server')];
+  }
+});
+
+test('[H4-CORS-NORM-C] config com porta padrão explícita ("https://app.exemplo.com:443") se comporta como URL.origin nativo', async () => {
+  delete require.cache[require.resolve('../server')];
+  process.env.CORS_ALLOWED_ORIGINS = 'https://app.exemplo.com:443';
+  const { handler: handlerWithCors } = require('../server');
+  const s2 = http.createServer(handlerWithCors);
+  await new Promise(resolve => s2.listen(0, '127.0.0.1', resolve));
+  const base2 = `http://127.0.0.1:${s2.address().port}`;
+  try {
+    const res = await fetch(`${base2}/api/health`, { headers: { Origin: 'https://app.exemplo.com' } });
+    assert.equal(res.headers.get('access-control-allow-origin'), 'https://app.exemplo.com', 'porta 443 é a porta padrão de https — URL.origin a omite, exatamente como na Origin recebida sem porta');
+  } finally {
+    await new Promise(resolve => s2.close(resolve));
+    delete process.env.CORS_ALLOWED_ORIGINS;
+    delete require.cache[require.resolve('../server')];
+  }
+});
+
+test('[H4-CORS-NORM-D] config com path ("https://app.exemplo.com/algum/caminho") é rejeitada por inteiro — fail-closed, nunca truncada para a origem', async () => {
+  delete require.cache[require.resolve('../server')];
+  process.env.CORS_ALLOWED_ORIGINS = 'https://app.exemplo.com/algum/caminho';
+  const { handler: handlerWithCors } = require('../server');
+  const s2 = http.createServer(handlerWithCors);
+  await new Promise(resolve => s2.listen(0, '127.0.0.1', resolve));
+  const base2 = `http://127.0.0.1:${s2.address().port}`;
+  try {
+    const res = await fetch(`${base2}/api/health`, { headers: { Origin: 'https://app.exemplo.com' } });
+    assert.equal(res.headers.get('access-control-allow-origin'), null, 'uma entrada de configuração com path é descartada por inteiro, nunca vira "https://app.exemplo.com" silenciosamente');
+  } finally {
+    await new Promise(resolve => s2.close(resolve));
+    delete process.env.CORS_ALLOWED_ORIGINS;
+    delete require.cache[require.resolve('../server')];
+  }
+});
+
+test('[H4-CORS-NORM-E] esquemas não HTTP (file:/javascript:/data:) na Origin recebida são sempre negados', async () => {
+  const cases = ['file:///etc/passwd', 'javascript:alert(1)', 'data:text/html,x'];
+  for (const origin of cases) {
+    const res = await api('GET', '/api/health', { headers: { Origin: origin } });
+    assert.equal(res.headers.get('access-control-allow-origin'), null, `esquema ${origin} nunca deve receber ACAO`);
+  }
+});
+
+test('[H4-CORS-NORM-F] Origin: null continua negada após a normalização (mesmo comportamento de H4-CORS-E)', async () => {
+  const res = await api('GET', '/api/health', { headers: { Origin: 'null' } });
+  assert.equal(res.headers.get('access-control-allow-origin'), null);
+});
+
+test('[H4-CORS-NORM-G] ataque de sufixo de domínio continua negado com a allowlist normalizada', async () => {
+  delete require.cache[require.resolve('../server')];
+  process.env.CORS_ALLOWED_ORIGINS = 'https://app.exemplo.com/';
+  const { handler: handlerWithCors } = require('../server');
+  const s2 = http.createServer(handlerWithCors);
+  await new Promise(resolve => s2.listen(0, '127.0.0.1', resolve));
+  const base2 = `http://127.0.0.1:${s2.address().port}`;
+  try {
+    const res = await fetch(`${base2}/api/health`, { headers: { Origin: 'https://app.exemplo.com.evil.test' } });
+    assert.equal(res.headers.get('access-control-allow-origin'), null);
+  } finally {
+    await new Promise(resolve => s2.close(resolve));
+    delete process.env.CORS_ALLOWED_ORIGINS;
+    delete require.cache[require.resolve('../server')];
+  }
+});
+
+test('[H4-CORS-NORM-failfast] validateAuthRuntimeConfig() lança em produção quando CORS_ALLOWED_ORIGINS contém entrada malformada', () => {
+  delete require.cache[require.resolve('../server')];
+  process.env.CORS_ALLOWED_ORIGINS = 'https://app.exemplo.com/caminho-invalido';
+  process.env.RATE_LIMIT_HMAC_KEY = process.env.RATE_LIMIT_HMAC_KEY || 'test-rate-limit-hmac-key-at-least-32-characters';
+  const { validateAuthRuntimeConfig: validateWithBadCors } = require('../server');
+  const originalEnv = process.env.NODE_ENV;
+  process.env.NODE_ENV = 'production';
+  try {
+    assert.throws(() => validateWithBadCors(), /CORS_ALLOWED_ORIGINS inválida/);
+  } finally {
+    process.env.NODE_ENV = originalEnv;
+    delete process.env.CORS_ALLOWED_ORIGINS;
+    delete require.cache[require.resolve('../server')];
+  }
+});
+
+test('[H4-CORS-NORM-tolerant] fora de produção, uma entrada malformada em CORS_ALLOWED_ORIGINS não impede o boot (apenas é ignorada)', () => {
+  delete require.cache[require.resolve('../server')];
+  process.env.CORS_ALLOWED_ORIGINS = 'https://app.exemplo.com/caminho-invalido';
+  const { validateAuthRuntimeConfig: validateWithBadCors } = require('../server');
+  assert.doesNotThrow(() => validateWithBadCors());
+  delete process.env.CORS_ALLOWED_ORIGINS;
+  delete require.cache[require.resolve('../server')];
 });
 
 // --- 46. PREFLIGHT TEST ----------------------------------------------------------------------------

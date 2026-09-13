@@ -484,3 +484,12 @@ reflete a Origin recebida, comparação sempre por igualdade EXATA de origem (nu
 substitui autenticação. PG-14 (CSRF) permanece explicitamente NÃO fechado por esta rodada — continua
 P2, condicional a uma futura migração de Bearer token para cookie (não realizada). Gate como um todo
 permanece NO-GO.
+
+**Correção pós-H4 — normalização da allowlist CORS** (mesma decisão PROD-H4-01): a configuração
+`CORS_ALLOWED_ORIGINS` passa agora pela MESMA normalização aplicada à Origin recebida, via um único
+helper `normalizeCorsOrigin()` (nunca duas semânticas de comparação divergentes). Trata barra final,
+caixa do host e porta padrão do esquema como equivalentes à origem canônica (via `URL.origin` nativo);
+rejeita por inteiro — fail-closed, nunca trunca silenciosamente — qualquer entrada com path/query/hash
+ou esquema diferente de `http:`/`https:`. Em produção, uma entrada malformada em `CORS_ALLOWED_ORIGINS`
+interrompe o boot explicitamente (`validateAuthRuntimeConfig()`); fora de produção é apenas descartada.
+Não altera PG-12/PG-13/PG-14, não reabre H3, não expande o escopo de H4.
