@@ -87,8 +87,11 @@ function dashboardPayload(store, id, query = {}, user = null, deps = {}) {
     ], memory('legalDeadlines', competence, judicialDeadlines.length, 'Riscos jurídicos calculados exclusivamente a partir de Legal Deadline (status ativo + date), nunca de data bruta do processo.', updated));
     widgets['legal-attention'] = ready('legal-attention', Object.entries(moduleLabels).map(([key, label]) => ({ label, value: scopedRecordList(store, key, user, deps).length, target: key })), memory('Monday', competence, Object.keys(moduleLabels).reduce((sum, key) => sum + scopedRecordList(store, key, user, deps).length, 0), 'Volumes por pasta jurídica sincronizada, restritos ao escopo do usuário.', updated));
     widgets['legal-quality'] = ready('legal-quality', { classified: active.filter(row => processStatus(row) !== 'A classificar').length, total: active.length }, memory('Monday', competence, active.length, 'Percentual de processos ativos com status reconhecido.', updated));
+    // Item 28 (docs/LEGAL_COMMITTEE_READINESS.md): responsibleUserId/processTitle são aditivos ao
+    // payload já existente (row já os carrega via legalDeadlineRows() acima) — usados apenas pela seção
+    // "Visão para Comitê" do Dashboard Jurídico, nunca alteram a regra de atraso/janela já calculada.
     widgets['legal-deadlines'] = upcomingAndOverdue.length
-      ? ready('legal-deadlines', upcomingAndOverdue.slice(0, 8).map(row => ({ title: row.origin, date: row.date, department: 'Jurídico', status: row.status, overdue: deps.isLegalDeadlineOverdue(row) })), memory('legalDeadlines', competence, upcomingAndOverdue.length, 'Próximos prazos e prazos vencidos (Legal Deadline, JUDICIAL_PROCESSUAL, status ativo).', updated))
+      ? ready('legal-deadlines', upcomingAndOverdue.slice(0, 8).map(row => ({ title: row.origin, date: row.date, department: 'Jurídico', status: row.status, overdue: deps.isLegalDeadlineOverdue(row), responsibleUserId: row.responsibleUserId ?? null, processTitle: row.process?.title ?? null })), memory('legalDeadlines', competence, upcomingAndOverdue.length, 'Próximos prazos e prazos vencidos (Legal Deadline, JUDICIAL_PROCESSUAL, status ativo).', updated))
       : empty('legal-deadlines', 'legalDeadlines', competence, 'Nenhum Legal Deadline ativo crítico ou vencido identificado.');
   } else if (id === 'ti') {
     widgets['ti-projects'] = pending('ti-projects', 'Sistema de projetos de TI', competence);
