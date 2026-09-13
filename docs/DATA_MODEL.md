@@ -230,3 +230,15 @@ para revisão manual, sem inventar um status novo persistido.
 - `Legal Process` ainda não tem um ID Patrono canônico próprio, independente do registro Monday — hoje o
   registro normalizado do Monday *é* o registro operacional. Fica como próximo passo técnico quando o
   Legal Process precisar existir independentemente de uma fonte externa específica.
+- `legalDeadlines` ainda não tem um campo de responsável (`responsibleUserId` ou equivalente) — modelo
+  ainda não homologado (ver `docs/DECISIONS.md`, seção 1.2, D4.2/D4.3). Nenhum campo foi adicionado nesta
+  rodada (Fase 4A é estritamente documental).
+
+## Sprint 2, Fase 4A — rodada documental (decisões pendentes, sem alteração de modelo)
+
+Esta rodada **não altera o modelo de dados**. Fecha, em `docs/DECISIONS.md` (seção 1.2, D4.1–D4.14), as
+decisões de negócio/UX pendentes antes de qualquer alteração futura de modelo relacionada à Fase 4:
+campo de responsável em `legalDeadlines` (D4.2/D4.3), integração de leitura com Google Calendar (D4.1,
+sem nova entidade — apenas espelhamento derivado, nunca fonte), e a visão "Minha Semana" (D4.10, também
+sem nova entidade — view sobre `legalDeadlines` + `store.agenda`). Nenhum desses pontos está homologado;
+nenhuma implementação de modelo deve começar antes da homologação explícita registrada em D4.14.

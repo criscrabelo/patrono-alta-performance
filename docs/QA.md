@@ -407,3 +407,67 @@ Testes adicionados (4 unitários em `tests/core.test.js`, 2 HTTP em `tests/secur
   aumentam para o usuário da própria empresa e permanecem inalterados para o usuário de outra empresa,
   com diretoria vendo o consolidado.
 - HTTP: mesma comparação antes/depois para `speId`.
+
+## QA planejado — Fase 4 (Google Calendar, Minha Semana, responsável do Legal Deadline)
+
+> **Esta rodada é estritamente documental.** Nenhum teste de código foi adicionado ou executado para os
+> cenários abaixo — são critérios de aceite **futuros**, a serem implementados e executados somente após
+> homologação das decisões correspondentes em `docs/DECISIONS.md`, seção 1.2 (D4.1–D4.14), e autorização
+> explícita para a Fase 4B. Nenhum destes cenários deve ser lido como "já testado" ou "já passando".
+
+### Cenários esperados — Google Calendar (dependem de D4.1 homologada)
+
+1. Usuário com Calendar conectado vê seus compromissos pessoais lado a lado com a Agenda combinada
+   (Legal Deadline + `store.agenda`), sem que um vire cópia do outro.
+2. Legal Deadline `ativo` aparece no Calendar (se D4.1 aprovar B ou C); `suspenso`/`cumprido`/`cancelado`
+   não geram evento novo, e um evento já existente referente a um prazo que mudou de status deixa de
+   aparecer como compromisso ativo.
+3. `INTERNAL_CONTROL` no Calendar nunca aparece rotulado como prazo processual (mesma regra de D4.1/D4.5).
+4. Alteração de `date` no Legal Deadline atualiza o evento existente no Calendar — nunca cria um segundo
+   evento duplicado.
+5. Reabertura de um Legal Deadline (mesmo `id`) volta a refletir no Calendar sem criar evento novo.
+6. Revogação do acesso do usuário ao próprio Google Calendar remove os eventos espelhados, sem afetar o
+   Legal Deadline no Patrono.
+7. Indisponibilidade da integração de Calendar não altera `status`/`date`/confirmação de nenhum Legal
+   Deadline no Patrono; Agenda/Atenção continuam funcionando normalmente sem o Calendar.
+8. Nenhum caminho de sincronização permite que uma edição no Google Calendar altere o Legal Deadline de
+   volta no Patrono (mesmo se D4.1 aprovar a Opção C).
+9. Título do evento no Calendar segue a política definida em D4.7 (recomendação: "Prazo jurídico —
+   Patrono", sem identificar o processo).
+10. `companyId`/`speId`/`scoped()` continuam sendo respeitados: um usuário nunca recebe, na integração de
+    Calendar, um Legal Deadline fora do próprio escopo.
+
+### Cenários esperados — responsável do Legal Deadline / `responsibleUserId` (dependem de D4.2/D4.3)
+
+11. Criar Legal Deadline sem `responsibleUserId` continua válido (campo opcional, conforme proposta D4.3).
+12. `responsibleUserId` preenchido com um `user.id` inexistente/inválido é rejeitado (mesma classe de
+    validação de integridade já aplicada a `processId`).
+13. `responsibleUserId` pode ser diferente do responsável/owner do Legal Process relacionado.
+14. Alteração de `responsibleUserId` via `PATCH` é auditada (`before`/`after`, `reason`), pelo mesmo
+    mecanismo de auditoria já existente.
+15. Usuário responsável desativado/desligado: o Legal Deadline continua existindo, histórico intacto, e a
+    view sinaliza "Responsável inativo" (D4.11) até reatribuição formal — nunca oculta o prazo.
+16. Nenhuma reatribuição automática por heurística (ex.: por department, por quem criou o registro).
+
+### Cenários esperados — "Minha Semana" (depende de D4.2/D4.3 e D4.10)
+
+17. "Minha Semana" reúne Legal Deadlines e Agenda Events atribuídos ao usuário logado, sem duplicar dado
+    de nenhum dos dois.
+18. Janela temporal segue a decisão homologada (D4.10 — recomendação: semana civil local, segunda a
+    domingo, `America/Sao_Paulo`).
+19. Nenhuma Task é criada automaticamente a partir de um Legal Deadline exibido em "Minha Semana"
+    (Legal Deadline ≠ Task, D4.9/D4.10).
+20. `scoped()`/`allowedInDepartment()`/`companyId`/`speId` continuam sendo aplicados: "Minha Semana" nunca
+    revela um item que o usuário não poderia acessar diretamente pela entidade canônica.
+
+### Cenários esperados — copy/labels (dependem de D4.4/D4.5/D4.6)
+
+21. Nenhuma tela usa "Comprovado documentalmente"/"Documento validado"/"Evidência confirmada"/"Fonte
+    oficial comprovada" sem `evidenceReference` estruturado (D4.4 — regra já homologada via D1.4).
+22. Registro `requires_review` nunca exibe "Confirmado pelo Jurídico" — exibe "Requer revisão" (D4.4/D4.6).
+23. Labels de `originType`/`status`/derivados seguem a tabela homologada (D4.5/D4.6), sem inventar rótulo
+    novo fora da lista aprovada.
+
+**Nenhum destes 23 cenários foi executado nesta rodada.** Ficam registrados como backlog de QA da Fase
+4B, a ser convertido em testes reais (`tests/core.test.js`/`tests/security-integration.test.js`) somente
+após a implementação correspondente ser autorizada.

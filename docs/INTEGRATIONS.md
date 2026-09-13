@@ -51,6 +51,29 @@ tela de Integrações, sem simular dados.
 **Google Calendar, quando ativado:** é apenas view de leitura de compromissos, nunca fonte de prazo
 jurídico (§10, §23). Nenhuma automação desta execução liga Legal Deadline a eventos de calendário.
 
+### Google Calendar — decisão pendente de homologação (Sprint 2, Fase 4A)
+
+**Status: opcional, não canônico, não SoT, não fonte de cálculo, não fonte de confirmação — decisão de
+ativação PENDENTE.** A Fase 4A (`docs/DECISIONS.md`, seção 1.2, D4.1) analisou opções para ativar essa
+integração no piloto e recomendou tecnicamente a opção de leitura pura (Opção B: Patrono lê a agenda
+pessoal do usuário no Calendar e a exibe lado a lado com a Agenda combinada da Fase 3, sem nunca escrever
+Legal Deadline no Calendar do usuário). Uma opção de espelhamento com escrita (Opção C) foi registrada
+como alternativa possível, mas **exige escrita externa**, o que colide com a regra "nenhuma escrita
+externa no MVP" (§10) e precisaria de uma decisão própria abrindo exceção formal a essa regra — não
+apenas a D4.1.
+
+Nenhuma das duas opções foi homologada nesta rodada — **nenhuma implementação de Calendar começa antes de
+homologação explícita da Cristiane** (ver `docs/DECISIONS.md`, D4.14). Se e quando homologada:
+- `originType`: ambos podem aparecer, nunca sem identificação clara (`INTERNAL_CONTROL` nunca rotulado
+  como prazo processual).
+- `status`: apenas `ativo` gera/mantém evento; `suspenso`/`cumprido`/`cancelado` não geram evento novo, e
+  um evento existente referente a um prazo que mudou de status deixa de aparecer como compromisso ativo.
+- Conteúdo do evento: título neutro/mínimo (recomendação D4.7 — "Prazo jurídico — Patrono"), nunca o
+  conteúdo jurídico completo.
+- Indisponibilidade: nunca afeta o Legal Deadline no Patrono nem esconde/zera nada — mesma regra de
+  "falha de fonte preserva o último dado válido" já aplicada ao Monday (D4.8, Anexo A regras 3/14).
+- Nenhum caminho de sincronização permite que o Calendar altere o Legal Deadline de volta.
+
 ## Regras de segurança de integração aplicadas
 
 - **Menor privilégio:** o token Monday é único por ambiente, correspondente à finalidade de leitura dos

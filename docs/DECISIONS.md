@@ -211,6 +211,459 @@ homologação formal usado aqui, não uma alteração silenciosa de código.
 
 ---
 
+## 1.2. Sprint 2 — Fase 4 — Decisões Pendentes para Homologação
+
+> **Status geral desta seção:** rodada **estritamente documental** (nenhum código alterado nesta rodada
+> — `server.js`, `dashboard-service.js`, `dashboard-model.js`, frontend e persistência permanecem
+> exatamente como consolidados ao final da Fase 3, commit `a425c2e`). Fecha as decisões de produto,
+> regra de negócio, autorização e UX necessárias **antes** de qualquer implementação funcional da Fase 4
+> (Google Calendar, Minha Semana, responsável do Legal Deadline). Nenhuma recomendação técnica registrada
+> abaixo é homologação — toda linha "Decisão de negócio" permanece **PENDENTE DE HOMOLOGAÇÃO** até
+> aprovação explícita da Cristiane (Gestora + Jurídico), pelo mesmo rito já usado na D1.
+>
+> **Nota de nomenclatura:** os identificadores `D4.1`–`D4.14` abaixo pertencem a esta seção (decisões da
+> **Fase 4 do Sprint 2**) e são independentes do item **`D4` do Decision Backlog global** (seção 1,
+> "Fonte oficial do contato do cliente") — não confundir os dois namespaces.
+
+### D4.1 — Google Calendar
+
+> **Status:** PENDENTE DE HOMOLOGAÇÃO (a proibição de Calendar como fonte já é HOMOLOGADA — ver abaixo)
+
+**Já homologado (não é esta decisão):** MASTER_HANDOFF §10 já registra Google Calendar como integração
+`Leitura`, e a D1 (seção 1.1, "Regra oficial do MVP") já fixa "Google Calendar não é fonte de Legal
+Deadline". Isso **não está em aberto** — nenhuma opção abaixo pode reabrir essa restrição. O que está
+pendente é **se e como** a integração de visualização é ativada no piloto.
+
+**Contexto.** O piloto pode se beneficiar de uma visualização complementar de compromissos no Google
+Calendar, mas qualquer desenho que exija escrita externa colide com a regra global do MASTER_HANDOFF §10
+("nenhuma escrita externa no MVP") e precisaria de uma decisão própria para abrir exceção a essa regra —
+não é assumida aqui.
+
+**Opções:**
+- **A — Não usar Google Calendar no piloto.** Zero integração. Simples, sem risco de exposição externa,
+  mas não entrega a visualização complementar que o negócio pode querer.
+- **B — Leitura/visualização apenas, sem escrita.** Patrono lê a agenda pessoal do usuário no Google
+  Calendar (compromissos que o próprio usuário já tem lá) e a exibe lado a lado com a Agenda combinada
+  (Legal Deadline + `store.agenda`) da Fase 3 — sem nunca escrever Legal Deadline no Calendar do usuário.
+  Consistente com o modo `Leitura` já registrado no MASTER_HANDOFF §10.
+- **C — Espelhar Legal Deadline no Calendar em leitura funcional, sem permitir edição pelo Calendar.**
+  Patrono **escreve** eventos no Google Calendar do usuário (para que ele veja o prazo no próprio
+  calendário pessoal), mas o Calendar nunca pode alterar o Legal Deadline de volta. Tecnicamente viável,
+  mas **exige escrita externa** — o que colide com "nenhuma escrita externa no MVP" (§10) e exigiria uma
+  decisão própria abrindo exceção a essa regra global antes de ser autorizada, não apenas esta D4.1.
+- **D — Integração bidirecional.** **Não recomendada nesta etapa**, conforme a própria premissa desta
+  rodada — abriria a possibilidade de o Calendar alterar o prazo jurídico, o que a D1 already proíbe
+  explicitamente ("Google Calendar não é fonte de Legal Deadline"). Só seria cogitável mediante
+  fundamento arquitetural muito forte e nova decisão de negócio dedicada, não antecipada aqui.
+
+**Recomendação técnica:** **Opção B** (leitura pura, sem escrita) — é a única que não exige nenhuma
+exceção à regra "nenhuma escrita externa no MVP" e mantém a integração puramente como MASTER_HANDOFF §10
+já a define. **Opção C** fica registrada como alternativa possível, mas **condicionada** a uma decisão
+de negócio separada que abra exceção formal à regra de não escrita externa — não deve ser adotada apenas
+por conveniência de UX.
+
+**O que aparece no Calendar (aplicável apenas se B ou C forem homologadas):**
+- **originTypes que entram:** ambos podem aparecer, mas nunca sem identificação clara — `INTERNAL_CONTROL`
+  nunca pode ser rotulado como prazo processual no evento (mesma regra do item D4.5/D4.9 do plano do
+  Sprint 2, Fase 3).
+- **status que entram:** apenas `ativo` (a única condição que representa um prazo em aberto que faz
+  sentido aparecer numa agenda pessoal). `suspenso`/`cumprido`/`cancelado` **não geram evento novo**; um
+  evento já existente referente a um prazo que mudou para um desses status deve ser removido/marcado
+  como encerrado na próxima sincronização — nunca continuar aparecendo como compromisso ativo.
+- **Quando `date` muda:** o evento (se existir) é atualizado para a nova data — nunca um segundo evento
+  duplicado. Fonte canônica continua sendo `legalDeadlines`; o evento no Calendar é sempre derivado, nunca
+  editável a partir de lá (nenhum caminho de sincronização parte do Calendar de volta ao Patrono).
+- **Reabertura:** tratada como qualquer outra alteração do mesmo Legal Deadline (mesmo `id`) — o evento
+  volta a existir/ficar ativo, nunca um evento novo.
+- **Conteúdo sensível:** ver D4.7 — recomendação de título neutro, nunca o conteúdo jurídico completo.
+- **Política de privacidade/exclusão:** se o usuário revogar o acesso do Patrono ao próprio Google
+  Calendar, ou se um Legal Deadline for encerrado, os eventos correspondentes devem ser removidos do
+  Calendar do usuário (nunca deixados órfãos exibindo um estado desatualizado). Detalhamento técnico de
+  como isso é implementado fica para a Fase 4B (implementação), não para esta rodada documental.
+- **Indisponibilidade da integração:** ver D4.8 — nunca esconde nem apaga nenhum Legal Deadline dentro do
+  próprio Patrono; a integração cai isoladamente, sem afetar a fonte canônica.
+- **Nenhuma perda de informação canônica:** em nenhum cenário (ativação, desativação, falha, revogação de
+  acesso) o Calendar pode ser o único lugar onde uma informação de prazo existe — `legalDeadlines`
+  continua sendo a fonte de verdade, sempre.
+
+**Impactos:** nova integração externa (escopo mínimo de leitura do usuário, ou escrita limitada se C),
+novo risco de exposição de conteúdo jurídico fora do Patrono (ver D4.7, `docs/SECURITY.md`), nova
+superfície de revogação de acesso a gerenciar.
+
+**Riscos:** exposição de conteúdo sensível em um dispositivo/app de terceiros; cache/offline do Calendar
+mantendo informação desatualizada após uma mudança no Patrono; token/credencial de acesso ao Calendar do
+usuário precisa do mesmo tratamento de segredo já exigido para o Monday (MASTER_HANDOFF §10, "Segredos de
+integração — P0 de implementação").
+
+**Decisão de negócio:** **PENDENTE DE HOMOLOGAÇÃO.**
+
+### D4.2 — Regra de atribuição/responsável para "Minha Semana"
+
+> **Status:** PENDENTE DE HOMOLOGAÇÃO
+
+**Contexto.** "Minha Semana" não pode ser implementada até existir uma regra confiável de "isto é meu" —
+hoje `legalDeadlines` não tem nenhum campo de responsável/atribuição (ver D4.3).
+
+**Opções:**
+- **A — `responsible` como campo textual livre.** Mais rápido de implementar, mas sem integridade
+  referencial: não há como saber se o texto corresponde a um usuário real do sistema, não é
+  auditável de forma estruturada, não sobrevive a renomeação/desligamento de forma confiável, e não dá
+  base para RBAC nem para notificação futura.
+- **B — `responsibleUserId` canônico (referência a um `user.id` existente).** Integridade garantida por
+  referência a um cadastro real; auditável; permite RBAC ("só o responsável e quem tem escopo vê");
+  compatível com Agenda/Atenção (a mesma defesa em profundidade de `scopedLegalDeadlineRows()` pode
+  incorporar esse campo); base sólida para notificação futura.
+- **C — relação `Responsibility` separada** (entidade própria, já prevista como "Transversais" no
+  MASTER_HANDOFF §6). Mais flexível para múltiplos responsáveis/papéis (ex.: responsável principal +
+  participantes), mas é mais estrutura do que o MVP da Fase 4 provavelmente precisa agora.
+- **D — `owner` herdado do Legal Process.** Simples, mas incorreto para o caso de negócio já identificado
+  no plano (item D4.3, abaixo): "o prazo pode ter responsável diferente do responsável do processo".
+- **E — combinação controlada** (ex.: `responsibleUserId` opcional no Legal Deadline, com fallback para o
+  owner do Legal Process quando ausente).
+
+**Comparação:**
+
+| Critério | A (texto livre) | B (`responsibleUserId`) | C (`Responsibility`) | D (herda do processo) |
+|---|---|---|---|---|
+| Integridade referencial | Nenhuma | Sim (aponta para `user.id` real) | Sim | Sim (via processo) |
+| Auditabilidade | Fraca (texto pode divergir do histórico) | Forte (mesmo mecanismo de `audit()` já existente) | Forte | Forte, mas não distingue prazo×processo |
+| RBAC | Não dá base nenhuma | Base direta (`scoped()`/comparação de `userId`) | Base direta, mais estrutura | Já herdado, sem novo controle |
+| Troca de responsável | Edição de texto, sem histórico estruturado | `PATCH` auditado, com `before`/`after` | `PATCH`/novo registro de responsabilidade, auditado | Não se aplica (segue o processo) |
+| Desligamento de usuário | Texto "morto", sem sinalização | `responsibleUserId` aponta para usuário inativo → sinalizável (ver D4.11) | Igual a B | Segue o processo, mesmo problema no nível do processo |
+| Múltiplos responsáveis | Ambíguo (vírgula em texto?) | Não suporta nativamente (1 campo) | Suporta nativamente | Não se aplica |
+| Compatível com Agenda/Atenção (Fase 3) | Fraco (comparação de texto) | Direto (comparação de `userId`) | Direto | Direto (herdado) |
+| Uso futuro em notificação | Fraco | Bom (endereçável por `userId`) | Bom | Depende do processo ter 1 responsável claro |
+| Risco de inconsistência | **Alto** (erro de digitação, nome duplicado, apelido) | Baixo | Baixo | Baixo, mas modela errado o caso de negócio |
+
+**Recomendação técnica:** identidade canônica por `userId` (Opção B, com E como evolução natural se o
+negócio confirmar a necessidade de múltiplos responsáveis) — nunca texto livre. Não implementar ainda.
+
+**Decisão de negócio:** **PENDENTE DE HOMOLOGAÇÃO.**
+
+### D4.3 — Legal Deadline precisa de responsável próprio?
+
+> **Status:** PENDENTE DE HOMOLOGAÇÃO
+
+**Contexto.** Hoje `legalDeadlines` não tem nenhum campo de responsável — nem obrigatório, nem opcional,
+nem herdado. MASTER_HANDOFF §6/§7 já prevê "Cada Legal Deadline pode possuir Responsibility", mas isso
+nunca foi implementado nem homologado com o desenho concreto.
+
+**Possibilidades levantadas:**
+1. Responsável obrigatório (bloqueia criação sem ele).
+2. Responsável opcional.
+3. Herda do responsável do Legal Process (sem campo próprio no prazo).
+4. Prazo pode ter responsável diferente do responsável do processo (campo próprio, independente).
+5. Múltiplos responsáveis.
+6. Responsável principal + participantes.
+
+**Recomendação técnica (proposta, não homologada):**
+- `responsibleUserId` **opcional** no primeiro momento — não travar a criação de Legal Deadline em
+  fluxos onde o Jurídico ainda não decidiu quem acompanha aquele prazo especificamente.
+- Quando preenchido, **deve apontar para um usuário válido e ativo** — mesma validação de integridade já
+  aplicada a `processId` (rejeitar referência a um registro que não existe/não está no escopo).
+- **Pode ser diferente do responsável do processo** (possibilidade 4) — resolve o caso de negócio onde
+  quem acompanha o processo como um todo não é necessariamente quem precisa cumprir um prazo específico.
+- **Sem múltiplos responsáveis no MVP** (rejeita 5/6 por ora), salvo necessidade de negócio já
+  identificada e documentada explicitamente — mais uma dimensão de complexidade que o slice mínimo da
+  Fase 4 não precisa para entregar valor.
+- **Toda mudança de responsável auditada** pelo mesmo mecanismo de `audit()` já existente (`before`/
+  `after`, `reason`) — nenhuma reatribuição silenciosa.
+- **Nunca inferir automaticamente** o responsável a partir de heurística (quem criou o registro, quem é
+  líder do departamento etc.) — sempre atribuição explícita.
+
+Esta recomendação **não está homologada** — é uma proposta técnica registrada para decisão, conforme
+pedido explicitamente nesta rodada.
+
+**Decisão de negócio:** **PENDENTE DE HOMOLOGAÇÃO.**
+
+### D4.4 — Semântica de "Confirmado pelo Jurídico"
+
+> **Status:** HOMOLOGADO (a regra de linguagem já é D1.4; esta seção apenas formaliza os casos de borda
+> explicitamente pedidos nesta rodada, sem alterar a regra já aprovada)
+
+A D1.4 (seção 1.1, acima) já homologou a regra: a existência de um Legal Deadline válido, registrado por
+usuário autorizado do Jurídico, **é suficiente** para a plataforma apresentar **"Confirmado pelo
+Jurídico"** — isso nunca significa `evidenceReference`, prova documental, documento anexado, validação
+judicial ou validação externa.
+
+**PODE exibir:** "Confirmado pelo Jurídico" — para qualquer Legal Deadline que atenda D1.4 (registrado
+por usuário autorizado, vinculado a Legal Process válido, `date`/`origin`/`originType` válidos, dentro do
+escopo do usuário).
+
+**NÃO PODE exibir sem `evidenceReference` estruturado** (que continua não implementado, D1.4): "Comprovado
+documentalmente", "Documento validado", "Evidência confirmada", "Fonte oficial comprovada" — nenhuma
+variação dessas frases, em nenhuma tela, mesmo que `evidenceReference` venha a existir futuramente sem
+que a UI seja revisada para essa nova semântica.
+
+**Casos de borda (fechados agora, formalizando o que a D1.4 já implica):**
+- **Registro legado `requires_review`** (`dataIntegrity === 'requires_review'`, Fase 2/3): **não pode**
+  exibir "Confirmado pelo Jurídico" — falta `originType`/`status` válidos, um dos requisitos da própria
+  D1.4. Deve exibir "Requer revisão" (ver D4.6) até ser revisado/classificado manualmente.
+- **`INTERNAL_CONTROL`:** pode exibir "Confirmado pelo Jurídico" normalmente — a D1.4 não distingue por
+  `originType`, só por autoria/autorização do registro.
+- **`suspenso`:** continua "Confirmado pelo Jurídico" (o registro continua válido; suspensão é um estado
+  do prazo, não uma revogação da autoria) — mas a tela deve deixar claro que o estado atual é "Suspenso"
+  (D4.6), nunca sugerir que o prazo está ativo.
+- **`cumprido`:** idem — "Confirmado pelo Jurídico" continua válido; estado atual é "Cumprido".
+- **`cancelado`:** idem — "Confirmado pelo Jurídico" descreve a autoria do registro histórico, não que o
+  prazo continua vigente; estado atual é "Cancelado", deixado claro na mesma tela.
+- **Prazo reaberto:** "Confirmado pelo Jurídico" permanece válido (mesmo registro, mesma autoria original);
+  o histórico de reabertura (motivo, responsável, data) fica disponível via o mesmo mecanismo de
+  auditoria já existente (Fase 1/2/3), nunca substituindo a informação de confirmação original.
+
+**Decisão de negócio:** já **HOMOLOGADA** pela D1.4; esta seção é esclarecimento técnico dos casos de
+borda, não uma nova decisão — mas fica sujeita à revisão da Cristiane se algum caso de borda acima for
+julgado incorreto.
+
+### D4.5 — Labels de apresentação para `originType`
+
+> **Status:** PENDENTE DE HOMOLOGAÇÃO (UX/copy)
+
+**Contexto.** O enum técnico (`JUDICIAL_PROCESSUAL`/`INTERNAL_CONTROL`, D1.3) não muda — esta decisão é
+só sobre o texto exibido ao usuário.
+
+**Opções levantadas:**
+- `JUDICIAL_PROCESSUAL` → "Prazo processual" ou "Prazo jurídico/processual".
+- `INTERNAL_CONTROL` → "Controle interno" ou "Prazo interno de controle".
+
+**Recomendação técnica:** "Prazo processual" e "Controle interno" — mais curtos, mais claros em um badge/
+label de lista, sem ambiguidade com o enum técnico. Não altera nenhum enum/valor persistido — é
+puramente de apresentação (mesmo princípio já usado no plano do Sprint 2 desde a Fase 2/3: INTERNAL_CONTROL
+nunca é rotulado como prazo processual).
+
+**Decisão de negócio:** **PENDENTE DE HOMOLOGAÇÃO.**
+
+### D4.6 — Labels de apresentação para `status` e condições derivadas
+
+> **Status:** PENDENTE DE HOMOLOGAÇÃO (UX/copy)
+
+**Persistidos (enum fechado, D1/Fase 1 — inalterado por esta decisão):** `ativo`, `suspenso`, `cumprido`,
+`cancelado`.
+
+**Derivados de view (Fase 2/3 — nunca persistidos, inalterado por esta decisão):** `overdue`/vencido,
+`upcoming`/próximo, `requires_review`.
+
+**Labels propostas:**
+
+| Valor técnico | Label em português proposta |
+|---|---|
+| `ativo` | Ativo |
+| `suspenso` | Suspenso |
+| `cumprido` | Cumprido |
+| `cancelado` | Cancelado |
+| `OVERDUE` (derivado) | Vencido |
+| `UPCOMING` (derivado) | Próximo |
+| `REQUIRES_REVIEW` (derivado) | Requer revisão |
+
+**Confirmação (já garantida pelo código, reafirmada aqui):** nenhum valor derivado (`OVERDUE`/`UPCOMING`/
+`REQUIRES_REVIEW`) é ou pode se tornar um quinto valor do campo `status` persistido — são categorias
+calculadas em tempo de leitura por `isLegalDeadlineOverdue()`/`civilDateAfterDays()`/
+`legalDeadlineIntegrityFlag()` (Fase 2/3), nunca gravadas.
+
+**Decisão de negócio:** **PENDENTE DE HOMOLOGAÇÃO** (as labels em si; a regra técnica de que nada disso
+vira status persistido já está homologada desde a D1/"Status do Legal Deadline").
+
+### D4.7 — Conteúdo sensível em eventos de Calendar
+
+> **Status:** PENDENTE DE HOMOLOGAÇÃO — aplicável apenas se D4.1 aprovar B ou C
+
+**Opções:**
+- **A — Título completo do processo.** Máxima utilidade para o usuário, máxima exposição de dado
+  jurídico em um app de terceiros (Google Calendar), incluindo em notificações push do próprio Google.
+- **B — Número do processo.** Ainda identifica o processo especificamente; exposição intermediária.
+- **C — Título neutro** (ex.: descrição genérica sem identificar o processo/parte).
+- **D — Apenas "Prazo jurídico — Patrono".** Mínima exposição possível — o evento não revela nada além
+  de "existe um prazo jurídico nesta data"; todo detalhe fica exclusivamente no Patrono.
+- **E — Configurável por nível de confidencialidade.** Mais flexível, mas adiciona uma dimensão de
+  configuração/manutenção que o MVP da Fase 4 não precisa para entregar valor.
+
+**Recomendação técnica:** minimização de dados — **Opção D** ("Prazo jurídico — Patrono"), com o detalhe
+sensível permanecendo exclusivamente no Patrono, acessível apenas por quem já tem escopo sobre o registro
+canônico. Um evento de calendário sincroniza com contas pessoais fora do controle de acesso do Patrono
+(podem estar logadas em dispositivos pessoais, compartilhadas, ou com apps de terceiros conectados) — o
+princípio de menor exposição deve prevalecer sobre a conveniência de identificar o processo direto no
+título do evento.
+
+**Decisão de negócio:** **PENDENTE DE HOMOLOGAÇÃO.**
+
+### D4.8 — Fallback quando a integração de Calendar está indisponível
+
+> **Status:** HOMOLOGADO (herda a regra global já aprovada; aplicável apenas se D4.1 aprovar B ou C)
+
+Esta não é uma decisão nova — é a aplicação, à integração de Calendar, da regra global já homologada em
+MASTER_HANDOFF Anexo A (regras 3 e 14) e já implementada para o Monday (`docs/INTEGRATIONS.md`, "Falha de
+fonte — preservação do último dado válido"): **"Falha de fonte ≠ ausência de dado"** e **"falha de fonte
+preserva o último dado válido com status e timestamp; nunca apaga nem converte em zero"**.
+
+Aplicado ao Calendar: se a integração estiver indisponível, o Patrono **continua funcionando
+normalmente**. Nenhum Legal Deadline pode desaparecer, mudar `status`, mudar `date`, perder a confirmação
+("Confirmado pelo Jurídico") ou ser marcado como inexistente por causa disso — a integração de Calendar é
+estritamente um espelho/visualização; a fonte canônica (`legalDeadlines`) nunca depende dela para existir
+ou ser exibida no próprio Patrono (Agenda/Atenção da Fase 3 continuam funcionando exatamente como hoje,
+sem Calendar). A integração indisponível deve sinalizar apenas `integration unavailable`/`stale`/`partial`
+(mesma semântica de source-down já usada para o Monday), nunca mostrar zero por indisponibilidade.
+
+**Decisão de negócio:** já coberta pela regra global homologada (Anexo A); nenhuma homologação nova
+necessária para este ponto específico, apenas confirmação de que a Fase 4 não criará uma exceção.
+
+### D4.9 — Confirmação: nenhuma automação jurídica, mesmo na Fase 4
+
+> **Status:** HOMOLOGADO (reafirma regras já vigentes; nenhuma decisão nova)
+
+Confirmado documentalmente, sem ambiguidade, que a Fase 4 (nem em sua implementação funcional futura,
+Fase 4B) introduzirá:
+
+- cálculo automático de prazo;
+- interpretação automática de intimação;
+- criação automática de Legal Deadline;
+- mudança automática de `status` jurídico;
+- reabertura automática;
+- confirmação automática;
+- decisão jurídica por IA.
+
+Isso já é regra vigente — D1 ("Regra oficial do MVP", itens 17–18: "a Patrono MVP não calcula prazo
+processual automaticamente"; "nenhuma engine de cálculo jurídico será criada no Sprint 2"), MASTER_HANDOFF
+§13 (Patrono IA) e §14 (Automações), e Anexo A. Qualquer automação futura — mesmo que pareça pequena ou
+conveniente — **exigirá uma nova decisão formal**, com o mesmo rito de homologação da D1, nunca uma
+introdução silenciosa via código.
+
+**Decisão de negócio:** já **HOMOLOGADA** (reafirmação de regra existente).
+
+### D4.10 — "Minha Semana": escopo, se vier a ser implementada
+
+> **Status:** PENDENTE DE HOMOLOGAÇÃO
+
+**Contexto.** Depende de D4.2/D4.3 (regra de atribuição/responsável) estarem decididas primeiro — sem
+`responsibleUserId`, não há como definir "meus itens" com integridade.
+
+**Princípio já fechado por esta rodada (não é decisão de negócio, é consequência arquitetural):** "Minha
+Semana" é **VIEW**, nunca source of truth — reúne, sem duplicar, Legal Deadlines atribuídos e Agenda
+Events atribuídos ao usuário logado, e eventualmente Tasks no futuro. **Legal Deadline ≠ Task** — nenhuma
+Task é criada automaticamente a partir de um Legal Deadline (D4.9 já proíbe isso).
+
+**Janela temporal — opções:**
+- Segunda a domingo (semana civil local).
+- Próximos 7 dias corridos a partir de hoje (janela móvel).
+- Semana civil atual (equivalente à primeira opção, redação alternativa).
+
+**Recomendação técnica:** semana civil local, segunda a domingo, fuso `America/Sao_Paulo` — mesmo padrão
+de data civil já usado em todo o Sprint 2 (`todayCivilDate()`/`civilDateAfterDays()`, sem conversão para
+UTC). Uma janela civil fixa (vs. "próximos 7 dias corridos") é mais previsível para o usuário planejar a
+semana de trabalho e mais simples de testar de forma determinística.
+
+Esta recomendação **fica registrada como proposta até aprovação** — não é homologação.
+
+**Decisão de negócio:** **PENDENTE DE HOMOLOGAÇÃO.**
+
+### D4.11 — Responsável desligado/desativado/fora de escopo
+
+> **Status:** PENDENTE DE HOMOLOGAÇÃO (depende de D4.3 definir que existe `responsibleUserId`)
+
+**Contexto.** Se `responsibleUserId` vier a existir (D4.3), é preciso decidir o que acontece quando esse
+usuário é desativado, muda de departamento, perde escopo, ou deixa a empresa.
+
+**Princípio inegociável (não é opção, é consequência de regras já homologadas):** nunca apagar histórico.
+O Legal Deadline continua existindo, com todo seu histórico de auditoria intacto, independentemente do
+que aconteça com o usuário que já foi responsável por ele.
+
+**Sugestão técnica (proposta, não homologada):**
+- `responsibleUserId` histórico **permanece** no registro/no evento de auditoria — nunca é removido
+  retroativamente.
+- Um novo responsável **deve ser atribuído formalmente** (mesmo mecanismo de `PATCH` auditado de D4.3) —
+  nunca reatribuído silenciosamente por heurística.
+- Enquanto não houver reatribuição, a view (Agenda/Atenção/detalhe) **sinaliza "Responsável inativo"** —
+  nunca esconde o prazo, nunca finge que ele não tem mais responsável definido, e nunca o trata como
+  "sem dono" de forma equivalente a nunca ter tido um.
+
+Não implementar ainda — fica registrado para quando D4.3 for homologada e a implementação funcional
+(Fase 4B) for autorizada.
+
+**Decisão de negócio:** **PENDENTE DE HOMOLOGAÇÃO.**
+
+### D4.12 — Checklist de homologação formal do piloto (Sprint 2)
+
+> **Status:** PROPOSTA TÉCNICA (o checklist em si não é uma "decisão de negócio" a homologar — é o
+> instrumento que a Cristiane usa para homologar o piloto; fica sujeito a ajuste antes de ser aplicado)
+
+Critérios objetivos mínimos, alinhados a MASTER_HANDOFF §32 ("Checklist de Homologação") e §30
+("Checklist QA"):
+
+1. Legal Deadline canônico funcionando (Fase 1) — ✅ implementado e testado.
+2. `originType` obrigatório (D1.3/Fase 1) — ✅ implementado e testado.
+3. `status` como enum fechado (Fase 1) — ✅ implementado e testado.
+4. Reabertura auditada, mesmo `id` (Fase 1) — ✅ implementado e testado.
+5. Atraso como condição derivada, nunca persistida (Fase 1) — ✅ implementado e testado.
+6. Dashboard jurídico sem prazo bruto do Monday (Fase 2) — ✅ implementado e testado.
+7. Listagem/filtro de Legal Deadline (Fase 2) — ✅ implementado e testado.
+8. Detalhe/histórico de Legal Deadline (Fase 2) — ✅ implementado e testado.
+9. Agenda/Atenção sem duplicidade de Legal Deadline (Fase 3) — ✅ implementado e testado.
+10. `companyId`/`speId` respeitados em toda view (Fases 2/3) — ✅ implementado e testado.
+11. TI sem acesso a conteúdo jurídico (Fases 1–3) — ✅ implementado e testado.
+12. Administrador técnico sem conteúdo jurídico automático (Fases 1–3) — ✅ implementado e testado.
+13. Monday sem criar/confirmar prazo (D1, Fases 1–3) — ✅ implementado e testado.
+14. DATA/CITAÇÃO do Monday nunca geram prazo (Fases 2/3, regressão obrigatória testada) — ✅ implementado
+    e testado.
+15. CI verde (Node 20.x/22.x) no head homologado — ✅ confirmado nas Fases 1–3.
+16. Testes de regressão verdes (nenhum teste removido entre fases) — ✅ confirmado (196 testes ao final
+    da Fase 3).
+17. Documentação atualizada (`docs/SPRINT2-PLANO.md`, `docs/QA.md`, `docs/DATA_MODEL.md`) — ✅ atualizada
+    a cada fase.
+18. Nenhum P0 aberto no escopo entregue (Fases 1–3) — ✅ confirmado a cada fase, sem P0 residual.
+19. P1 conhecidos classificados — ✅ ver `docs/SECURITY.md`/`docs/PERMISSIONS.md` ("Pendências
+    conhecidas"/"P0 conhecidos e ainda abertos") — nenhum bloqueia o escopo já entregue (Fases 1–3).
+20. Decisão formal sobre Calendar (D4.1) — ⏳ **PENDENTE DE HOMOLOGAÇÃO**.
+21. Decisão formal sobre responsável (D4.2/D4.3) — ⏳ **PENDENTE DE HOMOLOGAÇÃO**.
+22. Decisão formal sobre Minha Semana (D4.10) — ⏳ **PENDENTE DE HOMOLOGAÇÃO**.
+23. Decisão formal sobre copy de confirmação (D4.4/D4.5/D4.6) — ⏳ **PARCIALMENTE HOMOLOGADA** (D4.4 já
+    homologada via D1.4; D4.5/D4.6 — labels específicas — pendentes).
+
+**Itens 1–19: satisfeitos pelo escopo já entregue nas Fases 1–3.** Itens 20–23 são exatamente o objeto
+desta rodada documental — não podem ser marcados "concluído" até homologação explícita da Cristiane (ver
+D4.14).
+
+### D4.13 — Matriz GO / NO-GO para a implementação funcional da Fase 4 (Fase 4B)
+
+> **Status:** PROPOSTA TÉCNICA
+
+| Condição | GO | NO-GO |
+|---|---|---|
+| Google Calendar (D4.1) | Opção homologada (A, B, ou C com exceção formal à regra de não-escrita) | Nenhuma opção homologada, ou D homologada sem fundamento arquitetural registrado |
+| Responsável do Legal Deadline (D4.2/D4.3) | Modelo (`responsibleUserId` ou equivalente) homologado, com regra de integridade definida | Responsável permanece indefinido, ou modelo escolhido é campo textual livre sem plano de migração |
+| Minha Semana (D4.10) | Janela temporal homologada, dependência de D4.3 já resolvida | Depende de responsável ainda pendente, ou janela temporal não definida |
+| Exposição de dado sensível em Calendar (D4.7) | Política de título/conteúdo homologada | Continua indefinida, mas Calendar já foi ativado (nunca aceitável) |
+| Source of truth | Confirmado: `legalDeadlines` continua único, nada muda | Qualquer desenho em que Calendar/Minha Semana vira fonte de dado |
+| Regra de deleção/suspensão do responsável (D4.11) | Definida (sinalização "Responsável inativo", nunca exclusão de histórico) | Indefinida |
+| Testes esperados | Cenários de teste da Fase 4B já esboçados em `docs/QA.md` ("QA planejado — Fase 4") | Nenhum critério de aceite/teste esperado definido antes de codificar |
+
+**Resultado desta rodada:** **NO-GO para a Fase 4B** — nenhuma das condições GO acima está homologada
+ainda (todas as decisões de negócio permanecem PENDENTE DE HOMOLOGAÇÃO, exceto as reafirmações de regra
+já existente em D4.4/D4.8/D4.9). A Fase 4B não deve ser iniciada até que a Cristiane homologue, no
+mínimo, D4.1, D4.2/D4.3 e D4.10.
+
+### D4.14 — Decisões que exigem homologação da responsável de negócio (Cristiane)
+
+Lista objetiva, para uso direto na reunião/rito de homologação:
+
+1. Usar ou não Google Calendar no piloto (D4.1, opção A/B/C — D não recomendada).
+2. Se usar Calendar: somente leitura (B) ou espelhamento com escrita limitada (C, exige exceção formal à
+   regra de não-escrita externa)?
+3. Quais `originType` vão ao Calendar, e com qual tratamento por `status` (D4.1).
+4. Título do evento no Calendar: neutro/mínimo ou com identificação do processo (D4.7).
+5. Responsável do Legal Deadline: obrigatório ou opcional (D4.3)?
+6. Modelo de campo: `responsibleUserId` (recomendado) ou outra abordagem (D4.2/D4.3)?
+7. "Minha Semana": semana civil (segunda a domingo) ou janela móvel de próximos 7 dias (D4.10)?
+8. Copy de confirmação: aprovar a semântica "Confirmado pelo Jurídico" já fixada na D1.4 e os casos de
+   borda formalizados em D4.4 (nenhuma mudança de regra, apenas confirmação explícita do entendimento).
+9. Label de `INTERNAL_CONTROL` na UI: "Controle interno" ou "Prazo interno de controle" (D4.5).
+10. Labels de `status`/derivados em português (D4.6) — aprovar a tabela proposta ou ajustar a redação.
+11. Se prazo `cumprido`/`cancelado` continua visível na Agenda histórica, ou é ocultado por padrão (ponto
+    levantado no pedido desta rodada, ainda sem proposta técnica fechada — precisa de definição de
+    negócio sobre o valor de manter isso visível por padrão vs. como filtro).
+12. Regra de usuário inativo/desligado como responsável (D4.11) — aprovar a sinalização "Responsável
+    inativo" ou definir outra tratativa.
+
+---
+
 ## 2. ADRs de Engenharia — Fase 0 (Sprint 1)
 
 Decisões técnicas locais e reversíveis, permitidas pela v1.3 (§27, linhas D8/D9: "Não bloqueia decisão
