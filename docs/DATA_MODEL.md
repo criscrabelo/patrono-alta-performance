@@ -332,3 +332,19 @@ esta seção apenas consolida o estado final do modelo de dados ao encerrar o Sp
 - O restante do modelo (Legal Deadline, `originType`/`status` fechados, `responsibleUserId`,
   `companyId`/`speId`/`department`, auditoria) permanece exatamente como descrito nas seções acima — sem
   alteração nesta rodada de encerramento.
+
+## Hardening H1A — persistência (docs/PRODUCTION_GATE.md, docs/DECISIONS.md PROD-H1-01)
+
+**Nenhum modelo de dados foi redesenhado.** O H1A move ONDE a store é persistida (arquivo JSON local →
+PostgreSQL, quando `DATABASE_URL` configurada), nunca O QUE é modelado: a mesma estrutura de objeto JS
+(`seed`, `store.records.*`, `store.agenda`, `store.audit`, etc.) continua existindo tal como descrita em
+todo este documento, agora guardada como um único documento JSONB (`app_store`, ver
+`migrations/003_app_store.sql`) em vez de um arquivo `.json` no disco. `readStore()`/`writeStore()`
+mantêm exatamente a mesma assinatura e o mesmo formato de retorno usados por toda a aplicação.
+
+**Isso significa que nenhuma FK relacional real existe entre entidades** — Legal Process → Legal
+Deadline, `responsibleUserId` → `users`, continuam validados exclusivamente em JavaScript
+(`validateLegalDeadline()`, `canBeResponsibleForLegalDeadline()`), exatamente como antes do H1A. Uma
+normalização relacional real (tabela própria por entidade, com FK) é H1B — deliberadamente não iniciada
+nesta rodada, começando por `users`, `legalProcesses`, `legalDeadlines`, `audit`, nesta ordem, quando
+autorizada.

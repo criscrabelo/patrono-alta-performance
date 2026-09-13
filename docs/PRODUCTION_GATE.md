@@ -71,9 +71,9 @@ e um checklist mínimo de LGPD. Não cobre: desenho de novas funcionalidades de 
 
 | ID | Área | Achado | Risco | Severidade | Bloqueia produção? | Correção recomendada | Critério de aceite | Dependência |
 |---|---|---|---|---|---|---|---|---|
-| PG-01 | Persistência | `data/store.json` é a única persistência ativa; reescrita integral sem lock/transação a cada mutação | Corrupção sob concorrência, perda de durabilidade, sem escala horizontal | **P0** | SIM | Migrar para PostgreSQL (schema já preparado em `migrations/`), conectar `database.js` ao runtime | Runtime lê/escreve exclusivamente via banco transacional; testes de concorrência passam | H1 |
-| PG-02 | Persistência | Nenhum lock/atomicidade entre leitura e escrita do JSON | Race condition (last-write-wins silencioso) sob requisições concorrentes | **P0** | SIM | Resolvido junto com PG-01 (transação de banco) | Nenhuma escrita concorrente perde dado sem detecção | H1 |
-| PG-03 | Persistência | Sem versionamento de schema/migração automática no boot | Drift entre ambientes, deploy quebrado silenciosamente | **P1** | SIM | Rodar migrations no pipeline de deploy, não manualmente | Deploy falha explicitamente se a migration pendente não rodar | H1 |
+| PG-01 | Persistência | ~~`data/store.json` é a única persistência ativa; reescrita integral sem lock/transação a cada mutação~~ **FECHADO por H1A** (ver seção 17) — quando `DATABASE_URL` configurada, PostgreSQL é a persistência canônica; cada escrita é 1 UPDATE transacional | Corrupção sob concorrência, perda de durabilidade, sem escala horizontal | ~~**P0**~~ **FECHADO** | ~~SIM~~ NÃO (fechado) | Migrar para PostgreSQL (schema já preparado em `migrations/`), conectar `database.js` ao runtime | Runtime lê/escreve exclusivamente via banco transacional; testes de concorrência passam | H1A |
+| PG-02 | Persistência | ~~Nenhum lock/atomicidade entre leitura e escrita do JSON~~ **FECHADO por H1A** — concorrência otimista real via `version`/CAS (`storage/postgres-store.js`), conflito responde 409, nunca sobrescrita silenciosa | Race condition (last-write-wins silencioso) sob requisições concorrentes | ~~**P0**~~ **FECHADO** | ~~SIM~~ NÃO (fechado) | Resolvido junto com PG-01 (transação de banco) | Nenhuma escrita concorrente perde dado sem detecção | H1A |
+| PG-03 | Persistência | ~~Sem versionamento de schema/migração automática no boot~~ **FECHADO por H1A** — `schema_migrations` + `npm run migrate` determinístico (`scripts/migrate.js`) | Drift entre ambientes, deploy quebrado silenciosamente | ~~**P1**~~ **FECHADO** | ~~SIM~~ NÃO (fechado) | Rodar migrations no pipeline de deploy, não manualmente | Deploy falha explicitamente se a migration pendente não rodar | H1A |
 | PG-04 | Sessão/Auth | Sessões em `Map()` em memória, perdidas a cada reinício do processo | Logout forçado de todos os usuários a cada deploy/restart; sem HA | **P1** | SIM | Sessão em armazenamento compartilhado (banco/cache), sobrevivendo a restart/múltiplas instâncias | Sessão válida sobrevive a um restart do processo | H2, PG-01 |
 | PG-05 | Sessão/Auth | Não há `logout` que invalide a sessão no servidor | Token roubado continua válido até expirar mesmo após "logout" do usuário | **P1** | SIM | Endpoint de logout que remove a sessão do armazenamento server-side | Token usado após logout retorna 401 | H2 |
 | PG-06 | Sessão/Auth | Não há revogação ativa de sessão (ex.: force-logout administrativo) | Sessão comprometida não pode ser encerrada remotamente | **P1** | SIM | Endpoint administrativo de revogação por usuário/sessão | Sessão revogada devolve 401 imediatamente | H2 |
@@ -97,12 +97,19 @@ e um checklist mínimo de LGPD. Não cobre: desenho de novas funcionalidades de 
 | PG-24 | LGPD | Monday.com e (futuramente) Google Calendar são suboperadores/subprocessadores sem lista/DPA documentado | Ausência de rastreabilidade de para onde dados pessoais trafegam | **P1** | SIM | Documentar suboperadores e base legal de transferência | Lista de suboperadores mantida em `docs/SECURITY.md`/`docs/INTEGRATIONS.md` | — |
 | PG-25 | Dependências | Sem `npm audit` como gate de CI (hoje é apenas informativo, `|| true`) | Nova vulnerabilidade alta/crítica pode entrar sem bloquear o merge | **P2** | NÃO (aceitável com revisão manual continuada) | Tornar `npm audit` bloqueante para novas vulnerabilidades altas/críticas além da já conhecida | CI falha em nova vulnerabilidade alta/crítica não registrada como waiver | H9 |
 
-**Contagem (25 achados, PG-01 a PG-25 — soma exata da tabela acima):**
+**Contagem original (25 achados, PG-01 a PG-25 — soma exata da tabela acima na abertura do gate):**
 
 - **P0 = 10** — PG-01, PG-02, PG-07, PG-08, PG-10, PG-11, PG-19, PG-20, PG-21, PG-22.
 - **P1 = 10** — PG-03, PG-04, PG-05, PG-06, PG-09, PG-12, PG-15, PG-17, PG-23, PG-24.
 - **P2 = 5** — PG-13, PG-14, PG-16, PG-18, PG-25.
 - **P3 = 0** — nenhum achado desta rodada é "melhoria cosmética" já não coberta por um P1/P2 real.
+
+**Contagem após o Hardening H1A (ver seção 17) — PG-01/PG-02/PG-03 fechados:**
+
+- **P0 aberto = 8** — PG-07, PG-08, PG-10, PG-11, PG-19, PG-20, PG-21, PG-22 (PG-01/PG-02 fechados).
+- **P1 aberto = 9** — PG-04, PG-05, PG-06, PG-09, PG-12, PG-15, PG-17, PG-23, PG-24 (PG-03 fechado).
+- **P2 = 5** — inalterado.
+- **Fechados = 3** — PG-01, PG-02, PG-03.
 
 PG-01/PG-02 são exibidos como dois achados por clareza de causa raiz (persistência sem transação e sem
 lock são sintomas distintos do mesmo problema), mas compartilham a mesma correção (H1) — contados
@@ -116,7 +123,7 @@ própria classificação declarada.
 
 | Gate | Status atual | Bloqueia produção? | Critério GO |
 |---|---|---|---|
-| Persistência | `data/store.json`, sem transação/lock | SIM | PostgreSQL conectado ao runtime, testado sob concorrência |
+| Persistência | **FECHADO por H1A** — PostgreSQL conectado ao runtime quando `DATABASE_URL` configurada, transacional e testado sob concorrência real (ver seção 17); fallback local (JSON) só fora de produção | NÃO (fechado) | ~~PostgreSQL conectado ao runtime, testado sob concorrência~~ atendido |
 | Sessões | Em memória, sem logout/revogação server-side | SIM | Sessão persistida + logout/revogação funcionais |
 | Autenticação (credenciais) | Senha e MFA únicos compartilhados | SIM | Credencial e MFA por usuário |
 | Rate limiting | Inexistente | SIM | Rate limiting em rotas sensíveis e na API geral |
@@ -284,14 +291,75 @@ Nenhum. Todos os achados P0/P1 permanecem abertos, sem exceção.
 - [ ] Comunicação definida para stakeholders em caso de rollback
 - [ ] Post-mortem obrigatório após qualquer rollback em produção
 
+## 17. Status do Hardening H1A (IMPLEMENTADO — AGUARDANDO HOMOLOGAÇÃO)
+
+**Decisão relacionada:** `docs/DECISIONS.md`, PROD-H1-01.
+
+**Arquitetura implementada (H1A):** PostgreSQL como persistência canônica quando `DATABASE_URL` está
+configurada, via uma camada única (`storage/`) que a aplicação inteira consome através de
+`readStore()`/`writeStore()` — mesma assinatura de sempre, agora assíncrona. A store inteira (o mesmo
+objeto JS que hoje vive em `data/store.json`) é persistida como UM documento JSONB em `app_store` (id
+fixo = 1, coluna `version` para concorrência otimista). Esta é uma arquitetura de PONTE deliberada — ver
+"O que H1A NÃO fecha" abaixo — não um schema relacional normalizado por entidade.
+
+**Critérios fechados de fato, com teste real (não apenas leitura de código):**
+- **PG-01** (persistência sem transação): PostgreSQL é a persistência ativa; cada escrita é 1 `UPDATE`
+  atômico. Testado contra um Postgres real (`tests/storage.test.js`, `tests/security-integration-postgres.test.js`).
+- **PG-02** (race condition/last-write-wins): concorrência otimista real — duas leituras da mesma
+  versão, a primeira escrita vence, a segunda recebe `StoreConflictError`/HTTP 409. Testado com duas
+  leituras concorrentes via `storage/postgres-store.js` diretamente E com duas requisições HTTP `PATCH`
+  simultâneas reais contra o `handler` de `server.js`.
+- **PG-03** (schema sem versionamento): `schema_migrations` + `npm run migrate` (`scripts/migrate.js`),
+  determinístico, idempotente, `exit code` correto em falha. Testado rodando contra um Postgres real.
+
+**O que H1A NÃO fecha (H1B, deliberadamente fora desta rodada — não fechar silenciosamente):**
+- Nenhuma FK relacional real entre entidades — Legal Process → Legal Deadline, `responsibleUserId` →
+  `users` continuam validados só em JavaScript, exatamente como antes.
+- Nenhuma entidade ganhou tabela própria — `users`, `legalProcesses`, `legalDeadlines`, `audit` (nesta
+  ordem, conforme decidido) permanecem dentro do documento JSONB único até o H1B.
+- Nenhuma garantia de integridade referencial no nível do banco.
+
+**Fail-fast em produção:** `NODE_ENV=production` sem `DATABASE_URL` lança `FailFastError` na configuração
+do storage — o processo não inicia; se `DATABASE_URL` está configurada mas o Postgres está
+inalcançável/schema incompatível, `storage.init()` (chamado antes de o servidor aceitar conexões) rejeita
+e o processo termina com `process.exit(1)`. Nunca cai silenciosamente em modo arquivo. Testado
+(`storage.configure()` com `nodeEnv:'production'` sem `databaseUrl` lança `FailFastError`).
+
+**Healthcheck:** `GET /api/health` expõe `persistence` (`'postgres'`|`'json-local-fallback'`),
+`databaseConfigured`, `databaseReachable`, `schemaReady` — nunca host/usuário/senha/connection string.
+Testado contra Postgres real.
+
+**Backup/Restore sob Postgres:** `POST /api/backup` continua funcionando como snapshot cifrado sob
+demanda (não é o backup canônico de produção — isso é H5). `POST /api/backup/restore` é bloqueado
+explicitamente sob backend Postgres (`RESTORE_NOT_SUPPORTED_FOR_POSTGRES`, HTTP 501) — nunca tenta
+reconciliar um backup antigo por cima do runtime Postgres sem mecanismo validado.
+
+**Importação JSON → PostgreSQL:** `scripts/import-data.js`, com `--dry-run` (conta por coleção, detecta
+duplicados/erros, não grava nada) e importação real (recusa sobrescrever dado existente sem `--force`,
+nunca apaga o arquivo JSON de origem, roda dentro de transação). Testado, incluindo contra um Postgres
+real (importação idêntica, recusa sem `--force`, sucesso com `--force`).
+
+**Testes:** 24 novos (`tests/storage.test.js`: 21; `tests/security-integration-postgres.test.js`: 3 — mais
+1 teste de "pulado explicitamente" em cada arquivo quando `TEST_DATABASE_URL` não está configurada).
+Todos os 278 testes passam tanto sem Postgres disponível (fallback local, 2 suites puladas
+explicitamente) quanto com um Postgres real conectado (`TEST_DATABASE_URL`, 0 puladas). CI
+(`.github/workflows/ci.yml`) ganhou um serviço `postgres:16` isolado só para esta finalidade.
+
+**Por que "aguardando homologação" e não "concluído":** a implementação está testada e funcional, mas
+depende de revisão humana (mesmo rito de toda mudança de código deste projeto) antes de qualquer
+autorização de uso — e H1B (normalização relacional) permanece pendente, então PG-01/PG-02/PG-03 estão
+fechados apenas no escopo específico que H1A se propôs a resolver (persistência real, concorrência real,
+versionamento de schema real), não como uma reescrita relacional completa.
+
 ## 16. Decisão final atual
 
-**NO-GO PARA PRODUÇÃO.**
+**NO-GO PARA PRODUÇÃO** — inalterado por esta rodada de hardening.
 
-10 achados P0 abertos (persistência, credenciais/MFA compartilhados, ausência de rate limiting, ausência
-de retenção/legal hold, ausência de incident response, backup/restore não validado, ausência de
-infraestrutura de deploy como código), mais 10 P1 e 5 P2 (25 achados no total, ver seção 4). Na matriz da
-seção 5, 13 dos 17 gates avaliados bloqueiam produção hoje (CSRF, Secrets, Auditoria e OAuth Calendar não
-bloqueiam). Nenhum waiver foi emitido. O Sprint 2 permanece concluído no escopo homologado
-(`docs/DECISIONS.md`, D2-CLOSE) — este documento não reabre nem contradiz aquela decisão; apenas formaliza
-que produção é um gate técnico/de negócio separado, ainda não atendido.
+Após o H1A: **8 P0 abertos** (credenciais/MFA compartilhados, ausência de rate limiting, ausência de
+retenção/legal hold, ausência de incident response, backup/restore de produção não validado — H5,
+ausência de infraestrutura de deploy como código), **9 P1 abertos**, **5 P2** — 22 achados abertos, **3
+fechados** (PG-01/PG-02/PG-03, ver seção 17). Na matriz da seção 5, a linha "Persistência" deixa de
+bloquear; os demais 12 gates bloqueantes permanecem. Nenhum waiver foi emitido. O Sprint 2 permanece
+concluído no escopo homologado (`docs/DECISIONS.md`, D2-CLOSE) — este documento não o reabre nem
+contradiz; apenas formaliza que produção é um gate técnico/de negócio separado, ainda não atendido, e que
+o H1A avançou um dos seus critérios sem declarar o gate inteiro atendido.

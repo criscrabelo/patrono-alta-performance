@@ -50,7 +50,7 @@ test.before(async () => {
   // usr-diretoria/usr-juridico (docs/SEGURANCA-CORRECOES.md, item J), o que tornaria usr-juridico
   // inalcançável por login normal. Também semeia um "processo" (coleção 'processos', a mesma que
   // representa o Legal Process do piloto) para validar a integridade relacional de Legal Deadline.
-  const store = readStore();
+  const store = (await readStore());
   store.users.push(
     { id: 'usr-teste-lider-juridico', name: 'Líder Jurídico Teste', email: EMAILS.liderJuridico, role: 'lider', department: 'Jurídico', mfa: true },
     { id: 'usr-teste-colaborador-juridico', name: 'Colaborador Jurídico Teste', email: EMAILS.colaboradorJuridico, role: 'colaborador', department: 'Jurídico', mfa: false },
@@ -95,7 +95,7 @@ test.before(async () => {
     { id: 'evt-teste-juridico', title: 'Evento Jurídico de Teste', department: 'Jurídico', date: '2026-12-01', priority: 'Alta', status: 'Agendado', owner: 'Líder Jurídico Teste', classification: 'Interno' },
     { id: 'evt-teste-ti', title: 'Evento TI de Teste', department: 'TI', date: '2026-12-02', priority: 'Média', status: 'Agendado', owner: 'Líder TI Teste', classification: 'Interno' }
   );
-  writeStore(store);
+  await writeStore(store);
 
   server = http.createServer(handler);
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -507,10 +507,10 @@ test('[HTTP] target/approval-rules/recovery-settings/DELETE/restore/management-i
   // Semeia diretamente uma ação e uma pendência de gestão pertencentes ao projeto sintético de TI —
   // usado para provar que DELETE/restore/decisão de gestão negam por escopo do PROJETO, não apenas
   // por módulo/ação genérica (que o papel Jurídico de fato possui).
-  const store = readStore();
+  const store = (await readStore());
   store.projectActions.push({ id: 'pac-ti-sintetica', projectId: 'prj-ti-teste', title: 'Ação TI sintética', status: 'Não iniciado', createdAt: new Date().toISOString(), createdBy: 'seed' });
   store.projectManagementItems.push({ id: 'pmi-ti-sintetica', projectId: 'prj-ti-teste', title: 'Pendência TI sintética', status: 'Pendente', createdAt: new Date().toISOString(), createdBy: 'seed' });
-  writeStore(store);
+  await writeStore(store);
 
   // O gate de escopo (scoped(user,project)) foi colocado ANTES do gate de ação nestas rotas — então
   // lider Jurídico recebe 404 (não 403) ao mirar o projeto de outro departamento, mesmo sem ter a ação
@@ -731,7 +731,7 @@ test('[HTTP] papel desconhecido sem módulo Projetos não consegue criar/alterar
 
   // Semeia um item legítimo diretamente na store para testar PATCH/DELETE/restore/decisão sem
   // depender de um POST bem-sucedido (que já é negado acima).
-  const store = readStore();
+  const store = (await readStore());
   const syntheticActionId = 'pac-sem-acesso-teste';
   store.projectActions.push({ id: syntheticActionId, projectId: PROJECT_ID, title: 'Ação sintética', status: 'Não iniciado', createdAt: new Date().toISOString(), createdBy: 'seed' });
   // Ação separada, já arquivada, exclusivamente para o teste de /restore — a rota de restore só
@@ -741,7 +741,7 @@ test('[HTTP] papel desconhecido sem módulo Projetos não consegue criar/alterar
   store.projectActions.push({ id: syntheticArchivedActionId, projectId: PROJECT_ID, title: 'Ação sintética arquivada', status: 'Não iniciado', createdAt: new Date().toISOString(), createdBy: 'seed', deletedAt: new Date().toISOString(), deletedBy: 'seed' });
   const syntheticManagementItemId = 'pmi-sem-acesso-teste';
   store.projectManagementItems.push({ id: syntheticManagementItemId, projectId: PROJECT_ID, title: 'Pendência sintética', status: 'Pendente', createdAt: new Date().toISOString(), createdBy: 'seed' });
-  writeStore(store);
+  await writeStore(store);
 
   assert.equal((await api('PATCH', `/api/projects/${PROJECT_ID}/actions/${syntheticActionId}`, { token, json: { title: 'Alterado indevidamente' } })).status, 403);
   assert.equal((await api('DELETE', `/api/projects/${PROJECT_ID}/actions/${syntheticActionId}`, { token })).status, 403);
@@ -1403,13 +1403,13 @@ test('[HTTP] entidade genérica não-legalDeadlines não sofre extração/remoç
 test('[HTTP] regressão obrigatória da Fase 2: processo com DATA/CITAÇÃO mas sem nenhum Legal Deadline não aparece como prazo no dashboard jurídico', async () => {
   // Semeia diretamente um processo Monday com colunas de data brutas (DATA/CITAÇÃO/PROTOCOLO), mas
   // sem nenhum Legal Deadline correspondente — exatamente o cenário que a D1 proíbe de virar "prazo".
-  const store = readStore();
+  const store = (await readStore());
   store.records.processos.push({
     id: 'proc-juridico-data-bruta-sem-prazo', source: 'monday', externalId: 'ext-data-bruta', module: 'processos',
     department: 'Jurídico', title: 'Processo com DATA/CITAÇÃO mas sem Legal Deadline', deletedAt: null,
     columnsByTitle: { DATA: '2026-09-01', 'CITAÇÃO/PROTOCOLO': '2026-09-02' }
   });
-  writeStore(store);
+  await writeStore(store);
 
   const token = await loginAs(EMAILS.liderJuridico);
   const dashboard = await api('GET', '/api/dashboards/legal', { token });
@@ -1567,9 +1567,9 @@ test('[HTTP] detalhe de Legal Deadline inexistente retorna 404', async () => {
 });
 
 test('[HTTP] processo com zero Legal Deadlines não aparece como tendo prazo na listagem/dashboard', async () => {
-  const store = readStore();
+  const store = (await readStore());
   store.records.processos.push({ id: 'proc-juridico-sem-prazo-nenhum', source: 'monday', externalId: 'ext-sem-prazo', module: 'processos', department: 'Jurídico', title: 'Processo sem nenhum Legal Deadline', deletedAt: null });
-  writeStore(store);
+  await writeStore(store);
 
   const token = await loginAs(EMAILS.liderJuridico);
   const list = await api('GET', `/api/entities/legalDeadlines?paginated=1&processId=proc-juridico-sem-prazo-nenhum`, { token });
@@ -1586,12 +1586,12 @@ test('[HTTP] processo com zero Legal Deadlines não aparece como tendo prazo na 
 // ============================================================================================
 
 test('[HTTP] dashboard "legal": active-processes/legal-attention respeitam scoped() por companyId — usuário de outra empresa não vê a contagem aumentar; diretoria vê o consolidado', async () => {
-  const store = readStore();
+  const store = (await readStore());
   store.users.push(
     { id: 'usr-teste-empresa-a', name: 'Líder Empresa A Teste', email: 'lider.empresa.a.teste@coevo.local', role: 'lider', department: 'Jurídico', companyId: 'empresa-a-teste', mfa: false },
     { id: 'usr-teste-empresa-b', name: 'Líder Empresa B Teste', email: 'lider.empresa.b.teste@coevo.local', role: 'lider', department: 'Jurídico', companyId: 'empresa-b-teste', mfa: false }
   );
-  writeStore(store);
+  await writeStore(store);
 
   const tokenA = await loginAs('lider.empresa.a.teste@coevo.local');
   const tokenB = await loginAs('lider.empresa.b.teste@coevo.local');
@@ -1609,11 +1609,11 @@ test('[HTTP] dashboard "legal": active-processes/legal-attention respeitam scope
   const attentionBeforeA = attentionValue(beforeA.body);
   const attentionBeforeB = attentionValue(beforeB.body);
 
-  const store2 = readStore();
+  const store2 = (await readStore());
   store2.records.processos.push({ id: 'proc-empresa-a-scoped-teste', source: 'monday', department: 'Jurídico', companyId: 'empresa-a-teste', title: 'Processo Empresa A (dashboard scoped)', deletedAt: null });
   store2.records.notificacoes = store2.records.notificacoes || [];
   store2.records.notificacoes.push({ id: 'not-empresa-a-scoped-teste', department: 'Jurídico', companyId: 'empresa-a-teste', deletedAt: null });
-  writeStore(store2);
+  await writeStore(store2);
 
   const afterA = await api('GET', '/api/dashboards/legal', { token: tokenA });
   const afterB = await api('GET', '/api/dashboards/legal', { token: tokenB });
@@ -1629,18 +1629,18 @@ test('[HTTP] dashboard "legal": active-processes/legal-attention respeitam scope
 });
 
 test('[HTTP] dashboard "legal": deny-by-default também por speId — usuário de uma SPE não vê a contagem aumentar com processo de outra SPE', async () => {
-  const store = readStore();
+  const store = (await readStore());
   store.users.push({ id: 'usr-teste-spe-x', name: 'Líder SPE X Teste', email: 'lider.spe.x.teste@coevo.local', role: 'lider', department: 'Jurídico', speId: 'spe-x-teste', mfa: false });
-  writeStore(store);
+  await writeStore(store);
 
   const tokenSpeX = await loginAs('lider.spe.x.teste@coevo.local');
   const before = await api('GET', '/api/dashboards/legal', { token: tokenSpeX });
   assert.equal(before.status, 200);
   const activeBefore = before.body.widgets['active-processes'].data.value;
 
-  const store2 = readStore();
+  const store2 = (await readStore());
   store2.records.processos.push({ id: 'proc-spe-y-scoped-teste', source: 'monday', department: 'Jurídico', speId: 'spe-y-teste', title: 'Processo SPE Y (fora do escopo)', deletedAt: null });
-  writeStore(store2);
+  await writeStore(store2);
 
   const after = await api('GET', '/api/dashboards/legal', { token: tokenSpeX });
   assert.equal(after.body.widgets['active-processes'].data.value, activeBefore, 'usuário da SPE X não vê a contagem aumentar com um processo de outra SPE (SPE Y)');
@@ -1701,12 +1701,12 @@ test('[HTTP] GET /api/agenda-items: diretoria vê o consolidado conforme alçada
 });
 
 test('[HTTP] GET /api/agenda-items e /api/attention: companyId fora de escopo não aparece', async () => {
-  const store = readStore();
+  const store = (await readStore());
   store.users.push(
     { id: 'usr-teste-fase3-empresa-a', name: 'Líder Fase3 Empresa A', email: 'lider.fase3.empresa.a@coevo.local', role: 'lider', department: 'Jurídico', companyId: 'fase3-empresa-a', mfa: false }
   );
   store.records.processos.push({ id: 'proc-fase3-empresa-b', source: 'monday', department: 'Jurídico', companyId: 'fase3-empresa-b', title: 'Processo Fase 3 Empresa B', deletedAt: null });
-  writeStore(store);
+  await writeStore(store);
 
   const tokenDiretoria = await loginAs(EMAILS.diretoria);
   const created = await api('POST', '/api/entities/legalDeadlines', { token: tokenDiretoria, json: { processId: 'proc-fase3-empresa-b', origin: 'Prazo empresa B (Fase 3)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', companyId: 'fase3-empresa-b', department: 'Jurídico' } });
@@ -1720,10 +1720,10 @@ test('[HTTP] GET /api/agenda-items e /api/attention: companyId fora de escopo n�
 });
 
 test('[HTTP] GET /api/agenda-items e /api/attention: speId fora de escopo não aparece', async () => {
-  const store = readStore();
+  const store = (await readStore());
   store.users.push({ id: 'usr-teste-fase3-spe-x', name: 'Líder Fase3 SPE X', email: 'lider.fase3.spe.x@coevo.local', role: 'lider', department: 'Jurídico', speId: 'fase3-spe-x', mfa: false });
   store.records.processos.push({ id: 'proc-fase3-spe-y', source: 'monday', department: 'Jurídico', speId: 'fase3-spe-y', title: 'Processo Fase 3 SPE Y', deletedAt: null });
-  writeStore(store);
+  await writeStore(store);
 
   const tokenDiretoria = await loginAs(EMAILS.diretoria);
   const created = await api('POST', '/api/entities/legalDeadlines', { token: tokenDiretoria, json: { processId: 'proc-fase3-spe-y', origin: 'Prazo SPE Y (Fase 3)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', speId: 'fase3-spe-y', department: 'Jurídico' } });
@@ -1737,9 +1737,9 @@ test('[HTTP] GET /api/agenda-items e /api/attention: speId fora de escopo não a
 });
 
 test('[HTTP] GET /api/attention: contagem de summary não vaza item fora de escopo (comparação antes/depois por usuário)', async () => {
-  const store = readStore();
+  const store = (await readStore());
   store.users.push({ id: 'usr-teste-fase3-attention-a', name: 'Líder Fase3 Attention A', email: 'lider.fase3.attention.a@coevo.local', role: 'lider', department: 'Jurídico', companyId: 'fase3-attention-a', mfa: false });
-  writeStore(store);
+  await writeStore(store);
 
   const tokenA = await loginAs('lider.fase3.attention.a@coevo.local');
   const before = await api('GET', '/api/attention', { token: tokenA });
@@ -1747,9 +1747,9 @@ test('[HTTP] GET /api/attention: contagem de summary não vaza item fora de esco
   const overdueBefore = before.body.summary.overdue;
 
   // Cria um Legal Deadline vencido em OUTRA empresa (diretoria tem alçada global para criar/relacionar).
-  const store2 = readStore();
+  const store2 = (await readStore());
   store2.records.processos.push({ id: 'proc-fase3-attention-b', source: 'monday', department: 'Jurídico', companyId: 'fase3-attention-b', title: 'Processo Fase 3 Attention B', deletedAt: null });
-  writeStore(store2);
+  await writeStore(store2);
   const tokenDiretoria = await loginAs(EMAILS.diretoria);
   await api('POST', '/api/entities/legalDeadlines', { token: tokenDiretoria, json: { processId: 'proc-fase3-attention-b', origin: 'Vencido empresa B (Fase 3)', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL', companyId: 'fase3-attention-b', department: 'Jurídico' } });
 
@@ -1778,10 +1778,10 @@ test('[HTTP] processo relacionado fora de escopo bloqueia o item de Agenda/Aten�
   const created = await api('POST', '/api/entities/legalDeadlines', { token: tokenJuridico, json: { processId: 'proc-juridico-teste', origin: 'Prazo com processo depois arquivado (Fase 3)', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL' } });
   assert.equal(created.status, 201);
 
-  const store = readStore();
+  const store = (await readStore());
   const process = store.records.processos.find(p => p.id === 'proc-juridico-teste');
   process.deletedAt = new Date().toISOString();
-  writeStore(store);
+  await writeStore(store);
 
   try {
     const agendaItems = await api('GET', '/api/agenda-items', { token: tokenJuridico });
@@ -1789,17 +1789,17 @@ test('[HTTP] processo relacionado fora de escopo bloqueia o item de Agenda/Aten�
     const attention = await api('GET', '/api/attention', { token: tokenJuridico });
     assert.ok(!attention.body.items.some(item => item.entityId === created.body.id));
   } finally {
-    const restore = readStore();
+    const restore = (await readStore());
     const restoredProcess = restore.records.processos.find(p => p.id === 'proc-juridico-teste');
     restoredProcess.deletedAt = null;
-    writeStore(restore);
+    await writeStore(restore);
   }
 });
 
 test('[HTTP] processo sem Legal Deadline não gera prazo na Agenda/Atenção', async () => {
-  const store = readStore();
+  const store = (await readStore());
   store.records.processos.push({ id: 'proc-fase3-sem-prazo', source: 'monday', department: 'Jurídico', title: 'Processo Fase 3 sem prazo', deletedAt: null });
-  writeStore(store);
+  await writeStore(store);
 
   const token = await loginAs(EMAILS.liderJuridico);
   const agendaItems = await api('GET', '/api/agenda-items', { token });
@@ -1807,12 +1807,12 @@ test('[HTTP] processo sem Legal Deadline não gera prazo na Agenda/Atenção', a
 });
 
 test('[HTTP] regressão obrigatória: DATA/CITAÇÃO do processo Monday nunca aparecem como prazo na Agenda/Atenção', async () => {
-  const store = readStore();
+  const store = (await readStore());
   store.records.processos.push({
     id: 'proc-fase3-data-bruta', source: 'monday', department: 'Jurídico', title: 'Processo Fase 3 com DATA/CITAÇÃO',
     columnsByTitle: { DATA: '2026-09-01', 'CITAÇÃO/PROTOCOLO': '2026-09-02' }, deletedAt: null
   });
-  writeStore(store);
+  await writeStore(store);
 
   const token = await loginAs(EMAILS.liderJuridico);
   const agendaItems = await api('GET', '/api/agenda-items', { token });
@@ -1833,9 +1833,9 @@ test('[HTTP] INTERNAL_CONTROL nunca recebe label/campo de prazo processual na Ag
 });
 
 test('[HTTP] requires_review não é tratado como confirmado — registro legado sem originType/status aparece sinalizado, nunca como Legal Deadline válido', async () => {
-  const store = readStore();
+  const store = (await readStore());
   store.records.legalDeadlines.push({ id: 'ld-fase3-legado', processId: 'proc-juridico-teste', origin: 'Registro legado pré-D1 (Fase 3)', date: '2020-01-01', department: 'Jurídico', version: 1, createdAt: new Date().toISOString(), createdBy: 'seed' });
-  writeStore(store);
+  await writeStore(store);
 
   const token = await loginAs(EMAILS.liderJuridico);
   const agendaItems = await api('GET', '/api/agenda-items', { token });
@@ -1868,7 +1868,7 @@ test('[HTTP] GET /api/attention: suspended/completed/cancelled nunca aparecem co
 
 test('[HTTP] GET /api/agenda-items e /api/attention não criam nem alteram nada (idempotentes)', async () => {
   const token = await loginAs(EMAILS.liderJuridico);
-  const before = readStore();
+  const before = (await readStore());
   const legalCountBefore = before.records.legalDeadlines.length;
   const agendaCountBefore = (before.agenda || []).length;
 
@@ -1876,7 +1876,7 @@ test('[HTTP] GET /api/agenda-items e /api/attention não criam nem alteram nada 
   await api('GET', '/api/attention', { token });
   await api('GET', '/api/agenda-items', { token });
 
-  const after = readStore();
+  const after = (await readStore());
   assert.equal(after.records.legalDeadlines.length, legalCountBefore, 'GET não cria nenhum Legal Deadline');
   assert.equal((after.agenda || []).length, agendaCountBefore, 'GET não cria nenhum evento de agenda');
 });
@@ -1894,7 +1894,7 @@ test('[HTTP] não duplicidade: chamadas repetidas de Agenda/Atenção/detalhe nu
   await api('GET', `/api/entities/legalDeadlines/${id}/detail`, { token });
   await api('GET', '/api/agenda-items', { token });
 
-  const store = readStore();
+  const store = (await readStore());
   const matching = store.records.legalDeadlines.filter(item => item.origin === 'Prazo único (não duplicidade)');
   assert.equal(matching.length, 1, 'continua existindo apenas 1 Legal Deadline persistido — nenhuma view criou um novo registro de prazo');
 });
@@ -1916,7 +1916,7 @@ test('[HTTP] Agenda é view, não source of truth: alteração da date no Legal 
   assert.equal(itemsAfter.length, 1, 'nenhum segundo item foi persistido pela alteração');
   assert.equal(itemsAfter[0].date, '2026-09-25', 'a Agenda reflete o novo estado a partir da entidade canônica');
 
-  const store = readStore();
+  const store = (await readStore());
   assert.equal(store.records.legalDeadlines.filter(item => item.id === id).length, 1);
 });
 
@@ -1967,10 +1967,10 @@ test('[HTTP] POST /api/entities/legalDeadlines sem responsibleUserId continua v�
 
 test('[HTTP] POST /api/entities/legalDeadlines com responsibleUserId inexistente é rejeitado com 422, sem persistir nada', async () => {
   const token = await loginAs(EMAILS.liderJuridico);
-  const before = readStore().records.legalDeadlines.length;
+  const before = (await readStore()).records.legalDeadlines.length;
   const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Prazo com responsável inexistente (Fase 4B)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', responsibleUserId: 'usr-nao-existe' } });
   assert.equal(created.status, 422);
-  assert.equal(readStore().records.legalDeadlines.length, before, 'nada foi persistido quando responsibleUserId é inválido');
+  assert.equal((await readStore()).records.legalDeadlines.length, before, 'nada foi persistido quando responsibleUserId é inválido');
 });
 
 test('[HTTP] POST /api/entities/legalDeadlines: campos textuais responsible/responsibleName/ownerName nunca substituem responsibleUserId nem são persistidos (P2, revisão pós-PR #8)', async () => {
@@ -1980,7 +1980,7 @@ test('[HTTP] POST /api/entities/legalDeadlines: campos textuais responsible/resp
   assert.equal(created.body.responsibleUserId, undefined, 'nenhum campo textual é aceito como substituto de responsibleUserId');
   assert.ok(!('responsible' in created.body) && !('responsibleName' in created.body) && !('ownerName' in created.body), 'a resposta do POST não contém nenhum dos campos textuais');
 
-  const stored = readStore().records.legalDeadlines.find(item => item.id === created.body.id);
+  const stored = (await readStore()).records.legalDeadlines.find(item => item.id === created.body.id);
   assert.ok(!('responsible' in stored) && !('responsibleName' in stored) && !('ownerName' in stored), 'o registro persistido no store não contém nenhum dos campos textuais — não viram propriedades paralelas');
 });
 
@@ -1992,7 +1992,7 @@ test('[HTTP] PATCH de Legal Deadline: campos textuais responsible/responsibleNam
   assert.ok(!('responsible' in patched.body) && !('responsibleName' in patched.body) && !('ownerName' in patched.body));
   assert.equal(patched.body.responsibleUserId, undefined);
 
-  const stored = readStore().records.legalDeadlines.find(item => item.id === created.body.id);
+  const stored = (await readStore()).records.legalDeadlines.find(item => item.id === created.body.id);
   assert.ok(!('responsible' in stored) && !('responsibleName' in stored) && !('ownerName' in stored));
 });
 
@@ -2043,17 +2043,17 @@ test('[HTTP] PATCH de responsável: remover responsável (responsibleUserId nulo
 });
 
 test('[HTTP] D4.11: responsável que se torna inativo depois não é apagado do Legal Deadline; view sinaliza responsibleInactive', async () => {
-  const store = readStore();
+  const store = (await readStore());
   store.users.push({ id: 'usr-teste-fica-inativo', name: 'Fica Inativo Teste', email: 'fica.inativo.teste@coevo.local', role: 'colaborador', department: 'Jurídico', mfa: false });
-  writeStore(store);
+  await writeStore(store);
 
   const token = await loginAs(EMAILS.liderJuridico);
   const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Prazo D4.11 (Fase 4B)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', responsibleUserId: 'usr-teste-fica-inativo' } });
   const id = created.body.id;
 
-  const storeNow = readStore();
+  const storeNow = (await readStore());
   storeNow.users.find(u => u.id === 'usr-teste-fica-inativo').deletedAt = new Date().toISOString();
-  writeStore(storeNow);
+  await writeStore(storeNow);
 
   const detail = await api('GET', `/api/entities/legalDeadlines/${id}/detail`, { token });
   assert.equal(detail.status, 200);
@@ -2063,17 +2063,17 @@ test('[HTTP] D4.11: responsável que se torna inativo depois não é apagado do 
 });
 
 test('[HTTP] P1.2 (revisão pós-PR #8): usuário com deletedAt não consegue mais autenticar (login nem sessão existente), fechando a inconsistência com "Responsável inativo"', async () => {
-  const store = readStore();
+  const store = (await readStore());
   store.users.push({ id: 'usr-teste-autenticacao-inativo', name: 'Autenticação Inativo Teste', email: 'autenticacao.inativo.teste@coevo.local', role: 'colaborador', department: 'Jurídico', mfa: false });
-  writeStore(store);
+  await writeStore(store);
 
   const tokenAntesDeInativar = await loginAs('autenticacao.inativo.teste@coevo.local');
   const oldSessionWorks = await api('GET', '/api/legal/processos', { token: tokenAntesDeInativar });
   assert.equal(oldSessionWorks.status, 200, 'sessão válida funciona normalmente antes da inativação');
 
-  const storeNow = readStore();
+  const storeNow = (await readStore());
   storeNow.users.find(u => u.id === 'usr-teste-autenticacao-inativo').deletedAt = new Date().toISOString();
-  writeStore(storeNow);
+  await writeStore(storeNow);
 
   const oldSessionAfterInactive = await api('GET', '/api/legal/processos', { token: tokenAntesDeInativar });
   assert.equal(oldSessionAfterInactive.status, 401, 'uma sessão já emitida deixa de ser aceita assim que o usuário fica inativo (getUser() nega deletedAt)');
@@ -2107,10 +2107,10 @@ test('[HTTP] GET /api/my-week: Legal Deadline do usuário logado dentro da seman
 });
 
 test('[HTTP] POST /api/entities/legalDeadlines: atribuir responsável de companyId diferente do processo é rejeitado na CRIAÇÃO (P1.1 — revisão pós-PR #8)', async () => {
-  const store = readStore();
+  const store = (await readStore());
   store.records.processos.push({ id: 'proc-fase4b-empresa-b', source: 'monday', department: 'Jurídico', companyId: 'fase4b-empresa-b', scopeType: 'company', title: 'Processo Fase 4B Empresa B', deletedAt: null });
   store.users.push({ id: 'usr-teste-fase4b-empresa-a', name: 'Responsável Fase4B Empresa A', email: 'responsavel.fase4b.empresa.a@coevo.local', role: 'colaborador', department: 'Jurídico', companyId: 'fase4b-empresa-a', scopeType: 'company', mfa: false });
-  writeStore(store);
+  await writeStore(store);
 
   const tokenDiretoria = await loginAs(EMAILS.diretoria);
   const civilWeek = require('../server').civilWeekWindow();
@@ -2119,7 +2119,7 @@ test('[HTTP] POST /api/entities/legalDeadlines: atribuir responsável de company
 });
 
 test('[HTTP] GET /api/my-week: defesa em profundidade — mesmo se um registro com responsável fora de escopo existir (drift), Minha Semana nunca o revela', async () => {
-  const store = readStore();
+  const store = (await readStore());
   store.records.processos.push({ id: 'proc-fase4b-empresa-b-drift', source: 'monday', department: 'Jurídico', companyId: 'fase4b-empresa-b-drift', scopeType: 'company', title: 'Processo Fase 4B Empresa B (drift)', deletedAt: null });
   store.users.push({ id: 'usr-teste-fase4b-empresa-a-drift', name: 'Responsável Fase4B Empresa A (drift)', email: 'responsavel.fase4b.empresa.a.drift@coevo.local', role: 'colaborador', department: 'Jurídico', companyId: 'fase4b-empresa-a-drift', scopeType: 'company', mfa: false });
   const civilWeek = require('../server').civilWeekWindow();
@@ -2127,7 +2127,7 @@ test('[HTTP] GET /api/my-week: defesa em profundidade — mesmo se um registro c
   // DEPOIS da atribuição do responsável (ex.: o processo foi reclassificado de empresa) — cenário que a
   // validação de criação/PATCH não cobre retroativamente (D4.11: atribuição antiga nunca é revalidada).
   store.records.legalDeadlines.push({ id: 'ld-fase4b-drift', processId: 'proc-fase4b-empresa-b-drift', origin: 'Drift de escopo (Fase 4B)', date: civilWeek.start, originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', responsibleUserId: 'usr-teste-fase4b-empresa-a-drift', companyId: 'fase4b-empresa-b-drift', scopeType: 'company', department: 'Jurídico', version: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), createdBy: 'Teste' });
-  writeStore(store);
+  await writeStore(store);
 
   const tokenEmpresaA = await loginAs('responsavel.fase4b.empresa.a.drift@coevo.local');
   const myWeek = await api('GET', '/api/my-week', { token: tokenEmpresaA });
@@ -2136,10 +2136,10 @@ test('[HTTP] GET /api/my-week: defesa em profundidade — mesmo se um registro c
 });
 
 test('[HTTP] POST /api/entities/legalDeadlines: atribuir responsável de speId diferente do processo é rejeitado na CRIAÇÃO (P1.1 — revisão pós-PR #8)', async () => {
-  const store = readStore();
+  const store = (await readStore());
   store.records.processos.push({ id: 'proc-fase4b-spe-y', source: 'monday', department: 'Jurídico', speId: 'fase4b-spe-y', scopeType: 'spe', title: 'Processo Fase 4B SPE Y', deletedAt: null });
   store.users.push({ id: 'usr-teste-fase4b-spe-x', name: 'Responsável Fase4B SPE X', email: 'responsavel.fase4b.spe.x@coevo.local', role: 'colaborador', department: 'Jurídico', speId: 'fase4b-spe-x', scopeType: 'spe', mfa: false });
-  writeStore(store);
+  await writeStore(store);
 
   const tokenDiretoria = await loginAs(EMAILS.diretoria);
   const civilWeek = require('../server').civilWeekWindow();
@@ -2161,7 +2161,7 @@ test('[HTTP] POST /api/entities/legalDeadlines: atribuir responsável a administ
 
 test('[HTTP] POST /api/entities/legalDeadlines: atribuir responsável à diretoria (alçada global) é aceito — comportamento consistente com scoped()/hasGlobalScope() (P1.1)', async () => {
   const token = await loginAs(EMAILS.liderJuridico);
-  const diretoria = readStore().users.find(u => u.email === EMAILS.diretoria);
+  const diretoria = (await readStore()).users.find(u => u.email === EMAILS.diretoria);
   const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'P1.1 — responsável diretoria (Fase 4B)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', responsibleUserId: diretoria.id } });
   assert.equal(created.status, 201, 'diretoria tem alçada global (hasGlobalScope()) e pode ser responsável por qualquer Legal Deadline dentro do módulo jurídico');
   assert.equal(created.body.responsibleUserId, diretoria.id);
@@ -2194,11 +2194,11 @@ test('[HTTP] GET /api/my-week: diretoria só vê em Minha Semana os Legal Deadli
 });
 
 test('[HTTP] GET /api/my-week não cria nem altera nenhum registro (é uma view pura, chamadas repetidas são idempotentes)', async () => {
-  const before = JSON.stringify(readStore());
+  const before = JSON.stringify((await readStore()));
   const token = await loginAs(EMAILS.responsavelAtivo);
   await api('GET', '/api/my-week', { token });
   await api('GET', '/api/my-week', { token });
-  const after = JSON.stringify(readStore());
+  const after = JSON.stringify((await readStore()));
   assert.equal(after, before, 'GET /api/my-week nunca persiste nada (nenhuma coleção myWeek/weeklyItems/weekSnapshot é criada nem qualquer registro existente é alterado)');
 });
 
@@ -2233,7 +2233,7 @@ test('[HTTP] D4.15: GET /api/agenda-items por padrão só mostra ativo/vencido; 
   assert.equal(detalheSuspenso.status, 200);
   assert.equal(detalheSuspenso.body.status, 'suspenso');
 
-  const store = readStore();
+  const store = (await readStore());
   for (const id of [ativo.body.id, paraCumprir.body.id, paraCancelar.body.id, paraSuspender.body.id]) {
     assert.ok(store.records.legalDeadlines.some(item => item.id === id && !item.deletedAt), `nenhum registro (${id}) foi fisicamente apagado`);
   }
@@ -2255,10 +2255,10 @@ test('[HTTP] D4.5/D4.6/D4.4: Agenda/Atenção/detalhe expõem originTypeLabel/st
   assert.equal(detail.body.confirmationLabel, 'Confirmado pelo Jurídico');
 
   const legado = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'D4.4 requires_review', date: '2020-01-01', originType: 'JUDICIAL_PROCESSUAL' } });
-  const storeForce = readStore();
+  const storeForce = (await readStore());
   const legadoItem = storeForce.records.legalDeadlines.find(i => i.id === legado.body.id);
   delete legadoItem.originType;
-  writeStore(storeForce);
+  await writeStore(storeForce);
 
   const attention = await api('GET', '/api/attention', { token });
   const attentionItem = attention.body.items.find(i => i.entityId === legado.body.id);
@@ -2301,14 +2301,14 @@ test('[HTTP] Google Calendar: falha/indisponibilidade da integração nunca afet
 
 test('[HTTP] Google Calendar: leitura repetida nunca cria Legal Deadline/Task/evento de Agenda novo (sem espelhamento/duplicação)', async () => {
   const token = await loginAs(EMAILS.liderJuridico);
-  const beforeLegal = readStore().records.legalDeadlines.length;
-  const beforeAgenda = readStore().agenda.length;
+  const beforeLegal = (await readStore()).records.legalDeadlines.length;
+  const beforeAgenda = (await readStore()).agenda.length;
 
   await api('GET', '/api/calendar/events', { token });
   await api('GET', '/api/calendar/events', { token });
   await api('GET', '/api/calendar/status', { token });
 
-  const store = readStore();
+  const store = (await readStore());
   assert.equal(store.records.legalDeadlines.length, beforeLegal, 'leitura do Calendar nunca cria Legal Deadline');
   assert.equal(store.agenda.length, beforeAgenda, 'leitura do Calendar nunca cria evento de Agenda');
   assert.ok(!Object.keys(store).some(key => /calendarevent|calendarsnapshot|mirroredcalendar/i.test(key)), 'nenhuma coleção canônica paralela de eventos de Calendar foi criada');

@@ -514,3 +514,17 @@ aqui; esta seção apenas consolida o estado de QA já registrado nas Fases 1–
   credenciais de OAuth (`GOOGLE_CALENDAR_CLIENT_ID`/`GOOGLE_CALENDAR_CLIENT_SECRET`) neste ambiente. O
   adapter e o contrato read-only (status `not_configured`/`unavailable`, ausência de método de escrita,
   ausência de token exposto, filtro pela janela civil de "Minha Semana") **foram** testados.
+
+## QA — Hardening H1A (persistência PostgreSQL)
+
+- **278 testes totais** (254 do Sprint 2 + 24 novos: 21 em `tests/storage.test.js`, 3 em
+  `tests/security-integration-postgres.test.js`), 0 falhando, sem remoção de nenhum teste anterior.
+- Sem `TEST_DATABASE_URL` configurada: os testes específicos de Postgres são **pulados explicitamente**
+  (2 testes `skip`), nunca fingindo cobertura — o restante (276) roda normalmente contra o fallback local.
+- Com `TEST_DATABASE_URL` apontando para um Postgres de teste isolado (nunca produção): **278/278**,
+  0 pulados — inclui concorrência real (duas leituras da mesma versão, conflito detectado, HTTP 409),
+  transação (mutação + auditoria persistidas juntas, nunca uma sem a outra), fail-fast em produção,
+  healthcheck, importação JSON→Postgres com `--dry-run` e real.
+- CI (`.github/workflows/ci.yml`) ganhou um serviço `postgres:16` isolado para rodar essa mesma bateria
+  em todo PR/push, nos dois `Node 20.x`/`Node 22.x`.
+- `npm audit`: inalterado (2 vulnerabilidades altas conhecidas, `image-size`/`pptxgenjs` — H9).
