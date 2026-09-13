@@ -210,8 +210,9 @@ estritamente dentro do escopo homologado na Fase 4A.
 
 **Fases 1, 2, 3 e 4A implementadas. Fase 4B (implementação funcional) implementada** — `responsibleUserId`,
 "Minha Semana", D4.15 na Agenda operacional e adapter somente leitura do Google Calendar, conforme
-homologado em `docs/DECISIONS.md` (D4.1–D4.15). Nenhum deploy, produção ou escrita externa foi realizado
-por esta implementação; aguarda revisão antes de qualquer merge/deploy.
+homologado em `docs/DECISIONS.md` (D4.1–D4.15). **Concluída e mergeada na master via PR #8** (squash
+`3eff813a6e5a9996a10164b33f10d00c087161c2`). Nenhum deploy, produção ou escrita externa foi realizado por
+esta implementação — continuam fora de escopo, não pendentes de revisão.
 
 ---
 
@@ -226,7 +227,7 @@ aprovado `d2f7ac8afc3c9a38b809bc5d6215942a33d47e1e`)
 
 | Fase | PR | Status |
 |---|---|---|
-| Fase 1 — modelagem e integridade do Legal Deadline | (consolidada antes deste ciclo de PRs numerados) | CONCLUÍDA |
+| Fase 1 — modelagem e integridade do Legal Deadline | PR #4 | CONCLUÍDA |
 | Fase 2 — consumo canônico, listagem, detalhe, filtros, histórico, dashboard | PR #5 | CONCLUÍDA |
 | Fase 3 — Agenda/Atenção sobre Legal Deadline canônico | PR #6 | CONCLUÍDA |
 | Fase 4A — decisões e homologação documental | PR #7 | CONCLUÍDA |
