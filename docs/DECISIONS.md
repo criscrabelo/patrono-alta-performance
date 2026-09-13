@@ -914,6 +914,139 @@ específico do H1B dentro do gate de produção já aberto.
 
 ---
 
+## 1.7. Hardening H2 — Decisão PROD-H2-01
+
+### PROD-H2-01 — Autenticação individual e sessões persistentes
+
+**Status: IMPLEMENTADO / AGUARDANDO HOMOLOGAÇÃO** (ver `docs/PRODUCTION_GATE.md`, seção 19, para o
+detalhamento técnico completo — esta decisão não o duplica, apenas registra o que foi decidido).
+
+**Conteúdo da decisão:**
+
+1. **Toda credencial passa a ser individual por usuário.** Fica proibido, a partir desta decisão: senha
+   compartilhada, código MFA global/compartilhado, segredo de usuário global, e sessão que viva apenas em
+   memória do processo. O modelo temporário descrito em PG-04/PG-05/PG-06/PG-07/PG-08/PG-09
+   (`docs/PRODUCTION_GATE.md`) é substituído integralmente, não coexiste com o novo modelo.
+2. **`app_users` continua sendo a única tabela de usuários** (reaproveitada de H1B, nunca duplicada) —
+   H2 acrescenta apenas colunas, por migração aditiva (`migrations/005_h2_auth_sessions.sql`,
+   `ADD COLUMN IF NOT EXISTS`, nunca remove/renomeia coluna existente, preserva todo dado já migrado por
+   H1B): `password_hash`, `password_changed_at`, `mfa_enabled`, `mfa_method`, `mfa_secret_encrypted`,
+   `mfa_enrolled_at`, `failed_login_count`, `locked_until`, `last_login_at`, `credentials_version`.
+3. **Senha: `crypto.scrypt`** (Node built-in), substituição deliberada de bcrypt/Argon2id — nenhuma das
+   duas era dependência já presente no projeto, e ambas exigem binding nativo; `scrypt` é um KDF de
+   memória intensiva igualmente aceito pelo OWASP, sem novo pacote. Nunca texto puro, nunca logada, nunca
+   devolvida por nenhuma rota. Política mínima (comprimento ≥ 10, rejeita repetição/sequência trivial),
+   sem rotação periódica obrigatória sem causa (só: senha temporária, reset, comprometimento, decisão
+   administrativa).
+4. **`temporaryPassword` passa a ter efeito real** (antes de H2 era um campo decorativo, nunca lido em
+   nenhuma rota) — força a rota de troca de senha antes de qualquer conteúdo de negócio; a senha
+   temporária não pode ser reaproveitada como senha permanente.
+5. **Reset de senha**: token opaco (CSPRNG) de uso único, hash apenas persistido (`password_reset_tokens`
+   — nunca o token bruto), com expiração; conclui invalidando todas as sessões anteriores do usuário. O
+   envio por e-mail está fora de escopo desta rodada (sem provedor de e-mail integrado no repositório) —
+   o endpoint de geração/consumo do token existe e está pronto para uma entrega futura de e-mail.
+6. **MFA: TOTP individual (RFC 6238)**, implementado com `node:crypto` — algoritmo público e padronizado,
+   não criptografia caseira; escolhido sobre SMS/e-mail para não depender de um provedor externo (que
+   ficaria fora do escopo homologado desta rodada) e sobre uma biblioteca de terceiros para manter o
+   padrão de dependência mínima já estabelecido (H1/H9). Enrolamento em duas etapas — o segredo só é
+   ativado (`mfa_enabled:true`) após confirmação por um código válido, nunca antes. Segredo cifrado em
+   repouso (AES-256-GCM, `MFA_ENCRYPTION_KEY`, mesmo padrão de `COEVO_BACKUP_KEY`) — mecanismo de chave
+   já viável no repositório, portanto esta decisão NÃO precisou invocar a cláusula de "documentar a
+   decisão pendente em vez de gravar o segredo em texto puro"; `encryptSecret()`/`decryptSecret()` falham
+   explicitamente (fail-fast) se a chave estiver ausente/curta.
+7. **MFA obrigatório por papel: reaproveita `requireMfa()` já homologado** (diretoria/administrador/
+   lider) — não introduz uma nova política de negócio sem decisão prévia; esta decisão não precisou
+   "parar e reportar" por já existir e coincidir com a preferência declarada para esta rodada.
+8. **Sessão: token opaco (CSPRNG) persistido por hash** (`auth_sessions.token_hash`, SHA-256 — nunca um
+   KDF lento, dado que o token já tem 256 bits de entropia própria, ao contrário de uma senha escolhida
+   por humano) — substitui `sessions = new Map()`. Expiração absoluta; sem idle timeout nesta rodada
+   (simplificação documentada, item opcional do escopo original). `credentials_version`, copiado do
+   usuário no momento da emissão da sessão, é o mecanismo de revogação cross-cutting: uma troca/reset de
+   senha incrementa a versão do usuário, invalidando toda sessão emitida antes, sem precisar apagar linha
+   por linha.
+9. **Revogação real**: `POST /api/auth/logout` revoga a sessão atual; `POST /api/auth/logout-all` revoga
+   todas as sessões do usuário; troca/reset de senha e inativação (`deletedAt`) invalidam sessão(ões)
+   imediatamente — nunca depende do cliente "esquecer" o token.
+10. **Bloqueio por tentativas malsucedidas é POR CONTA, não é o rate limiting global de H3** —
+    `failed_login_count`/`locked_until` (5 tentativas, bloqueio de 15 minutos). PG-10/PG-11 (rate
+    limiting por IP/global) permanecem abertos, fora de escopo desta decisão.
+11. **Sessões/challenges/tokens de reset reaproveitam a MESMA ponte relacional de H1B**
+    (`storage/index.js`) — três novas coleções (`store.authSessions`/`store.authChallenges`/
+    `store.passwordResetTokens`) hidratadas/diferenciadas pelo mesmo mecanismo já usado por
+    users/legalProcesses/legalDeadlines/audit, dentro da mesma transação Postgres — não uma arquitetura
+    paralela de acesso direto ao pool a partir de `server.js`.
+12. **Fail-closed**: `storage/postgres-store.js` passa a exigir a migration `005_h2_auth_sessions` e as 3
+    tabelas novas — sem elas, `schemaReady:false` e `init()` falha explicitamente. Produção nunca cai de
+    volta para sessão em memória/senha global/MFA global como alternativa insegura.
+13. **Seed/desenvolvimento**: fora de produção, usuários seed e usuários legados de teste recebem senha/
+    MFA de conveniência (`temporaryPassword:false`, pronta para uso imediato) via `seedAuthFields()`/
+    `migrateLegacyStore()` — em produção (`NODE_ENV=production`), nenhuma credencial é atribuída
+    automaticamente; o usuário seed nasce sem senha/MFA utilizáveis, exigindo o fluxo de reset de senha
+    administrado antes do primeiro acesso.
+14. **RBAC/`scoped()`/`allowedContent()`/segregação departamental e "administrador técnico ≠
+    superusuário de conteúdo" permanecem inalterados** — autenticação decide quem, autorização continua
+    decidindo o quê. Nenhuma rota de autorização foi tocada por esta decisão.
+15. **Esta decisão não fecha o Gate de Produção nem declara H2 integralmente concluído** — apenas os
+    critérios PG-04 a PG-09 de `docs/PRODUCTION_GATE.md` são fechados (ver seção 5/16). O gate como um
+    todo permanece **NO-GO PARA PRODUÇÃO**. H3–H11 não foram alterados por esta decisão.
+
+Esta decisão não altera D1/D4/D2-CLOSE/PROD-GATE-01/PROD-H1-01/PROD-H1B-01 já homologadas — apenas
+registra o avanço específico do H2 dentro do gate de produção já aberto.
+
+### PROD-H2-01 — Adendo (revisão pós-PR #13): identidade de login única, primeiro acesso administrativo,
+### MFA_ENCRYPTION_KEY obrigatória em produção, respostas anti-enumeração
+
+**Status: IMPLEMENTADO / AGUARDANDO HOMOLOGAÇÃO.** Correção de 5 blockers identificados na revisão
+técnica humana do PR #13, antes de qualquer merge. Não reabre nem contradiz os 15 itens da decisão
+original acima — os complementa.
+
+16. **Identidade de login única (`login_identifier`).** `app_users.email` nunca foi único (gap
+    preexistente, PROD-H1B-01 item 7; o próprio seed tem dois usuários com o mesmo e-mail) — login por
+    `find(first-match)` sobre e-mail duplicado não é compatível com autenticação individual, pois não há
+    garantia de qual conta de fato autentica. Migração aditiva nova (`migrations/
+    006_h2_unique_login_identity.sql`, nunca uma edição de 001-005 já entregues) acrescenta
+    `app_users.login_identifier` (`UNIQUE NOT NULL`), backfilled para os registros existentes com o
+    próprio `id` técnico (já único/estável — nunca um dado de negócio inventado, nunca um e-mail
+    fictício). `email` continua sendo dado de contato, nunca é alterado por esta correção.
+17. **Login aceita `login` (identificador técnico) como identificador primário.** `email` continua
+    aceito só por compatibilidade e SOMENTE quando resolve para EXATAMENTE um usuário ativo — havendo
+    zero ou mais de um, a mesma resposta genérica de credenciais inválidas é usada, nunca escolhendo uma
+    conta arbitrária. A mesma regra vale para `POST /api/auth/forgot-password`: e-mail ambíguo não emite
+    token para nenhuma conta.
+18. **Primeiro acesso/reset administrativo (`POST /api/auth/users/:id/reset-token`).** Sem provedor de
+    e-mail integrado neste repositório, um usuário recém-aprovado (`passwordHash:null`,
+    `temporaryPassword:true`) não tinha, até esta correção, nenhum caminho funcional para definir a
+    própria senha em produção. Um operador com a MESMA alçada já usada para aprovar cadastro
+    (`allowed(user,'*','approve')` — nunca uma nova escalada de privilégio; administrador técnico não
+    ganha alçada de negócio além da já autorizada) pode emitir, por `userId` explícito (nunca por
+    e-mail, que pode ser ambíguo), um token de uso único que reaproveita EXATAMENTE o mesmo mecanismo de
+    `password_reset_tokens` (`issuePasswordResetToken()`, hash apenas persistido, expiração). O token
+    bruto existe só nesta resposta HTTP, uma única vez, para o operador entregá-lo por um canal
+    operacional/fora de banda nesta fase (documentado como limitação — não exige integração de e-mail
+    nesta rodada); nunca aparece em log nem em evento de auditoria.
+19. **`MFA_ENCRYPTION_KEY` passa a ser validada no BOOT quando `NODE_ENV=production`**
+    (`validateAuthRuntimeConfig()`), não apenas na hora de um enrolamento/validação de MFA real. Ausente
+    ou com menos de 32 caracteres: o processo falha explicitamente antes de escutar a porta, mensagem
+    segura (nunca imprime a chave). Fora de produção, a ausência da chave continua degradando
+    graciosamente (item 6 da decisão original) — nunca exigida para rodar testes/desenvolvimento que não
+    usam MFA.
+20. **Respostas de login nunca revelam bloqueio/inatividade/ambiguidade de e-mail.** Conta bloqueada
+    (`locked_until`) respondia `423` — status distinto de `401` que permitia inferir externamente que
+    aquela conta específica existe e está bloqueada. Corrigido para o mesmo `401`/"Credenciais inválidas"
+    de qualquer outra falha de login; a auditoria interna (`ACCOUNT_LOCKED`/`LOGIN_FAILURE`) continua
+    distinguindo os casos normalmente — só a superfície HTTP é uniforme.
+21. **TOTP verificado contra os vetores oficiais do RFC 6238** (Apêndice B, SHA1, 8 dígitos — a
+    implementação usa 6 por padrão em produção, mas `totpAt()` aceita `digits` como parâmetro,
+    permitindo testar contra o vetor publicado sem alterar o comportamento de produção), em teste
+    automatizado (`tests/core.test.js`) — não apenas verificado manualmente durante o desenvolvimento
+    original de H2.
+22. **Esta correção não fecha nenhum critério adicional do Gate de Produção além dos já fechados pela
+    decisão original (PG-04 a PG-09)** — apenas resolve blockers técnicos que impediam H2 de ser
+    considerado tecnicamente correto para revisão. O gate como um todo permanece **NO-GO PARA
+    PRODUÇÃO**. H3–H11 não foram alterados.
+
+---
+
 ## 2. ADRs de Engenharia — Fase 0 (Sprint 1)
 
 Decisões técnicas locais e reversíveis, permitidas pela v1.3 (§27, linhas D8/D9: "Não bloqueia decisão

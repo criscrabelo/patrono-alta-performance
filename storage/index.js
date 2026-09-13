@@ -11,6 +11,12 @@
 // `store.audit` no MESMO formato de sempre — só a origem/destino de fato mudou. Nenhuma das ~24 rotas de
 // mutação em server.js precisou ser alterada.
 //
+// H2 estende a MESMA ponte com 3 novas coleções (`store.authSessions`/`store.authChallenges`/
+// `store.passwordResetTokens`, tabelas em migrations/005_h2_auth_sessions.sql) — substituem
+// `sessions = new Map()`. Mesmo mecanismo de hidratação/diff/baseline abaixo, nada de arquitetura
+// paralela: sessão sobrevive a restart e é compartilhada entre instâncias porque é só mais uma linha
+// numa tabela Postgres lida/escrita pela mesma transação de sempre.
+//
 // Mecanismo (ver README de arquitetura em docs/DATA_MODEL.md): a cada `readStore()`, a ponte hidrata
 // essas 4 coleções a partir das tabelas relacionais e guarda uma cópia ("baseline") não-enumerável no
 // próprio objeto `store`. A cada `writeStore()`, a ponte compara o conteúdo ATUAL dessas 4 coleções
@@ -75,23 +81,30 @@ const CORE_BASELINE = Symbol('coreEntitiesBaseline');
 
 async function hydrateCoreEntities(store) {
   const pool = backend.getPool();
-  const [users, processos, legalDeadlines, auditEvents] = await Promise.all([
+  const [users, processos, legalDeadlines, auditEvents, authSessions, authChallenges, passwordResetTokens] = await Promise.all([
     repositories.users.list(pool),
     repositories.legalProcesses.list(pool),
     repositories.legalDeadlines.list(pool),
-    repositories.audit.list(pool)
+    repositories.audit.list(pool),
+    repositories.sessions.list(pool),
+    repositories.mfaChallenges.list(pool),
+    repositories.passwordResetTokens.list(pool)
   ]);
   store.users = users;
   if (!store.records) store.records = {};
   store.records.processos = processos;
   store.records.legalDeadlines = legalDeadlines;
   store.audit = auditEvents;
+  store.authSessions = authSessions;
+  store.authChallenges = authChallenges;
+  store.passwordResetTokens = passwordResetTokens;
   // Baseline precisa ser uma cópia PROFUNDA e independente — as rotas de server.js mutam
-  // `store.users`/`store.records.processos`/`store.records.legalDeadlines`/`store.audit` IN PLACE
-  // (push/Object.assign). Se o baseline apontasse para os MESMOS arrays/objetos, a mutação em memória
-  // também alteraria o baseline, e o diff em writeStore() nunca veria nada como "alterado".
+  // `store.users`/`store.records.processos`/`store.records.legalDeadlines`/`store.audit`/
+  // `store.authSessions`/`store.authChallenges`/`store.passwordResetTokens` IN PLACE (push/Object.assign).
+  // Se o baseline apontasse para os MESMOS arrays/objetos, a mutação em memória também alteraria o
+  // baseline, e o diff em writeStore() nunca veria nada como "alterado".
   Object.defineProperty(store, CORE_BASELINE, {
-    value: structuredClone({ users, processos, legalDeadlines, auditCount: auditEvents.length }),
+    value: structuredClone({ users, processos, legalDeadlines, auditCount: auditEvents.length, authSessions, authChallenges, passwordResetTokens }),
     enumerable: false,
     configurable: true
   });
@@ -125,6 +138,9 @@ async function persistCoreEntities(client, store, baseline) {
   await diffAndPersist(client, repositories.legalProcesses, store.records && store.records.processos, baseline.processos);
   await diffAndPersist(client, repositories.legalDeadlines, store.records && store.records.legalDeadlines, baseline.legalDeadlines);
   await persistNewAuditEvents(client, store.audit, baseline.auditCount);
+  await diffAndPersist(client, repositories.sessions, store.authSessions, baseline.authSessions);
+  await diffAndPersist(client, repositories.mfaChallenges, store.authChallenges, baseline.authChallenges);
+  await diffAndPersist(client, repositories.passwordResetTokens, store.passwordResetTokens, baseline.passwordResetTokens);
 }
 
 // Nenhum bootstrap de `app_users` acontece aqui — só existe UM caminho para popular as tabelas
@@ -149,15 +165,18 @@ async function readStore() {
 
 async function writeStore(store) {
   if (!isRelationalBridgeActive()) return requireBackend().write(store);
-  const baseline = store[CORE_BASELINE] || { users: [], processos: [], legalDeadlines: [], auditCount: 0 };
+  const baseline = store[CORE_BASELINE] || { users: [], processos: [], legalDeadlines: [], auditCount: 0, authSessions: [], authChallenges: [], passwordResetTokens: [] };
   const blobVersion = store[backend.VERSION];
   return backend.withTransaction(async client => {
     await persistCoreEntities(client, store, baseline);
-    // As 4 coleções nunca são serializadas dentro do app_store depois de H1B — retirar antes de gravar
-    // o restante do documento evita dual-write (a tabela relacional é a única fonte para elas).
+    // Estas coleções nunca são serializadas dentro do app_store depois de H1B/H2 — retirar antes de
+    // gravar o restante do documento evita dual-write (a tabela relacional é a única fonte para elas).
     const blobStore = { ...store };
     delete blobStore.users;
     delete blobStore.audit;
+    delete blobStore.authSessions;
+    delete blobStore.authChallenges;
+    delete blobStore.passwordResetTokens;
     if (blobStore.records) {
       blobStore.records = { ...blobStore.records };
       delete blobStore.records.processos;
@@ -170,7 +189,15 @@ async function writeStore(store) {
     // correto em vez do baseline antigo. Cópia profunda pelo mesmo motivo do baseline inicial (evitar
     // que uma mutação em memória subsequente também altere o baseline por referência compartilhada).
     Object.defineProperty(store, CORE_BASELINE, {
-      value: structuredClone({ users: store.users || [], processos: (store.records && store.records.processos) || [], legalDeadlines: (store.records && store.records.legalDeadlines) || [], auditCount: (store.audit || []).length }),
+      value: structuredClone({
+        users: store.users || [],
+        processos: (store.records && store.records.processos) || [],
+        legalDeadlines: (store.records && store.records.legalDeadlines) || [],
+        auditCount: (store.audit || []).length,
+        authSessions: store.authSessions || [],
+        authChallenges: store.authChallenges || [],
+        passwordResetTokens: store.passwordResetTokens || []
+      }),
       enumerable: false,
       configurable: true
     });

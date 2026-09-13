@@ -74,13 +74,13 @@ e um checklist mínimo de LGPD. Não cobre: desenho de novas funcionalidades de 
 | PG-01 | Persistência | ~~`data/store.json` é a única persistência ativa; reescrita integral sem lock/transação a cada mutação~~ **FECHADO por H1A** (ver seção 17) — quando `DATABASE_URL` configurada, PostgreSQL é a persistência canônica; cada escrita é 1 UPDATE transacional | Corrupção sob concorrência, perda de durabilidade, sem escala horizontal | ~~**P0**~~ **FECHADO** | ~~SIM~~ NÃO (fechado) | Migrar para PostgreSQL (schema já preparado em `migrations/`), conectar `database.js` ao runtime | Runtime lê/escreve exclusivamente via banco transacional; testes de concorrência passam | H1A |
 | PG-02 | Persistência | ~~Nenhum lock/atomicidade entre leitura e escrita do JSON~~ **FECHADO por H1A** — concorrência otimista real via `version`/CAS (`storage/postgres-store.js`), conflito responde 409, nunca sobrescrita silenciosa | Race condition (last-write-wins silencioso) sob requisições concorrentes | ~~**P0**~~ **FECHADO** | ~~SIM~~ NÃO (fechado) | Resolvido junto com PG-01 (transação de banco) | Nenhuma escrita concorrente perde dado sem detecção | H1A |
 | PG-03 | Persistência | ~~Sem versionamento de schema/migração automática no boot~~ **FECHADO por H1A** — `schema_migrations` + `npm run migrate` determinístico (`scripts/migrate.js`) | Drift entre ambientes, deploy quebrado silenciosamente | ~~**P1**~~ **FECHADO** | ~~SIM~~ NÃO (fechado) | Rodar migrations no pipeline de deploy, não manualmente | Deploy falha explicitamente se a migration pendente não rodar | H1A |
-| PG-04 | Sessão/Auth | Sessões em `Map()` em memória, perdidas a cada reinício do processo | Logout forçado de todos os usuários a cada deploy/restart; sem HA | **P1** | SIM | Sessão em armazenamento compartilhado (banco/cache), sobrevivendo a restart/múltiplas instâncias | Sessão válida sobrevive a um restart do processo | H2, PG-01 |
-| PG-05 | Sessão/Auth | Não há `logout` que invalide a sessão no servidor | Token roubado continua válido até expirar mesmo após "logout" do usuário | **P1** | SIM | Endpoint de logout que remove a sessão do armazenamento server-side | Token usado após logout retorna 401 | H2 |
-| PG-06 | Sessão/Auth | Não há revogação ativa de sessão (ex.: force-logout administrativo) | Sessão comprometida não pode ser encerrada remotamente | **P1** | SIM | Endpoint administrativo de revogação por usuário/sessão | Sessão revogada devolve 401 imediatamente | H2 |
-| PG-07 | Sessão/Auth | Senha única compartilhada (`COEVO_DEMO_PASSWORD`) para todos os usuários | Sem responsabilização individual real por login; qualquer vazamento afeta todos | **P0** | SIM | Senha/hash por usuário (bcrypt/argon2), fluxo de cadastro/redefinição real | Login exige credencial própria por usuário, hash armazenado com salt | H2 |
-| PG-08 | Sessão/Auth | Código de MFA único compartilhado (`COEVO_MFA_CODE`) | MFA não é MFA real — mesmo segundo fator para todos os usuários | **P0** | SIM | MFA individual por usuário, com fator separado e mecanismo aprovado para produção (a escolha concreta — TOTP, SMS, e-mail ou outro — fica para a implementação em H2, não homologada por este documento) | Cada usuário tem segredo/fator de MFA próprio, não reutilizável entre contas | H2 |
-| PG-09 | Sessão/Auth | Nenhuma política de senha (comprimento, complexidade, rotação) | N/A hoje (não há senha por usuário); vira obrigatório ao resolver PG-07 | **P1** | SIM (condicionado a PG-07) | Definir política mínima de senha ao implementar PG-07 | Política documentada e validada no cadastro/redefinição | PG-07 |
-| PG-10 | Sessão/Auth | Sem proteção a força bruta em `/api/auth/login`/`/api/auth/mfa` | Enumeração de credenciais/código por tentativa exaustiva | **P0** | SIM | Rate limiting + bloqueio progressivo por IP/conta | N tentativas falhas em janela de tempo bloqueiam/atrasam novas tentativas | H3 |
+| PG-04 | Sessão/Auth | ~~Sessões em `Map()` em memória, perdidas a cada reinício do processo~~ **FECHADO por H2** (ver seção 19) — sessão persistida em `auth_sessions` (Postgres), sobrevive a restart e é compartilhada entre instâncias | Logout forçado de todos os usuários a cada deploy/restart; sem HA | ~~**P1**~~ **FECHADO** | ~~SIM~~ NÃO (fechado) | Sessão em armazenamento compartilhado (banco/cache), sobrevivendo a restart/múltiplas instâncias | Sessão válida sobrevive a um restart do processo | H2, PG-01 |
+| PG-05 | Sessão/Auth | ~~Não há `logout` que invalide a sessão no servidor~~ **FECHADO por H2** — `POST /api/auth/logout` revoga a sessão atual (`revokedAt`), testado com token pós-logout recebendo 401 | Token roubado continua válido até expirar mesmo após "logout" do usuário | ~~**P1**~~ **FECHADO** | ~~SIM~~ NÃO (fechado) | Endpoint de logout que remove a sessão do armazenamento server-side | Token usado após logout retorna 401 | H2 |
+| PG-06 | Sessão/Auth | ~~Não há revogação ativa de sessão~~ **FECHADO por H2** — `POST /api/auth/logout-all` revoga todas as sessões do usuário; troca/reset de senha e inativação (`deletedAt`) também revogam (via `credentialsVersion`/checagem em `getUser()`) | Sessão comprometida não pode ser encerrada remotamente | ~~**P1**~~ **FECHADO** | ~~SIM~~ NÃO (fechado) | Endpoint administrativo de revogação por usuário/sessão | Sessão revogada devolve 401 imediatamente | H2 |
+| PG-07 | Sessão/Auth | ~~Senha única compartilhada (`COEVO_DEMO_PASSWORD`) para todos os usuários~~ **FECHADO por H2** — senha individual por usuário (`scrypt`, salt próprio), fluxo de troca/reset com token de uso único | Sem responsabilização individual real por login; qualquer vazamento afeta todos | ~~**P0**~~ **FECHADO** | ~~SIM~~ NÃO (fechado) | Senha/hash por usuário (bcrypt/argon2), fluxo de cadastro/redefinição real | Login exige credencial própria por usuário, hash armazenado com salt | H2 |
+| PG-08 | Sessão/Auth | ~~Código de MFA único compartilhado (`COEVO_MFA_CODE`)~~ **FECHADO por H2** — TOTP individual (RFC 6238) por usuário, segredo cifrado em repouso (AES-256-GCM), nunca ativo antes da confirmação do enrolamento | MFA não é MFA real — mesmo segundo fator para todos os usuários | ~~**P0**~~ **FECHADO** | ~~SIM~~ NÃO (fechado) | MFA individual por usuário, com fator separado e mecanismo aprovado para produção | Cada usuário tem segredo/fator de MFA próprio, não reutilizável entre contas | H2 |
+| PG-09 | Sessão/Auth | ~~Nenhuma política de senha~~ **FECHADO por H2** — comprimento mínimo (10), rejeita trivial/repetida/sequencial, nunca texto puro, sem rotação obrigatória sem causa (só em troca/reset/comprometimento/decisão administrativa) | N/A hoje (não há senha por usuário); vira obrigatório ao resolver PG-07 | ~~**P1**~~ **FECHADO** | ~~SIM~~ NÃO (fechado) | Definir política mínima de senha ao implementar PG-07 | Política documentada e validada no cadastro/redefinição | PG-07 |
+| PG-10 | Sessão/Auth | Sem proteção a força bruta GLOBAL (por IP) em `/api/auth/login`/`/api/auth/mfa/verify` — H2 fechou apenas o bloqueio POR CONTA (`failed_login_count`/`locked_until`, ver seção 19); rate limiting por IP/global continua pendente | Enumeração de credenciais/código por tentativa exaustiva distribuída entre contas/IPs | **P0** | SIM | Rate limiting + bloqueio progressivo por IP | N tentativas falhas em janela de tempo bloqueiam/atrasam novas tentativas por IP, além do bloqueio por conta já implementado | H3 |
 | PG-11 | Rate limiting | Nenhuma rota tem rate limiting (login, API geral, integrações) | Abuso, DoS de aplicação, força bruta | **P0** | SIM | Rate limiting global + reforçado em rotas sensíveis (login/MFA) | Rajada acima do limite recebe 429, sem afetar outros usuários | H3 |
 | PG-12 | HTTP hardening | Ausência de CSP/HSTS/X-Frame-Options/Referrer-Policy/Permissions-Policy | Clickjacking, XSS com maior impacto, downgrade de protocolo | **P1** | SIM | Adicionar headers de hardening padrão (helmet-like, sem framework novo se possível) | Headers presentes e validados em resposta HTTP real | H4 |
 | PG-13 | HTTP hardening | CORS não configurado explicitamente (same-origin implícito) | Comportamento não documentado; risco se um domínio de app separado for introduzido | **P2** | NÃO (aceitável enquanto for same-origin) | Documentar e, se necessário, configurar allowlist explícita | Política de CORS documentada e testada | H4 |
@@ -111,6 +111,14 @@ e um checklist mínimo de LGPD. Não cobre: desenho de novas funcionalidades de 
 - **P2 = 5** — inalterado.
 - **Fechados = 3** — PG-01, PG-02, PG-03.
 
+**Contagem após o Hardening H2 (ver seção 19) — PG-04/PG-05/PG-06/PG-07/PG-08/PG-09 fechados:**
+
+- **P0 aberto = 6** — PG-10 (agora só a fração de rate limiting por IP/global — H3), PG-11, PG-19, PG-20,
+  PG-21, PG-22 (PG-07/PG-08 fechados).
+- **P1 aberto = 5** — PG-12, PG-15, PG-17, PG-23, PG-24 (PG-04/PG-05/PG-06/PG-09 fechados).
+- **P2 = 5** — inalterado.
+- **Fechados = 9** — PG-01, PG-02, PG-03, PG-04, PG-05, PG-06, PG-07, PG-08, PG-09.
+
 PG-01/PG-02 são exibidos como dois achados por clareza de causa raiz (persistência sem transação e sem
 lock são sintomas distintos do mesmo problema), mas compartilham a mesma correção (H1) — contados
 separadamente na tabela e nesta soma, não duplicados fora dela. PG-24 foi reclassificado de P2 para P1
@@ -124,9 +132,9 @@ própria classificação declarada.
 | Gate | Status atual | Bloqueia produção? | Critério GO |
 |---|---|---|---|
 | Persistência | **FECHADO por H1A** — PostgreSQL conectado ao runtime quando `DATABASE_URL` configurada, transacional e testado sob concorrência real (ver seção 17); fallback local (JSON) só fora de produção | NÃO (fechado) | ~~PostgreSQL conectado ao runtime, testado sob concorrência~~ atendido |
-| Sessões | Em memória, sem logout/revogação server-side | SIM | Sessão persistida + logout/revogação funcionais |
-| Autenticação (credenciais) | Senha e MFA únicos compartilhados | SIM | Credencial e MFA por usuário |
-| Rate limiting | Inexistente | SIM | Rate limiting em rotas sensíveis e na API geral |
+| Sessões | **FECHADO por H2** — persistida em `auth_sessions` (Postgres), sobrevive a restart/múltiplas instâncias, logout/logout-all revogam no servidor (ver seção 19) | NÃO (fechado) | ~~Sessão persistida + logout/revogação funcionais~~ atendido |
+| Autenticação (credenciais) | **FECHADO por H2** — senha individual (hash próprio) + MFA individual (TOTP, RFC 6238) por usuário, senha temporária força troca, reset por token de uso único (ver seção 19) | NÃO (fechado) | ~~Credencial e MFA por usuário~~ atendido |
+| Rate limiting | Bloqueio POR CONTA fechado por H2 (`failed_login_count`/`locked_until`); rate limiting GLOBAL/por IP continua inexistente | SIM | Rate limiting em rotas sensíveis e na API geral |
 | Headers HTTP | Só `nosniff` | SIM | CSP/HSTS/X-Frame-Options/Referrer-Policy/Permissions-Policy presentes |
 | CSRF | Mitigado estruturalmente (Bearer, sem cookie) | NÃO (hoje) | Reavaliar se o modelo de sessão mudar |
 | Secrets | Server-side only, sem vazamento identificado | NÃO | Manter prática atual + revisão contínua |
@@ -435,15 +443,157 @@ Legal Deadline + evento de auditoria são persistidos juntos ou nenhum dos dois)
 funcional, mas depende de revisão humana antes de qualquer autorização de uso; e a normalização relacional
 cobre só o núcleo canônico definido nesta rodada, não o restante do modelo de dados.
 
+## 19. Status do Hardening H2 (IMPLEMENTADO — AGUARDANDO HOMOLOGAÇÃO)
+
+**Decisão relacionada:** `docs/DECISIONS.md`, PROD-H2-01.
+
+**Arquitetura implementada (H2):** substitui integralmente o modelo de autenticação/sessão temporário —
+senha global (`COEVO_DEMO_PASSWORD` comparada diretamente), código MFA global (`COEVO_MFA_CODE`) e sessão
+em memória (`const sessions = new Map()`) — por identidade individual, persistente e verificável por
+usuário. Reaproveita a MESMA tabela relacional `app_users` (H1B) — nenhuma segunda tabela de usuários —
+acrescida por migração aditiva (`migrations/005_h2_auth_sessions.sql`, `ALTER TABLE ... ADD COLUMN IF NOT
+EXISTS`, nunca remove/renomeia coluna existente) dos campos `password_hash`, `password_changed_at`,
+`mfa_enabled`, `mfa_method`, `mfa_secret_encrypted`, `mfa_enrolled_at`, `failed_login_count`,
+`locked_until`, `last_login_at`, `credentials_version`. Três tabelas novas — `auth_sessions`,
+`auth_challenges`, `password_reset_tokens` — persistidas pela MESMA ponte relacional de
+`storage/index.js` já usada por H1B (hidratação + diff + baseline dentro da mesma transação Postgres),
+não uma arquitetura paralela.
+
+**Senha:** `crypto.scrypt` (Node built-in, `N=16384, r=8, p=1`, salt de 16 bytes, formato
+`scrypt$N$r$p$salt$hash` auto-descritivo), substituição deliberada de bcrypt/Argon2id para evitar nova
+dependência com binding nativo — KDF de memória intensiva aceito pelo OWASP. Nunca texto puro, nunca
+logada, nunca devolvida por nenhuma rota (`publicUser()` remove `passwordHash`/`mfaSecretEncrypted` de
+qualquer resposta HTTP). Política mínima: 10 caracteres, rejeita repetição/sequência trivial; sem
+rotação periódica obrigatória (só em: senha temporária, reset, comprometimento ou decisão administrativa).
+
+**Senha temporária (`temporaryPassword`):** semântica agora REAL — força a rota de troca de senha
+(`POST /api/auth/change-password`) antes de qualquer conteúdo de negócio, via o mesmo mecanismo de
+"conta exige configuração" usado para o bootstrapping de MFA obrigatório (ver abaixo). A senha temporária
+não pode ser reaproveitada como a senha permanente (rejeitada com 422 se idêntica).
+
+**Reset de senha:** `POST /api/auth/forgot-password` gera um token opaco (CSPRNG, 32 bytes) e persiste
+só o hash (SHA-256) em `password_reset_tokens`, com expiração e uso único (`usedAt`); resposta sempre
+genérica (nunca revela se o e-mail existe). `POST /api/auth/reset-password` valida o token, define a
+nova senha, incrementa `credentials_version` (revogando todas as sessões anteriores) e marca o token
+usado. Este repositório não implementa envio de e-mail (fora de escopo sem um provedor real integrado) —
+o endpoint de geração existe e está pronto para uma entrega futura.
+
+**MFA:** TOTP individual (RFC 6238 — HMAC-SHA1, 6 dígitos, passo de 30s, janela de tolerância de ±1
+passo), implementado com `node:crypto` (`createHmac`), sem nova dependência — algoritmo público e
+padronizado, verificado byte a byte contra os 4 vetores de teste oficiais do RFC. Enrolamento em duas
+etapas: `POST /api/auth/mfa/enroll` gera um segredo e um challenge de confirmação (nunca ativa MFA);
+`POST /api/auth/mfa/confirm` só marca `mfa_enabled:true` após um código válido. O segredo é cifrado em
+repouso (AES-256-GCM, chave derivada de `MFA_ENCRYPTION_KEY`, mesmo padrão de `COEVO_BACKUP_KEY`) e nunca
+é devolvido por nenhuma rota após a confirmação; `encryptSecret()`/`decryptSecret()` falham explicitamente
+(fail-fast) se a chave estiver ausente/curta — nunca grava o segredo em texto puro como alternativa.
+`requireMfa()` (papel: diretoria/administrador/lider) é a MESMA regra já homologada antes de H2, reusada
+sem alteração — não introduz uma nova política de negócio sem decisão prévia.
+
+**Login (ordem exigida):** localizar usuário por e-mail → verificar `deletedAt` → verificar bloqueio
+(`locked_until`) → verificar senha individual → se MFA ativo, emitir desafio individual (nunca a sessão
+completa antes da confirmação) → confirmar MFA (`POST /api/auth/mfa/verify`) → só então criar a sessão
+persistente. Um usuário cujo papel exige MFA mas ainda não o confirmou consegue autenticar (para poder
+completar o próprio enrolamento), mas fica restrito por um gate de "conta exige configuração" a uma
+lista mínima de rotas de autogestão (`change-password`, `mfa/enroll`, `mfa/confirm`, `logout`, `/api/me`)
+— nenhuma rota de conteúdo de negócio — até concluir a senha/MFA pendentes (`ACCOUNT_SETUP_REQUIRED`).
+
+**Sessão:** token opaco (CSPRNG, `crypto.randomBytes(32)`) devolvido ao cliente; o banco (`auth_sessions`)
+grava só o hash (SHA-256 — deliberadamente não um KDF lento, dado que o token já tem 256 bits de entropia
+própria, ao contrário de uma senha escolhida por humano). Expiração absoluta (`COEVO_SESSION_MS`, default
+1h); sem idle timeout nesta rodada (simplificação documentada, item opcional do escopo). Revogação real:
+logout revoga a sessão atual; logout-all revoga todas as sessões do usuário; troca/reset de senha
+incrementam `credentials_version` do usuário, invalidando toda sessão emitida antes (comparação em
+`getUser()`); inativação (`deletedAt`) invalida a sessão imediatamente, sem esperar expiração. Nunca
+depende do cliente "esquecer" o token.
+
+**Bloqueio por tentativas (não é H3):** `failed_login_count`/`locked_until` por CONTA — 5 tentativas
+malsucedidas bloqueiam por 15 minutos; reseta ao primeiro login correto após o desbloqueio. Rate limiting
+GLOBAL/por IP continua fora de escopo (H3, PG-10/PG-11).
+
+**Auditoria:** `LOGIN_SUCCESS`, `LOGIN_FAILURE`, `MFA_CHALLENGE`, `MFA_SUCCESS`, `MFA_FAILURE`, `LOGOUT`,
+`LOGOUT_ALL`, `PASSWORD_CHANGE`, `PASSWORD_RESET_REQUEST`, `PASSWORD_RESET_COMPLETE`, `ACCOUNT_LOCKED`,
+`ACCOUNT_UNLOCKED`, `MFA_ENROLLED` — nunca senha, hash de senha, token bruto, segredo MFA ou código OTP
+(testado explicitamente: `tests/h2-auth-sessions.test.js`, H2-S/T).
+
+**Endpoints:** `POST /api/auth/login`, `POST /api/auth/mfa/verify` (renomeado de `/api/auth/mfa`),
+`POST /api/auth/logout`, `POST /api/auth/logout-all`, `POST /api/auth/change-password`,
+`POST /api/auth/forgot-password`, `POST /api/auth/reset-password`, `POST /api/auth/mfa/enroll`,
+`POST /api/auth/mfa/confirm`, `POST /api/auth/mfa/disable`.
+
+**Seed/dev:** fora de produção (`NODE_ENV !== 'production'`), usuários seed e usuários legados de teste
+recebem uma senha/MFA de desenvolvimento pronta para uso (`temporaryPassword:false`) via
+`migrateLegacyStore()`/`seedAuthFields()` — nunca em produção, onde o usuário seed nasce sem credencial
+utilizável, exigindo o fluxo de reset de senha administrado.
+
+**Fail-closed:** `storage/postgres-store.js` exige a migration `005_h2_auth_sessions` e as 3 tabelas
+novas (`REQUIRED_MIGRATIONS`/`REQUIRED_CORE_TABLES`) — sem elas, `schemaReady:false` e `init()` falha
+explicitamente; nunca cai de volta para sessão em memória/senha global/MFA global como alternativa.
+
+**Testes:** 23 em `tests/h2-auth-sessions.test.js` (Postgres real, banco isolado próprio do arquivo, cria/
+derruba automaticamente) cobrindo senha correta/incorreta, hash nunca exposto, senha temporária força
+troca, MFA individual (segredo de A nunca valida B), código/challenge incorreto e expirado, challenge de
+uso único, sessão persistida com token_hash (nunca o token bruto) em `auth_sessions`, sessão expirada,
+logout/logout-all, troca/reset de senha revogando sessões anteriores, `deletedAt` invalidando sessão
+imediatamente, `credentials_version` divergente invalidando sessão, bloqueio/desbloqueio por tentativas,
+auditoria de login/MFA sem segredo, token de reset expirado/reutilizado, restart do processo (nova
+instância de módulo, mesmo Postgres) e duas instâncias simultâneas compartilhando o mesmo banco
+(sessão criada em uma validada pela outra; revogação em uma refletindo imediatamente na outra). As 3
+suítes pré-existentes que exercitam login via HTTP (`security-integration.test.js`,
+`security-integration-postgres.test.js`, `h1b-core-relational.test.js`) foram atualizadas para o novo
+fluxo (`loginAs()` usa TOTP real, endpoint `/api/auth/mfa/verify`). Total: 342 testes passam com
+Postgres real conectado (319 pré-H2 + 23 novos), 0 pulados.
+
+**O que H2 NÃO fecha (deliberadamente fora desta rodada):** rate limiting global/por IP (H3), headers de
+hardening HTTP/CSP/HSTS (H4), backup/restore de produção com RPO/RTO (H5), logging estruturado/
+monitoramento (H6), incident response (H7), retenção/legal hold (H8), as 2 vulnerabilidades conhecidas de
+dependências (H9), OAuth do Google Calendar (H10), infraestrutura de deploy (H11). RBAC/`scoped()`/
+`allowedContent()`/segregação departamental e "administrador técnico ≠ superusuário de conteúdo"
+permanecem inalterados — autenticação decide quem, autorização continua decidindo o quê.
+
+**Por que "aguardando homologação" e não "concluído":** mesma razão do H1A/H1B — implementação testada e
+funcional, mas depende de revisão humana antes de qualquer autorização de uso.
+
+### Adendo ao H2 (revisão pós-PR #13): 5 blockers corrigidos antes do merge
+
+Correção de blockers identificados na revisão técnica humana do PR #13 (`docs/DECISIONS.md`,
+PROD-H2-01, adendo). Nenhum item abaixo fecha um critério adicional do gate além dos já fechados por H2
+(PG-04 a PG-09) — são correções de correção técnica, não avanço de escopo.
+
+- **Identidade de login única**: `app_users.email` nunca foi único (PROD-H1B-01, item 7) — login por
+  `find(first-match)` sobre e-mail duplicado não é compatível com autenticação individual. Migração
+  aditiva nova `migrations/006_h2_unique_login_identity.sql` acrescenta `login_identifier` (`UNIQUE NOT
+  NULL`, backfill = id técnico existente). Login aceita `login` como identificador primário; `email`
+  continua aceito só quando resolve para exatamente um usuário ativo, nunca escolhendo o primeiro
+  registro em caso de ambiguidade (o mesmo vale para `forgot-password`).
+- **Primeiro acesso/reset administrativo** (`POST /api/auth/users/:id/reset-token`): sem provedor de
+  e-mail integrado, um usuário recém-aprovado não tinha caminho funcional para definir a própria senha
+  em produção. Um operador com a mesma alçada de aprovação de cadastro (`allowed(user,'*','approve')`,
+  nunca uma nova escalada) emite, por `userId` explícito, um token de uso único (mesmo mecanismo de
+  `password_reset_tokens`) devolvido em texto puro uma única vez, para entrega operacional/fora de
+  banda nesta fase.
+- **`MFA_ENCRYPTION_KEY` validada no BOOT** (`validateAuthRuntimeConfig()`) quando `NODE_ENV=production`
+  — antes, a ausência só era descoberta no primeiro enrolamento/validação de MFA real, tarde demais.
+  Fora de produção continua degradando graciosamente (sem exigir a chave para testes que não usam MFA).
+- **Anti-enumeração no login**: conta bloqueada respondia `423` (status distinto que revelava
+  externamente que aquela conta existe e está bloqueada) — corrigido para o mesmo `401`/"Credenciais
+  inválidas" de qualquer outra falha; auditoria interna continua distinguindo os casos normalmente.
+- **TOTP verificado em teste automatizado contra os vetores oficiais do RFC 6238** (Apêndice B) —
+  antes só verificado manualmente durante o desenvolvimento original de H2.
+
+Testes: 352/352 com Postgres real (342 anteriores + 10 novos cenários cobrindo os 5 itens acima, em
+`tests/core.test.js` e `tests/h2-auth-sessions.test.js`), 0 falhando, nenhum teste removido.
+
 ## 16. Decisão final atual
 
 **NO-GO PARA PRODUÇÃO** — inalterado por esta rodada de hardening.
 
-Após o H1A/H1B: **8 P0 abertos** (credenciais/MFA compartilhados, ausência de rate limiting, ausência de
-retenção/legal hold, ausência de incident response, backup/restore de produção não validado — H5,
-ausência de infraestrutura de deploy como código), **9 P1 abertos**, **5 P2** — 22 achados abertos, **3
-fechados** (PG-01/PG-02/PG-03, ver seções 17/18). Na matriz da seção 5, a linha "Persistência" deixa de
-bloquear; os demais 12 gates bloqueantes permanecem. Nenhum waiver foi emitido. O Sprint 2 permanece
-concluído no escopo homologado (`docs/DECISIONS.md`, D2-CLOSE) — este documento não o reabre nem
-contradiz; apenas formaliza que produção é um gate técnico/de negócio separado, ainda não atendido, e que
-o H1A/H1B avançaram critérios específicos de persistência sem declarar o gate inteiro atendido.
+Após o H1A/H1B/H2: **6 P0 abertos** (rate limiting global/por IP — H3, ausência de retenção/legal hold,
+ausência de incident response, backup/restore de produção não validado — H5, ausência de infraestrutura
+de deploy como código), **5 P1 abertos**, **5 P2** — 16 achados abertos, **9 fechados** (PG-01 a PG-09,
+ver seções 17/18/19). Na matriz da seção 5, as linhas "Persistência", "Sessões" e "Autenticação
+(credenciais)" deixam de bloquear; os demais 9 gates bloqueantes permanecem. Nenhum waiver foi emitido.
+O Sprint 2 permanece concluído no escopo homologado (`docs/DECISIONS.md`, D2-CLOSE) — este documento não
+o reabre nem contradiz; apenas formaliza que produção é um gate técnico/de negócio separado, ainda não
+atendido, e que
+o H1A/H1B/H2 avançaram critérios específicos de persistência/sessão/autenticação sem declarar o gate
+inteiro atendido.

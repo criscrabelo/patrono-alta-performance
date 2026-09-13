@@ -402,3 +402,68 @@ nessa tabela — na MESMA transação que popula as 4 tabelas e remove as 4 cole
 sem ele, o boot falha explicitamente (fail-closed), com mensagem apontando para
 `npm run migrate:h1b:data` — nunca ativa a ponte relacional sobre tabelas vazias enquanto o blob ainda
 tem o dado real. `GET /api/health` (`schemaReady`) reflete o mesmo estado.
+
+## Hardening H2 — autenticação individual, MFA individual e sessões persistentes
+(docs/PRODUCTION_GATE.md, docs/DECISIONS.md PROD-H2-01)
+
+**`app_users` continua sendo a única tabela de usuários** — H2 não cria uma segunda tabela. Acrescenta,
+por migração aditiva (`migrations/005_h2_auth_sessions.sql`, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`,
+nunca remove/renomeia coluna existente): `password_hash` (texto, formato auto-descritivo
+`scrypt$N$r$p$salt$hash`), `password_changed_at`, `mfa_enabled` (boolean, default `false`), `mfa_method`,
+`mfa_secret_encrypted` (cifrado em repouso, AES-256-GCM), `mfa_enrolled_at`, `failed_login_count`
+(integer, default `0`), `locked_until`, `last_login_at`, `credentials_version` (integer, default `1`).
+
+**Três tabelas novas, persistidas pela MESMA ponte relacional de H1B** (`storage/index.js` — hidratação/
+diff/baseline dentro da mesma transação Postgres, não uma arquitetura paralela):
+
+- **`auth_sessions`** — substitui `sessions = new Map()`. `id`, `user_id` (FK `app_users(id)`,
+  `ON DELETE RESTRICT`), `token_hash` (único — nunca o token bruto), `created_at`, `expires_at`,
+  `last_seen_at`, `revoked_at`, `credentials_version` (cópia do valor do usuário no momento da emissão —
+  uma troca/reset de senha posterior invalida a sessão sem precisar apagar a linha), `version` (CAS).
+- **`auth_challenges`** — desafio de MFA pendente de confirmação, tanto no login (`type:'totp'`) quanto no
+  enrolamento de um novo segredo (`type:'totp-enrollment'`, único caso em que `secret_encrypted` é
+  preenchido — o segredo TOTP ainda não confirmado, cifrado da mesma forma que
+  `app_users.mfa_secret_encrypted`). `id`, `user_id` (FK), `type`, `secret_encrypted` (nulável),
+  `expires_at`, `used_at` (uso único), `attempts`, `created_at`, `version`. Nunca armazena o OTP em si.
+- **`password_reset_tokens`** — token de reset de senha, uso único. `id`, `user_id` (FK), `token_hash`
+  (único — nunca o token bruto), `created_at`, `expires_at`, `used_at`, `version`.
+
+Todas as três com `user_id ... ON DELETE RESTRICT` — mesma regra de FK do núcleo H1B: nenhum cascade
+destrutivo, inativação continua sendo exclusivamente `deletedAt`.
+
+**`store.authSessions`/`store.authChallenges`/`store.passwordResetTokens`** são as 3 coleções que a ponte
+relacional acrescenta ao objeto `store` (ao lado de `users`/`legalProcesses`/`legalDeadlines`/`audit`
+já existentes desde H1B) — nunca serializadas dentro do blob JSONB `app_store` depois de existirem.
+
+**Nenhum modelo de dados de negócio foi alterado.** RBAC, `scoped()`, segregação departamental e as
+demais entidades (departments, financials, agenda, projetos, etc.) permanecem exatamente como estavam
+— H2 é estritamente autenticação/sessão, nunca autorização/conteúdo.
+
+**`storage/postgres-store.js` (`REQUIRED_MIGRATIONS`/`REQUIRED_CORE_TABLES`) exige a migration
+`005_h2_auth_sessions` e as 3 tabelas novas** — mesma disciplina fail-closed de H1B: schema
+incompatível/ausente falha explicitamente em `init()`/`healthcheck()`, nunca silenciosamente.
+
+## Hardening H2 — Adendo (revisão pós-PR #13): identidade de login única
+(docs/PRODUCTION_GATE.md, docs/DECISIONS.md PROD-H2-01, adendo)
+
+**`app_users.login_identifier`** (`migrations/006_h2_unique_login_identity.sql`, aditiva — não altera
+001-005, inclusive a própria 005 já entregue na mesma rodada H2): `text NOT NULL`, com índice único
+(`uq_app_users_login_identifier`). É a identidade TÉCNICA de autenticação — separada e estável, nunca o
+`email` (que nunca foi único, PROD-H1B-01 item 7; o próprio seed tem dois usuários com o mesmo e-mail).
+Backfill dos registros existentes: `login_identifier = id` (o identificador técnico já existente, único
+e estável — nunca um dado de negócio inventado, como um nome de usuário comercial ou um e-mail
+fictício). Todo usuário novo (seed, aprovação de cadastro) recebe `login_identifier = id` por padrão
+nesta rodada; uma interface de login amigável (escolha de nome de usuário pelo próprio usuário) fica
+para uma rodada futura, fora deste escopo.
+
+`storage/repositories/users-repository.js` (`loginIdentifierOf()`) e `scripts/migrate-h1b-data.js`
+(`insertUserIdempotent()`) aplicam a MESMA regra de fallback ao inserir um usuário sem
+`loginIdentifier` explícito — nunca inventam um valor diferente entre os dois caminhos de escrita.
+
+`login_identifier` é imutável pela ponte relacional nesta rodada (só definido na criação — `update()`
+não o altera); uma futura rota de gestão de nome de login ficaria a cargo de uma implementação própria,
+com sua própria auditoria.
+
+`storage/postgres-store.js` (`REQUIRED_MIGRATIONS`) passa a exigir também `006_h2_unique_login_identity`
+— mesma disciplina fail-closed: schema sem essa migration falha explicitamente em `init()`/
+`healthcheck()`.

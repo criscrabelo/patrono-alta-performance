@@ -33,12 +33,13 @@ function createPostgresStore({ databaseUrl, ssl = false, seed }) {
   // como hoje — só `write()` a lê de volta.
   const VERSION = Symbol('storeVersion');
 
-  // Sprint 2, Hardening H1B: '004_h1b_core_relational' é obrigatória a partir desta versão — sem ela,
-  // users/legal_processes/legal_deadlines/audit_log não existem e o bridge relacional (storage/index.js)
-  // não tem onde ler/gravar. Mesma rigidez do H1A: nunca criado pelo runtime, só validado.
-  const REQUIRED_MIGRATIONS = ['003_app_store', '004_h1b_core_relational'];
+  // Sprint 2, Hardening H1B/H2: '004_h1b_core_relational'/'005_h2_auth_sessions' são obrigatórias a
+  // partir desta versão — sem elas, as tabelas relacionais (núcleo canônico + autenticação/sessão) não
+  // existem e o bridge relacional (storage/index.js) não tem onde ler/gravar. Mesma rigidez do H1A:
+  // nunca criado pelo runtime, só validado.
+  const REQUIRED_MIGRATIONS = ['003_app_store', '004_h1b_core_relational', '005_h2_auth_sessions', '006_h2_unique_login_identity'];
   const REQUIRED_APP_STORE_COLUMNS = ['id', 'data', 'version', 'updated_at'];
-  const REQUIRED_CORE_TABLES = ['app_users', 'legal_processes', 'legal_deadlines', 'audit_log', DATA_MIGRATIONS_TABLE];
+  const REQUIRED_CORE_TABLES = ['app_users', 'legal_processes', 'legal_deadlines', 'audit_log', DATA_MIGRATIONS_TABLE, 'auth_sessions', 'auth_challenges', 'password_reset_tokens'];
   const MIGRATE_HINT = 'Rode "npm run migrate" para aplicar as migrations pendentes antes de iniciar a aplicação.';
 
   // Valida (nunca cria) o schema canônico. O runtime NUNCA deve substituir migration por
