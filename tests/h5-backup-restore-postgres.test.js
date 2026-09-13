@@ -117,6 +117,9 @@ if (!TEST_DATABASE_URL) {
     assert.equal(realManifest.encrypted, false);
     assert.ok(realManifest.postgresVersion, 'postgresVersion deve ser registrada no manifesto');
     assert.ok(realManifest.migrationVersion, 'migrationVersion deve ser registrada no manifesto');
+    // Correção pós-H5 (revisão técnica independente): manifesto deve registrar o NOME REAL do banco de
+    // origem (current_database()), nunca o valor fixo "postgres" hardcoded.
+    assert.equal(realManifest.database, sourceDb.name, 'manifesto deve registrar o nome real do banco de origem');
     const objectPath = path.join(storageDir, realManifest.storageObjectKey);
     assert.ok(fs.existsSync(objectPath), 'artefato de backup deve existir no storage local');
     assert.ok(fs.statSync(objectPath).size > 0);
@@ -263,24 +266,130 @@ if (!TEST_DATABASE_URL) {
   });
 
   test('[H5-real-N] backup em produção sem storage offsite real (local-only) falha explicitamente', async () => {
+    // Correção pós-H5: produção agora também exige BACKUP_ENCRYPTION_KEY (checada ANTES do storage) —
+    // definida aqui para isolar especificamente a checagem de storage offsite que este teste verifica.
     await assert.rejects(
-      () => runBackup({ databaseUrl: sourceDb.url, environment: 'production' }),
+      () => withEnv({ BACKUP_ENCRYPTION_KEY: 'chave-de-teste-com-pelo-menos-32-caracteres' }, () =>
+        runBackup({ databaseUrl: sourceDb.url, environment: 'production' })
+      ),
       /storage offsite real/
     );
   });
 
+  // --- Correção pós-H5 (revisão técnica independente): criptografia obrigatória em produção -----------
+  test('[H5-real-S] backup em produção SEM BACKUP_ENCRYPTION_KEY falha explicitamente (backup em texto claro nunca é aceito)', async () => {
+    await assert.rejects(
+      () => runBackup({ databaseUrl: sourceDb.url, environment: 'production' }),
+      /BACKUP_ENCRYPTION_KEY é obrigatória em produção/
+    );
+  });
+
+  test('[H5-real-T] backup em produção com BACKUP_ENCRYPTION_KEY curta falha explicitamente', async () => {
+    await assert.rejects(
+      () => withEnv({ BACKUP_ENCRYPTION_KEY: 'curta-demais' }, () =>
+        runBackup({ databaseUrl: sourceDb.url, environment: 'production' })
+      ),
+      /menos de 32 caracteres/
+    );
+  });
+
+  test('[H5-real-U] backup em produção com BACKUP_ENCRYPTION_KEY válida e storage s3 (cliente fake) passa e gera artefato cifrado', async () => {
+    const store = new Map();
+    const { createS3StorageAdapter } = require('../backup/storage-adapters/s3');
+    const fakeClient = {
+      async send(command) {
+        const name = command.constructor.name;
+        if (name === 'PutObjectCommand') {
+          const chunks = [];
+          for await (const chunk of command.input.Body) chunks.push(chunk);
+          store.set(command.input.Key, Buffer.concat(chunks));
+          return {};
+        }
+        throw new Error(`comando não suportado: ${name}`);
+      }
+    };
+    const manifest = await withEnv({
+      BACKUP_ENCRYPTION_KEY: 'chave-de-teste-com-pelo-menos-32-caracteres',
+      BACKUP_STORAGE_PROVIDER: 's3', BACKUP_BUCKET: 'patrono-backups-producao-teste'
+    }, () => runBackup({ databaseUrl: sourceDb.url, environment: 'production', s3Client: fakeClient }));
+    assert.equal(manifest.encrypted, true);
+    assert.ok(manifest.encryptionKeyId);
+    assert.ok(store.has(manifest.storageObjectKey), 'o artefato cifrado deve ter sido "enviado" ao storage s3 (fake)');
+  });
+
+  test('[H5-real-V] backup real com criptografia habilitada + restore real decifra corretamente (round-trip completo com dado real)', async () => {
+    const encryptedManifest = await withEnv({
+      BACKUP_ENCRYPTION_KEY: 'chave-de-teste-com-pelo-menos-32-caracteres',
+      BACKUP_STORAGE_PROVIDER: 'filesystem', BACKUP_LOCAL_DIR: storageDir
+    }, () => runBackup({ databaseUrl: sourceDb.url, environment: 'development' }));
+    assert.equal(encryptedManifest.encrypted, true);
+    const encryptedTarget = await createIsolatedDatabase('encryptedtarget');
+    try {
+      const report = await withEnv({
+        BACKUP_ENCRYPTION_KEY: 'chave-de-teste-com-pelo-menos-32-caracteres',
+        BACKUP_STORAGE_PROVIDER: 'filesystem', BACKUP_LOCAL_DIR: storageDir
+      }, () => runRestore({
+        databaseUrlTarget: encryptedTarget.url, targetEnvironment: 'development',
+        backupSourceEnvironment: 'development', backupId: encryptedManifest.backupId
+      }));
+      assert.equal(report.result, 'success');
+      const pool = new Pool({ connectionString: encryptedTarget.url });
+      try {
+        const { rows } = await pool.query("SELECT COUNT(*)::int AS count FROM app_users WHERE id = 'usr-h5-teste'");
+        assert.equal(rows[0].count, 1, 'dado real deve ter sobrevivido ao round-trip cifra/decifra');
+      } finally { await pool.end(); }
+    } finally { await dropDatabase(encryptedTarget.name); }
+  });
+
+  test('[H5-real-W] senha do PostgreSQL com caracteres especiais funciona no backup/restore real (credencial nunca em argv)', async () => {
+    const admin = new Pool({ connectionString: sourceDb.url });
+    const roleName = `h5_special_pw_${process.pid}`;
+    const specialPassword = "s3nh@:c0m/car#especi&is%25";
+    try {
+      await admin.query(`CREATE ROLE ${roleName} WITH LOGIN SUPERUSER PASSWORD '${specialPassword.replace(/'/g, "''")}'`);
+      const specialUrl = `postgresql://${roleName}:${encodeURIComponent(specialPassword)}@${new URL(sourceDb.url).host}/${sourceDb.name}`;
+      const manifest = await withEnv({ BACKUP_STORAGE_PROVIDER: 'filesystem', BACKUP_LOCAL_DIR: storageDir }, () =>
+        runBackup({ databaseUrl: specialUrl, environment: 'development' })
+      );
+      assert.ok(manifest.sizeBytes > 0, 'backup real com senha de caracteres especiais deve funcionar');
+
+      const specialTarget = await createIsolatedDatabase('specialpwtarget');
+      try {
+        const specialTargetUrl = `postgresql://${roleName}:${encodeURIComponent(specialPassword)}@${new URL(specialTarget.url).host}/${specialTarget.name}`;
+        const report = await withEnv({ BACKUP_STORAGE_PROVIDER: 'filesystem', BACKUP_LOCAL_DIR: storageDir }, () =>
+          runRestore({
+            databaseUrlTarget: specialTargetUrl, targetEnvironment: 'development',
+            backupSourceEnvironment: 'development', backupId: manifest.backupId
+          })
+        );
+        assert.equal(report.result, 'success', 'restore real com senha de caracteres especiais deve funcionar');
+      } finally { await dropDatabase(specialTarget.name); }
+    } finally {
+      await admin.query(`DROP ROLE IF EXISTS ${roleName}`).catch(() => {});
+      await admin.end();
+    }
+  });
+
   test('[H5-real-O] pg_dump com DATABASE_URL de um servidor inalcançável nunca produz um backup "completed"', async () => {
+    const pool = new Pool({ connectionString: sourceDb.url });
+    let countBefore;
+    try {
+      countBefore = (await pool.query("SELECT COUNT(*)::int AS count FROM backup_runs WHERE status = 'completed'")).rows[0].count;
+    } finally { await pool.end(); }
+
     const unreachableUrl = 'postgresql://postgres:postgres@127.0.0.1:1/patrono_nao_existe';
     await assert.rejects(() => withEnv({ BACKUP_STORAGE_PROVIDER: 'filesystem', BACKUP_LOCAL_DIR: storageDir }, () =>
       runBackup({ databaseUrl: unreachableUrl, environment: 'development' })
     ));
-    // Nenhum backup novo deve ter sido marcado como "completed" a partir dessa tentativa — o backup real
-    // anterior (H5-real-A/B) continua sendo o último válido.
-    const pool = new Pool({ connectionString: sourceDb.url });
+    // Nenhum backup novo deve ter sido marcado como "completed" a partir dessa tentativa — a contagem de
+    // backups completed nesta base nunca cresce por causa de uma tentativa contra um servidor
+    // inalcançável (comparação contra o valor capturado ANTES da tentativa, não um número fixo, já que
+    // outros testes reais deste arquivo — H5-real-A/U/V/W — também geram linhas completed legítimas).
+    const pool2 = new Pool({ connectionString: sourceDb.url });
     try {
-      const { rows } = await pool.query("SELECT COUNT(*)::int AS count FROM backup_runs WHERE status = 'completed'");
-      assert.equal(rows[0].count, 1, 'a tentativa contra um servidor inalcançável nunca deve gerar uma segunda linha completed nesta base');
-    } finally { await pool.end(); }
+      const { rows } = await pool2.query("SELECT COUNT(*)::int AS count FROM backup_runs WHERE status = 'completed'");
+      assert.equal(rows[0].count, countBefore, 'a tentativa contra um servidor inalcançável nunca deve gerar uma nova linha completed nesta base');
+    } finally { await pool2.end(); }
   });
 
   test('[H5-real-P] arquivos temporários de trabalho são limpos após backup e restore (sucesso e falha)', async () => {

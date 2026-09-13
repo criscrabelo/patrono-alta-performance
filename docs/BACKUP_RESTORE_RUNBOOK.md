@@ -18,12 +18,16 @@ terminou sem erro".
   atualizações feitas no mesmo dia de um incidente. 6 horas é tecnicamente executável com
   `npm run backup:postgres` agendado 4x/dia via cron/scheduler externo (H5 deixa o processo
   automatizável; o próprio agendamento de produção fica para H11 — infraestrutura como código).
-- **RTO (Recovery Time Objective): 4 horas.** Baseado no tempo observado no teste de restore real
-  (`tests/h5-backup-restore-postgres.test.js`, evidência abaixo) — a execução completa de
-  `pg_dump`→upload→`pg_restore`→validação levou menos de 1 segundo para o volume de dados atual; 4h dá
-  margem generosa para: localizar o backup correto, provisionar/reapontar o banco de destino,
-  coordenar a decisão de qual ambiente restaurar, e validar manualmente antes de liberar o sistema.
-  Esta meta será revisada à medida que o volume de dados cresça.
+- **RTO TARGET (Recovery Time Objective): 4 horas.** **Correção pós-H5 (revisão técnica independente):**
+  esta é uma META (target), não uma prova em escala produtiva — o restore observado em
+  `tests/h5-backup-restore-postgres.test.js` levou menos de 1 segundo para o **dataset sintético atual**
+  (poucas linhas em `app_users`/`legal_processes`/`legal_deadlines`/`audit_log`), o que demonstra que o
+  MECANISMO funciona ponta a ponta, mas não comprova o tempo de restore com um volume de dados
+  representativo de produção. 4h dá margem para: localizar o backup correto, provisionar/reapontar o
+  banco de destino, coordenar a decisão de qual ambiente restaurar, e validar manualmente antes de
+  liberar o sistema — mas **ainda precisa ser validada com um volume de dados representativo de
+  produção** antes de ser tratada como um RTO comprovado. Enquanto essa validação não ocorrer, PG-21
+  permanece aberto também por este motivo (ver seção 18).
 
 ## 3. Frequência e destino offsite
 
@@ -39,19 +43,40 @@ terminou sem erro".
   adapter `s3` está implementado e testado com um cliente S3 injetado (`tests/h5-backup-restore.test.js`)
   mas nunca foi exercitado contra um bucket real, por falta de credencial/autorização para provisionar
   infraestrutura nesta rodada. Ver seção 10 (limitações).
+- **Correção pós-H5 (revisão técnica independente): `BACKUP_ENDPOINT` só aceita `https:` em produção.**
+  Um endpoint S3-compatible customizado (`BACKUP_ENDPOINT`) definido com `APP_ENVIRONMENT=production`
+  precisa usar `https:` — `http:` é recusado (fail-fast), pois exporia as credenciais de acesso ao
+  storage em texto claro na rede. Fora de produção, um endpoint HTTP local (MinIO/testes) continua
+  permitido — a restrição nunca vaza para ambientes não produtivos, onde travaria testes locais sem TLS.
+  AWS S3 real (sem `BACKUP_ENDPOINT` customizado) sempre usa HTTPS nativamente, sem depender desta
+  checagem.
 
 ## 4. Criptografia
 
-- **Em trânsito**: TLS (dependendo do provider S3-compatible configurado).
+- **Em trânsito**: TLS (dependendo do provider S3-compatible configurado; obrigatório em produção para
+  um `BACKUP_ENDPOINT` customizado, ver seção 3).
 - **Em repouso**: duas camadas possíveis, não mutuamente exclusivas:
   1. Server-side encryption do storage (se o provider oferecer e estiver configurado — fora do controle
      do código do Patrono).
-  2. Criptografia **application-side opcional**, AES-256-GCM, via `BACKUP_ENCRYPTION_KEY` (mínimo 32
-     caracteres). Se configurada, o artefato de `pg_dump` é cifrado ANTES do upload; o manifesto registra
-     `encrypted: true` e um `encryptionKeyId` lógico (hash não-reversível da chave — nunca a chave em
-     si), preparando rotação futura: uma chave nova gera um `encryptionKeyId` diferente, mas backups
-     antigos continuam decifráveis desde que a chave antiga usada para gerá-los ainda esteja disponível
-     ao operador. **Nunca existe uma única chave eterna sem identificação.**
+  2. Criptografia **application-side**, AES-256-GCM, via `BACKUP_ENCRYPTION_KEY` (mínimo 32 caracteres).
+     O artefato de `pg_dump` é cifrado ANTES do upload; o manifesto registra `encrypted: true` e um
+     `encryptionKeyId` lógico (hash não-reversível da chave — nunca a chave em si), preparando rotação
+     futura: uma chave nova gera um `encryptionKeyId` diferente, mas backups antigos continuam
+     decifráveis desde que a chave antiga usada para gerá-los ainda esteja disponível ao operador.
+     **Nunca existe uma única chave eterna sem identificação.**
+  - **Correção pós-H5 (revisão técnica independente): OBRIGATÓRIA em produção.** Até existir validação
+    real de SSE/KMS do provider de storage (item 1 acima depende de configuração externa, fora do
+    controle deste código), um backup de produção sem `BACKUP_ENCRYPTION_KEY` seria um artefato em texto
+    claro — `scripts/backup-postgres.js` falha explicitamente (fail-fast, antes de qualquer `pg_dump`
+    rodar) se `APP_ENVIRONMENT=production` e a chave estiver ausente ou tiver menos de 32 caracteres.
+    Fora de produção, a criptografia continua opcional (para não travar desenvolvimento/teste local sem
+    a variável configurada).
+  - **Cifragem/decifragem em streaming real**: `backup/crypto.js` usa `fs.createReadStream()`/
+    `fs.createWriteStream()` — nunca carrega o artefato inteiro em memória, mesmo para bancos grandes.
+    Formato do arquivo cifrado (versão 2, versionado no primeiro byte):
+    `formatVersion(1) || iv(12) || ciphertext(N) || tag(16)` — a tag de autenticação GCM fica no FINAL do
+    arquivo (só é conhecida depois que todo o plaintext foi cifrado), permitindo processar o cabeçalho e
+    o ciphertext em streaming, com a tag anexada apenas ao final.
 - `BACKUP_ENCRYPTION_KEY` é independente de `COEVO_BACKUP_KEY` (que cifra apenas o snapshot JSON legado
   de `POST /api/backup`) — rotacionar uma nunca afeta a outra.
 - Se `BACKUP_ENCRYPTION_KEY` estiver definida mas tiver menos de 32 caracteres, os scripts de
@@ -72,7 +97,14 @@ npm run backup:postgres
 ```
 
 Se `BACKUP_ENCRYPTION_KEY` estiver definida no ambiente, o artefato é cifrado automaticamente — nada
-adicional a passar.
+adicional a passar. Em produção, ela é obrigatória (ver seção 4).
+
+**Correção pós-H5 (revisão técnica independente): a credencial nunca aparece em `ps`/`/proc`.**
+`DATABASE_URL`/`DATABASE_URL_TARGET` são parseadas uma única vez (`backup/pg-connection.js`); apenas
+host/porta/usuário/banco (não-segredo) viram argumentos de linha de comando de `pg_dump`/`pg_restore` —
+a senha é passada exclusivamente via a variável de ambiente `PGPASSWORD` do processo filho, nunca em
+argv. Isso importa porque qualquer processo capaz de listar processos do sistema (`ps aux`, `/proc/<pid>/
+cmdline`) conseguiria ler os argumentos de um processo em execução — a senha nunca deve estar lá.
 
 ## 6. Como confirmar que um backup foi bem-sucedido
 
@@ -165,17 +197,20 @@ foi usado — todo o dataset é sintético (`usr-h5-teste`, `proc-h5-teste`, `de
 - **SHA-256**: calculado e conferido contra o manifesto em toda execução — mismatch bloqueia o restore
   (testado explicitamente em `[H5-real-G]`, com um manifesto deliberadamente adulterado).
 - **Tamanho**: sempre > 0 — um artefato de tamanho zero nunca é aceito como backup válido.
-- **Tempo de backup observado**: tipicamente < 1s para o volume de dados atual (`pg_dump` +
-  `pg_restore --list` de smoke validation + upload local + cálculo de hash).
-- **Tempo de restore observado**: tipicamente < 1s (`pg_restore` real + revogação de estado efêmero +
-  validação de contagens + escrita da evidência em `restore_runs`).
+- **Tempo de backup observado**: tipicamente < 1s para o **dataset sintético atual** (`pg_dump` +
+  `pg_restore --list` de smoke validation + upload local + cálculo de hash) — não uma prova em escala
+  produtiva (ver seção 2/18).
+- **Tempo de restore observado**: tipicamente < 1s para o mesmo dataset sintético (`pg_restore` real +
+  revogação de estado efêmero + validação de contagens + escrita da evidência em `restore_runs`).
 - **Checks executados**: contagem de `app_users`/`legal_processes`/`legal_deadlines`/`audit_log` no
   destino idêntica à origem; relação `legal_deadlines.process_id`/`responsible_user_id` preservada;
   `schema_migrations` no destino aponta para a mesma migration mais recente do manifesto;
   `auth_sessions`/`auth_challenges`/`password_reset_tokens`/`rate_limit_buckets` vazias no destino
   (política de revogação) enquanto continuam intactas na origem; linha em `restore_runs` no destino com
-  `result='success'`.
-- **Resultado**: sucesso, 18/18 testes desta suíte passando (ver `tests/h5-backup-restore-postgres.test.js`).
+  `result='success'`; round-trip completo com criptografia habilitada (backup cifrado real → restore
+  decifra corretamente); backup/restore real com senha do PostgreSQL contendo caracteres especiais
+  (`@`, `:`, `/`, `%`) — credencial nunca em argv, só via `PGPASSWORD`.
+- **Resultado**: sucesso, 23/23 testes desta suíte passando (ver `tests/h5-backup-restore-postgres.test.js`).
 
 ## 11. Como agir em falha de backup
 
@@ -251,7 +286,12 @@ habilitá-la na configuração do bucket (fora do código do Patrono) antes de p
   (`tests/h5-backup-restore.test.js`), cobrindo a lógica de upload/download/existência, mas não a
   integração de rede/credenciais reais contra um provedor S3-compatible.
 - Sem multipart upload — artefatos maiores que o limite de um `PutObject` único do provider (5GB na AWS
-  S3) exigiriam essa evolução, fora do escopo desta rodada dado o volume de dados atual do Patrono.
+  S3) exigiriam essa evolução, fora do escopo desta rodada dado o volume de dados atual do Patrono. Se um
+  artefato exceder um limite seguro conhecido, a preferência é falhar explicitamente (nunca tentar e
+  consumir memória) — não implementado nesta rodada por não haver, hoje, artefato próximo desse limite.
 - Sem exclusão automática de backups expirados (seção 15) — só a política está documentada.
 - Sem Object Lock/immutability configurado (seção 16).
 - Sem agendamento de produção real (cron/scheduler) — isso é H11.
+- **RTO (4h) é uma meta (target), não uma prova em escala produtiva** — comprovado apenas com o dataset
+  sintético de teste; precisa ser revalidado com um volume de dados representativo de produção (ver
+  seção 2).

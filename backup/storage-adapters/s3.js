@@ -7,6 +7,15 @@
 // `docs/DECISIONS.md` para não reinventar primitivas que uma biblioteca madura resolve com mais
 // segurança. Nenhum bucket real é criado por este código — a criação de infraestrutura é H11 (item 53).
 //
+// Correção pós-H5 (revisão técnica independente): upload/download passaram a usar STREAMING real, nunca
+// carregando o artefato inteiro em memória — `putObject()` envia `fs.createReadStream()` como `Body`
+// (com `ContentLength` explícito, calculado só com `fs.statSync()` — nunca lendo o arquivo — para que o
+// SDK não precise armazenar o stream inteiro em buffer para calcular o tamanho); `getObject()` usa
+// `stream/promises`' `pipeline()` para escoar `response.Body` diretamente para o arquivo de destino, sem
+// acumular chunks num array/Buffer. Limite conhecido (documentado em
+// `docs/BACKUP_RESTORE_RUNBOOK.md`): um único `PutObject` tem limite de tamanho do provedor (5GB na AWS
+// S3) — multipart upload é uma evolução futura, fora do escopo desta rodada dado o volume de dados atual.
+//
 // `client` é injetável (parâmetro opcional) especificamente para permitir testes unitários sem
 // credenciais/rede reais (`tests/h5-backup-restore.test.js` injeta um cliente fake) — mesmo padrão já
 // usado no projeto para repositórios (pool injetado) e para o cliente Postgres em scripts/migrate.js.
@@ -25,20 +34,20 @@ function createS3StorageAdapter({ bucket, region, endpoint, accessKeyId, secretA
   async function putObject(objectKey, sourceFilePath) {
     const { PutObjectCommand } = require('@aws-sdk/client-s3');
     const fs = require('node:fs');
-    const body = fs.readFileSync(sourceFilePath);
-    await s3Client.send(new PutObjectCommand({ Bucket: bucket, Key: objectKey, Body: body }));
-    return { sizeBytes: body.length };
+    const { size } = fs.statSync(sourceFilePath);
+    const body = fs.createReadStream(sourceFilePath);
+    await s3Client.send(new PutObjectCommand({ Bucket: bucket, Key: objectKey, Body: body, ContentLength: size }));
+    return { sizeBytes: size };
   }
 
   async function getObject(objectKey, destFilePath) {
     const { GetObjectCommand } = require('@aws-sdk/client-s3');
     const fs = require('node:fs');
+    const { pipeline } = require('node:stream/promises');
     const response = await s3Client.send(new GetObjectCommand({ Bucket: bucket, Key: objectKey }));
-    const chunks = [];
-    for await (const chunk of response.Body) chunks.push(chunk);
-    const buffer = Buffer.concat(chunks);
-    fs.writeFileSync(destFilePath, buffer, { mode: 0o600 });
-    return { sizeBytes: buffer.length };
+    const output = fs.createWriteStream(destFilePath, { mode: 0o600 });
+    await pipeline(response.Body, output);
+    return { sizeBytes: fs.statSync(destFilePath).size };
   }
 
   async function objectExists(objectKey) {

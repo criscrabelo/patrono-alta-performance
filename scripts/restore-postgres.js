@@ -26,6 +26,7 @@ const { validateManifest } = require('../backup/manifest');
 const backupCrypto = require('../backup/crypto');
 const { sanitizeErrorMessage } = require('../backup/sanitize');
 const runsRepository = require('../backup/runs-repository');
+const { parsePostgresConnection, pgCliArgs, pgChildEnv } = require('../backup/pg-connection');
 
 // Dados operacionais efêmeros (item 30-32 do escopo H5): após um disaster recovery, preferir REVOGAR
 // sessões/desafios/tokens/buckets de rate limit em vez de restaurá-los cegamente. Nenhum deles é dado de
@@ -177,7 +178,7 @@ async function runRestore(options = {}) {
         throw new Error(`Chave de criptografia atual (encryptionKeyId=${currentKeyId}) não corresponde à usada no backup (${manifest.encryptionKeyId}).`);
       }
       const decryptedPath = path.join(workDir, 'restored.dump');
-      backupCrypto.decryptFile(artifactPath, decryptedPath);
+      await backupCrypto.decryptFile(artifactPath, decryptedPath);
       restorableArtifactPath = decryptedPath;
     }
 
@@ -195,10 +196,15 @@ async function runRestore(options = {}) {
       throw new Error('Banco de destino já contém dados. Restaurar por cima exige RESTORE_REPLACE=YES_REPLACE_TARGET_DATA explicitamente definida.');
     }
 
-    const restoreArgs = ['--no-owner', '--no-privileges', '-d', databaseUrlTarget];
+    // Correção pós-H5 (revisão técnica independente): nunca passa DATABASE_URL_TARGET completa como argv
+    // — host/porta/usuário/banco vão como flags de CLI (não-segredo), a senha só via `PGPASSWORD` no
+    // `env` do processo filho.
+    const targetConnection = parsePostgresConnection(databaseUrlTarget);
+    const targetChildEnv = pgChildEnv(targetConnection);
+    const restoreArgs = pgCliArgs(targetConnection, ['--no-owner', '--no-privileges']);
     if (hasExistingData && replaceFlag === 'YES_REPLACE_TARGET_DATA') restoreArgs.push('--clean', '--if-exists');
     restoreArgs.push(restorableArtifactPath);
-    await execFileAsync('pg_restore', restoreArgs);
+    await execFileAsync('pg_restore', restoreArgs, { env: targetChildEnv });
 
     const revokedTables = await revokeEphemeralState(targetClient);
     const smoke = await smokeValidateTargetData(targetClient);

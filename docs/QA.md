@@ -1016,3 +1016,56 @@ nativo.
 - **PG-21 permanece ABERTO** — ver `docs/PRODUCTION_GATE.md`, seção 22, e `docs/DECISIONS.md`,
   PROD-H5-01, para a justificativa completa (storage offsite real nunca exercitado contra um bucket
   real nesta rodada).
+
+## QA — Correção técnica pós-H5 (revisão técnica independente — 6 P1 corrigidos)
+
+`docs/PRODUCTION_GATE.md`, seção 22; `docs/DECISIONS.md`, PROD-H5-01. PG-21 continua ABERTO.
+
+- **478 testes totais** com `TEST_DATABASE_URL` (458 anteriores + 13 novos em
+  `tests/h5-backup-restore.test.js` + 7 novos em `tests/h5-backup-restore-postgres.test.js`), 0
+  falhando, nenhum teste removido. **358 testes passam + 7 pulados** sem `TEST_DATABASE_URL`.
+- **Bug crítico encontrado e corrigido durante a implementação da correção 1 (credencial nunca em
+  argv)**: nenhum — a correção foi direta (helper novo, `backup/pg-connection.js`), sem regressão.
+- **Bug encontrado e corrigido durante a correção 4 (streaming real)**: nenhum na primeira tentativa —
+  a implementação de `encryptFile()`/`decryptFile()` com streaming real via `.pipe()`/`pipeline()` foi
+  validada diretamente contra um arquivo de 1MB (`[H5-crypto-E]`) antes de integrar aos scripts.
+- **13 testes novos em `tests/h5-backup-restore.test.js`**:
+  - **`[H5-pgconn-A/B/C/D/E/F]`**: `parsePostgresConnection()` extrai host/porta/usuário/banco sem a
+    senha; `pgCliArgs()` nunca inclui a senha; `pgChildEnv()` carrega a senha só via `PGPASSWORD`, nunca
+    muta `process.env` global; senha com caracteres especiais (`@`, `:`, `/`, `%`) preservada
+    corretamente; esquema inválido rejeitado; `backup-postgres.js`/`restore-postgres.js` nunca constroem
+    argv com a connection string bruta (checagem estática do código-fonte).
+  - **`[H5-crypto-E]`**: `encryptFile()`/`decryptFile()` usam streaming real (`createReadStream`/
+    `createWriteStream`, nunca `readFileSync`/`writeFileSync`), validado com round-trip de 1MB.
+  - **`[H5-crypto-F]`**: `decryptFile()` rejeita um formato de versão desconhecida — nunca decifra às
+    cegas.
+  - **`[H5-prod-encrypt-A]`**: unitário da composição `isProductionEnvironment()` +
+    `isBackupEncryptionConfigured()` usada pela checagem obrigatória de `runBackup()`.
+  - **`[H5-s3https-A/B/C/D]`**: `BACKUP_ENDPOINT` http:// recusado em produção; https:// aceito; http://
+    local continua permitido fora de produção; endpoint malformado lança erro explícito.
+  - **`[H5-s3stream-A/B]`**: `storage-adapters/s3.js` não usa `readFileSync`/acumulação de chunks em
+    array; `putObject()` calcula `ContentLength` via `fs.statSync()` (nunca lendo o arquivo) e o corpo
+    enviado bate com o arquivo original.
+- **7 testes novos em `tests/h5-backup-restore-postgres.test.js`** (reais, `pg_dump`/`pg_restore`
+  contra PostgreSQL real):
+  - **`[H5-real-S/T]`**: backup em produção sem `BACKUP_ENCRYPTION_KEY` (ou com chave curta) falha
+    explicitamente.
+  - **`[H5-real-U]`**: backup em produção com chave válida e storage `s3` (cliente fake) passa e gera
+    artefato realmente cifrado.
+  - **`[H5-real-V]`**: round-trip completo — backup real com criptografia habilitada, restore real
+    decifra corretamente e o dado sobrevive.
+  - **`[H5-real-W]`**: backup/restore real usando uma role do PostgreSQL com senha contendo caracteres
+    especiais (`@`, `:`, `/`, `%`) — prova end-to-end de que a credencial nunca precisa estar em argv.
+  - **`[H5-real-A]` atualizado**: manifesto agora confere o nome REAL do banco (`current_database()`),
+    nunca o valor fixo `"postgres"` anterior.
+  - **`[H5-real-N]` ajustado**: agora define `BACKUP_ENCRYPTION_KEY` explicitamente para isolar
+    especificamente a checagem de storage offsite (já que produção passou a exigir também a chave de
+    criptografia — correção 2).
+  - **`[H5-real-O]` corrigido**: a asserção de contagem de `backup_runs` `completed` deixou de ser um
+    número fixo (`1`) e passou a comparar contra o valor capturado ANTES da tentativa, já que os novos
+    testes U/V/W também geram linhas `completed` legítimas na mesma base.
+- Nova dependência `@aws-sdk/client-s3` inalterada; `npm audit`: inalterado (2 vulnerabilidades altas
+  conhecidas — H9).
+- **PG-21 continua ABERTO** — as correções endureceram o mecanismo existente, não adicionaram a
+  validação de storage offsite real que falta para fechar o gate (ver `docs/PRODUCTION_GATE.md`, seção
+  22, para a lista completa de motivos, agora incluindo o RTO como meta não comprovada em escala).

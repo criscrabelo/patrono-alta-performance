@@ -842,6 +842,39 @@ PG-20, PG-22 permanecem exatamente como estavam).
   (snapshot JSON administrativo), agora com comentários explícitos de que H5 é o mecanismo canônico —
   nunca duas implementações concorrentes fingindo a mesma garantia.
 
+### Correção técnica pós-implementação (revisão técnica independente)
+
+Uma revisão técnica independente do H5 original identificou 6 P1 corrigidos nesta mesma rodada, antes de
+qualquer homologação:
+
+1. **Credencial do PostgreSQL nunca em argv.** `pg_dump`/`pg_restore` recebiam `DATABASE_URL`/
+   `DATABASE_URL_TARGET` completas (usuário:senha incluídos) como argumento de linha de comando —
+   qualquer processo capaz de listar processos do sistema (`ps aux`, `/proc/<pid>/cmdline`) conseguiria
+   ler a senha. Corrigido: `backup/pg-connection.js` parseia a connection string uma única vez; apenas
+   host/porta/usuário/banco (não-segredo) viram argv, a senha vai exclusivamente via `PGPASSWORD` no
+   `env` do processo filho (nunca em `process.env` global). Testado com senha contendo caracteres
+   especiais (`@`, `:`, `/`, `%`) em backup/restore reais (`[H5-real-W]`).
+2. **`BACKUP_ENCRYPTION_KEY` passou a ser OBRIGATÓRIA em produção.** Até existir validação real de
+   SSE/KMS do provider de storage, um backup de produção sem criptografia application-side seria um
+   artefato em texto claro — `scripts/backup-postgres.js` agora falha explicitamente (fail-fast) se
+   `APP_ENVIRONMENT=production` e a chave estiver ausente/curta. Fora de produção continua opcional.
+3. **`BACKUP_ENDPOINT` só aceita `https:` em produção.** Um storage S3-compatible customizado com
+   endpoint `http:` em produção exporia as credenciais de acesso em texto claro — recusado
+   explicitamente; fora de produção, endpoint HTTP local (MinIO/testes) continua permitido.
+4. **Criptografia e upload/download S3 passaram a usar streaming REAL.** `backup/crypto.js` usava
+   `fs.readFileSync()`/`fs.writeFileSync()` apesar do comentário original dizer "streaming" — corrigido
+   para `createReadStream`/`createWriteStream` reais (formato de arquivo cifrado versionado: `versão(1)
+   || iv(12) || ciphertext || tag(16)`, tag no final para permitir streaming de fato). O adapter `s3`
+   usava `fs.readFileSync()` no upload e acumulava toda a resposta em um array de chunks no download —
+   corrigido para `createReadStream`+`ContentLength` explícito (via `fs.statSync`, nunca lendo o
+   arquivo) no upload, e `pipeline()` direto para o arquivo de destino no download.
+5. **Nome real do banco no manifesto.** O manifesto registrava `database: 'postgres'` fixo — corrigido
+   para `current_database()`, o nome real do banco de origem.
+6. **RTO redigido como META (target), não como prova em escala.** O tempo de restore observado
+   (< 1s) é do dataset SINTÉTICO de teste, não de um volume representativo de produção — a documentação
+   (`docs/BACKUP_RESTORE_RUNBOOK.md`) e este documento passam a deixar isso explícito, e isso se torna
+   mais um motivo (além do storage offsite real) para manter PG-21 aberto.
+
 ### Por que PG-21 permanece ABERTO (não fechado por intenção)
 
 O escopo H5 (item 52) é explícito: "se offsite real não puder ser exercitado no CI por falta de
@@ -853,20 +886,25 @@ aqui: a arquitetura está completa e o restore real foi comprovado (ver seção 
 exercitado contra um bucket real (testado apenas com um cliente S3 injetado,
 `tests/h5-backup-restore.test.js`), porque nenhuma infraestrutura foi provisionada nesta rodada (item 53
 do escopo H5 proibiu explicitamente criar bucket real/gerar custo). Sem essa validação, declarar PG-21
-fechado seria declarar por intenção, não por comprovação.
+fechado seria declarar por intenção, não por comprovação. **Adicionalmente**: o RTO de 4h é uma meta
+comprovada apenas com um dataset sintético pequeno, ainda não validada em volume representativo de
+produção (ver correção 6 acima) — mais um motivo concreto para o gate permanecer aberto.
 
 **Limitações registradas (ver também `docs/BACKUP_RESTORE_RUNBOOK.md`, seção 18):** adapter `s3` não
 exercitado contra storage real; sem multipart upload; sem exclusão automática de backups expirados; sem
-Object Lock/immutability configurado; sem agendamento de produção real (cron/scheduler — isso é H11).
+Object Lock/immutability configurado; sem agendamento de produção real (cron/scheduler — isso é H11);
+RTO ainda não validado em volume representativo de produção.
 
 ### Testes
 
-**458/458 passando** com Postgres real (418 anteriores + 22 unitários de `backup/*` +
-18 de ponta a ponta real em `tests/h5-backup-restore-postgres.test.js`), 0 falhando, nenhum teste
-removido. Sem `TEST_DATABASE_URL`: 343 passam + 7 pulados (321+22 anteriores, mais os 6 cenários
-gated por Postgres já existentes e o arquivo H5-postgres inteiro, que exige `pg_dump`/`pg_restore`
-reais e nunca finge cobertura com mock). `npm audit`: inalterado (2 vulnerabilidades altas conhecidas —
-H9, incluindo a nova dependência `@aws-sdk/client-s3`, que não introduziu vulnerabilidade nova).
+**478/478 passando** com Postgres real (458 anteriores + 13 novos unitários em
+`tests/h5-backup-restore.test.js` — credencial nunca em argv, senha com caracteres especiais,
+criptografia/streaming, checagem HTTPS de `BACKUP_ENDPOINT` em produção — + 7 novos de ponta a ponta
+real em `tests/h5-backup-restore-postgres.test.js`, incluindo `[H5-real-U/V/W]`: produção com chave de
+criptografia válida e artefato realmente cifrado, round-trip completo de backup cifrado real → restore
+decifra corretamente, e backup/restore real com senha do PostgreSQL contendo caracteres especiais), 0
+falhando, nenhum teste removido. Sem `TEST_DATABASE_URL`: 358 passam + 7 pulados. `npm audit`:
+inalterado (2 vulnerabilidades altas conhecidas — H9).
 
 **Por que "implementado parcialmente" e não "aguardando homologação" como H1A-H4:** as rodadas
 anteriores completavam integralmente o critério de fechamento do(s) PG correspondente(s); H5 tem uma

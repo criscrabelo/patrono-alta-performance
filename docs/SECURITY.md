@@ -499,12 +499,19 @@ aberto** (`docs/DECISIONS.md`, PROD-H5-01; `docs/PRODUCTION_GATE.md`, seção 22
 `docs/BACKUP_RESTORE_RUNBOOK.md`): backup real via `pg_dump -Fc` (`scripts/backup-postgres.js`,
 `npm run backup:postgres`), nunca dependente apenas do endpoint HTTP legado; manifesto com integridade
 (SHA-256), ambiente de origem, versão do PostgreSQL/migration/commit da aplicação; criptografia
-application-side OPCIONAL (AES-256-GCM, `BACKUP_ENCRYPTION_KEY`, independente de `COEVO_BACKUP_KEY`,
-com `encryptionKeyId` lógico — nunca a chave — preparando rotação futura). Storage adapter abstrato:
+application-side (AES-256-GCM, `BACKUP_ENCRYPTION_KEY`, independente de `COEVO_BACKUP_KEY`,
+com `encryptionKeyId` lógico — nunca a chave — preparando rotação futura; OBRIGATÓRIA em produção,
+fail-fast se ausente/curta) em streaming real (`createReadStream`/`createWriteStream`, nunca o arquivo
+inteiro em memória). Storage adapter abstrato:
 `filesystem` só fora de produção (fail-fast se tentado em produção), `s3` (S3-compatible, via
-`@aws-sdk/client-s3`) único aceito em produção — nenhum bucket real foi criado nesta rodada (proibido
-pelo escopo). RPO=6h/RTO=4h definidos e comprovados por restore real (`tests/h5-backup-restore-postgres.test.js`,
-18 testes, `pg_dump`/`pg_restore` reais contra PostgreSQL real, nunca mock). Restore
+`@aws-sdk/client-s3`, upload/download em streaming real) único aceito em produção — nenhum bucket real
+foi criado nesta rodada (proibido pelo escopo); em produção, `BACKUP_ENDPOINT` customizado só aceita
+`https:` (nunca `http:`). RPO=6h/RTO TARGET=4h (meta comprovada com dataset sintético, ainda não
+validada em volume representativo de produção) definidos e exercitados por restore real
+(`tests/h5-backup-restore-postgres.test.js`, 23 testes, `pg_dump`/`pg_restore` reais contra PostgreSQL
+real, nunca mock — incluindo round-trip com criptografia habilitada e senha com caracteres especiais).
+Credencial do PostgreSQL NUNCA em argv de `pg_dump`/`pg_restore` (`backup/pg-connection.js` — só
+host/porta/usuário/banco em argv, senha via `PGPASSWORD` no env do processo filho). Restore
 (`scripts/restore-postgres.js`, `npm run restore:postgres`) nunca assume banco "atual" implicitamente;
 verifica integridade (tamanho+SHA-256) ANTES de tocar o banco; bloqueia cross-environment restore por
 padrão (override explícito `RESTORE_ALLOW_CROSS_ENVIRONMENT=I_ACCEPT_THE_RISK`); exige confirmação forte

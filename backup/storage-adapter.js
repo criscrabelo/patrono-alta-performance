@@ -28,10 +28,24 @@ function createStorageAdapter({ environment, provider, s3Client } = {}) {
     return createFilesystemStorageAdapter({ baseDir: process.env.BACKUP_LOCAL_DIR });
   }
   if (effectiveProvider === 's3') {
+    const endpoint = process.env.BACKUP_ENDPOINT || undefined;
+    // Correção pós-H5 (revisão técnica independente): em produção, um `BACKUP_ENDPOINT` customizado
+    // (storage S3-compatible que não seja a AWS S3 real) só é aceito via `https:` — nunca `http:`. Sem
+    // essa checagem, credenciais de acesso ao storage (`BACKUP_ACCESS_KEY_ID`/`BACKUP_SECRET_ACCESS_KEY`)
+    // trafegariam em texto claro. Fora de produção, um endpoint HTTP local (ex.: MinIO em
+    // desenvolvimento/teste) continua permitido — nunca essa restrição vazando para ambientes não
+    // produtivos, onde travaria um fluxo de teste legítimo sem TLS local configurado.
+    if (isProductionEnvironment(resolvedEnvironment) && endpoint) {
+      let parsedEndpoint;
+      try { parsedEndpoint = new URL(endpoint); } catch { throw new Error('BACKUP_ENDPOINT inválido: não é uma URL válida.'); }
+      if (parsedEndpoint.protocol !== 'https:') {
+        throw new Error('Em produção, BACKUP_ENDPOINT deve usar https: — um endpoint S3-compatible em texto claro nunca é aceito (as credenciais de acesso trafegariam sem TLS).');
+      }
+    }
     return createS3StorageAdapter({
       bucket: process.env.BACKUP_BUCKET,
       region: process.env.BACKUP_REGION,
-      endpoint: process.env.BACKUP_ENDPOINT,
+      endpoint,
       accessKeyId: process.env.BACKUP_ACCESS_KEY_ID,
       secretAccessKey: process.env.BACKUP_SECRET_ACCESS_KEY,
       client: s3Client

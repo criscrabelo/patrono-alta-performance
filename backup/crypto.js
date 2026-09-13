@@ -1,21 +1,28 @@
 // Sprint 2, Hardening H5 (docs/PRODUCTION_GATE.md, PG-21; docs/DECISIONS.md, PROD-H5-01): criptografia
-// OPCIONAL do artefato de backup do PostgreSQL, application-side, ANTES do upload para o storage
-// offsite. Independente de `COEVO_BACKUP_KEY` (usada só pelo snapshot JSON legado de
-// `POST /api/backup` — ver docs/DECISIONS.md item "endpoints existentes") — uma chave dedicada,
-// `BACKUP_ENCRYPTION_KEY`, evita acoplar a rotação de uma chave à da outra.
+// do artefato de backup do PostgreSQL, application-side, ANTES do upload para o storage offsite.
+// Independente de `COEVO_BACKUP_KEY` (usada só pelo snapshot JSON legado de `POST /api/backup`) — uma
+// chave dedicada, `BACKUP_ENCRYPTION_KEY`, evita acoplar a rotação de uma chave à da outra.
 //
-// AES-256-GCM streaming (o artefato de `pg_dump -Fc` pode ser grande — nunca carregar tudo em memória).
-// Formato do arquivo cifrado: `ivBytes(12) || tagBytes(16) || ciphertext`. O manifesto nunca guarda a
-// chave — só um `encryptionKeyId` lógico (hash curto e não-reversível da chave) que permite identificar
-// QUAL chave foi usada sem expor seu valor, preparando rotação futura (item 12 do escopo H5): uma chave
-// nova gera um `encryptionKeyId` diferente, mas backups antigos continuam decifráveis desde que a chave
-// antiga ainda esteja disponível ao operador — nunca há uma única chave eterna sem identificação.
+// Correção pós-H5 (revisão técnica independente): a implementação original usava
+// `fs.readFileSync()`/`fs.writeFileSync()` — carregava o artefato INTEIRO em memória, apesar do
+// comentário original já dizer "streaming". Corrigido para streaming REAL via `.pipe()` (backpressure
+// automático) — nunca carrega o arquivo inteiro de uma vez.
+//
+// FORMATO DO ARQUIVO CIFRADO (versão 2, versionado no primeiro byte — nunca decifra silenciosamente um
+// formato desconhecido): `formatVersion(1) || iv(12) || ciphertext(N) || tag(16)`. A TAG de autenticação
+// GCM só é conhecida depois que TODO o plaintext foi cifrado (`cipher.final()`) — por isso fica no FINAL
+// do arquivo (não logo após o IV, como na v1 anterior a esta correção), permitindo escrever o cabeçalho
+// (versão+IV) e o ciphertext em streaming, com a tag anexada só ao final. O manifesto nunca guarda a
+// chave — só um `encryptionKeyId` lógico (hash curto e não-reversível), preparando rotação futura: uma
+// chave nova gera um `encryptionKeyId` diferente, mas backups antigos continuam decifráveis desde que a
+// chave antiga usada para gerá-los ainda esteja disponível ao operador.
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 
 const MIN_KEY_LENGTH = 32;
 const IV_LENGTH = 12;
 const TAG_LENGTH = 16;
+const FORMAT_VERSION = 2;
 
 function backupEncryptionKey() {
   const raw = process.env.BACKUP_ENCRYPTION_KEY;
@@ -43,36 +50,74 @@ function validateBackupEncryptionKeyIfPresent() {
   }
 }
 
-// Carrega o arquivo inteiro em memória — aceitável para o volume de dados atual do Patrono; documentado
-// como limitação conhecida para bancos que cresçam a ponto de tornar isso impraticável (nesse caso, a
-// evolução natural é cifragem em streaming, fora do escopo desta rodada).
+// Streaming real: `input.pipe(cipher).pipe(output, {end:false})` usa o backpressure nativo de streams
+// Node — nunca acumula o arquivo inteiro em memória. A tag só existe depois que `cipher` (readable side)
+// termina de emitir dados (equivalente a `cipher.final()` já ter rodado internamente), por isso é
+// anexada e o `output` só é finalizado (`end()`) DEPOIS desse ponto.
 function encryptFile(sourcePath, destPath) {
   const key = backupEncryptionKey();
   if (!key) throw new Error('BACKUP_ENCRYPTION_KEY ausente/curta — não é possível cifrar o artefato de backup.');
-  const iv = crypto.randomBytes(IV_LENGTH);
-  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
-  const plaintext = fs.readFileSync(sourcePath);
-  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  fs.writeFileSync(destPath, Buffer.concat([iv, tag, ciphertext]), { mode: 0o600 });
+  return new Promise((resolve, reject) => {
+    const iv = crypto.randomBytes(IV_LENGTH);
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+    const input = fs.createReadStream(sourcePath);
+    const output = fs.createWriteStream(destPath, { mode: 0o600 });
+    let settled = false;
+    const fail = error => { if (!settled) { settled = true; reject(error); } };
+    input.on('error', fail);
+    cipher.on('error', fail);
+    output.on('error', fail);
+    output.write(Buffer.concat([Buffer.from([FORMAT_VERSION]), iv]), error => { if (error) fail(error); });
+    input.pipe(cipher).pipe(output, { end: false });
+    cipher.on('end', () => {
+      if (settled) return;
+      let tag;
+      try { tag = cipher.getAuthTag(); } catch (error) { return fail(error); }
+      output.end(tag);
+    });
+    output.on('finish', () => { if (!settled) { settled = true; resolve(); } });
+  });
 }
 
-function decryptFile(sourcePath, destPath) {
+// Streaming real: lê apenas o cabeçalho fixo (13 bytes: versão+IV) e a tag fixa (16 bytes, no final do
+// arquivo) com leituras pequenas e diretas — nunca o arquivo inteiro. O ciphertext (potencialmente
+// grande) é lido por um range de bytes (`start`/`end` de `fs.createReadStream`) e flui pelo decipher via
+// `stream/promises`' `pipeline()`, que já propaga erro (ex.: falha de autenticação GCM) corretamente.
+async function decryptFile(sourcePath, destPath) {
   const key = backupEncryptionKey();
   if (!key) throw new Error('BACKUP_ENCRYPTION_KEY ausente/curta — não é possível decifrar o artefato de backup.');
-  const buffer = fs.readFileSync(sourcePath);
-  if (buffer.length < IV_LENGTH + TAG_LENGTH) throw new Error('Artefato cifrado inválido: menor que o cabeçalho IV+TAG esperado.');
-  // Layout gravado por encryptFile(): iv (12 bytes) || tag (16 bytes) || ciphertext.
-  const iv = buffer.subarray(0, IV_LENGTH);
-  const tag = buffer.subarray(IV_LENGTH, IV_LENGTH + TAG_LENGTH);
-  const ciphertext = buffer.subarray(IV_LENGTH + TAG_LENGTH);
+  const { size } = fs.statSync(sourcePath);
+  const headerSize = 1 + IV_LENGTH;
+  if (size < headerSize + TAG_LENGTH) throw new Error('Artefato cifrado inválido: menor que o cabeçalho/tag esperados.');
+
+  const fd = fs.openSync(sourcePath, 'r');
+  let header, tag;
+  try {
+    header = Buffer.alloc(headerSize);
+    fs.readSync(fd, header, 0, headerSize, 0);
+    tag = Buffer.alloc(TAG_LENGTH);
+    fs.readSync(fd, tag, 0, TAG_LENGTH, size - TAG_LENGTH);
+  } finally {
+    fs.closeSync(fd);
+  }
+
+  const formatVersion = header[0];
+  if (formatVersion !== FORMAT_VERSION) {
+    throw new Error(`Formato de artefato cifrado desconhecido (versão ${formatVersion}, esperado ${FORMAT_VERSION}) — recusado, nunca decifrado às cegas.`);
+  }
+  const iv = header.subarray(1, headerSize);
+
   const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
   decipher.setAuthTag(tag);
-  const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-  fs.writeFileSync(destPath, plaintext, { mode: 0o600 });
+
+  const { pipeline } = require('node:stream/promises');
+  const ciphertextEnd = size - TAG_LENGTH - 1; // inclusive, conforme a semântica de {end} de createReadStream
+  const input = fs.createReadStream(sourcePath, { start: headerSize, end: ciphertextEnd });
+  const output = fs.createWriteStream(destPath, { mode: 0o600 });
+  await pipeline(input, decipher, output);
 }
 
 module.exports = {
-  MIN_KEY_LENGTH, isBackupEncryptionConfigured, currentEncryptionKeyId,
+  MIN_KEY_LENGTH, FORMAT_VERSION, isBackupEncryptionConfigured, currentEncryptionKeyId,
   validateBackupEncryptionKeyIfPresent, encryptFile, decryptFile
 };

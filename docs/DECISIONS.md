@@ -1455,6 +1455,32 @@ para o detalhamento técnico completo; ver `docs/BACKUP_RESTORE_RUNBOOK.md` para
 17. **Esta decisão não fecha o Gate de Produção** — nenhum outro achado (PG-19/PG-20/PG-22) é alterado.
     O gate como um todo permanece **NO-GO PARA PRODUÇÃO**. H6-H11 não foram alterados por esta decisão.
 
+**Correção técnica pós-implementação (mesma decisão PROD-H5-01) — revisão técnica independente, 6 P1
+corrigidos.** PG-21 continua ABERTO após esta correção.
+
+1. **Credencial do PostgreSQL nunca em argv.** `pg_dump`/`pg_restore` recebiam a connection string
+   COMPLETA (usuário:senha incluídos) como argumento de processo — visível a qualquer inspetor de
+   processos do sistema (`ps`/`/proc`). Corrigido: `backup/pg-connection.js` parseia a URL uma única vez
+   e devolve argv sem segredo (host/porta/usuário/banco) mais um `env` específico carregando a senha via
+   `PGPASSWORD` (nunca `process.env` global). Testado com senha contendo `@`/`:`/`/`/`%` em backup/
+   restore reais.
+2. **`BACKUP_ENCRYPTION_KEY` passou a ser OBRIGATÓRIA em produção.** Até existir validação real de
+   SSE/KMS do provider de storage, um backup de produção sem criptografia application-side seria texto
+   claro — nunca aceito. Fora de produção, continua opcional.
+3. **`BACKUP_ENDPOINT` só aceita `https:` em produção** — um endpoint S3-compatible customizado em
+   `http:` exporia credenciais de acesso ao storage em texto claro; fora de produção, HTTP local
+   (MinIO/testes) continua permitido.
+4. **Criptografia e S3 passaram a usar streaming REAL**, corrigindo uma inconsistência (o código dizia
+   "streaming" mas usava `readFileSync`/`writeFileSync`). Formato do arquivo cifrado versionado:
+   `versão(1) || iv(12) || ciphertext || tag(16)` (tag no final, permitindo processar em streaming).
+5. **Manifesto passou a registrar o nome REAL do banco** (`current_database()`), não mais o valor fixo
+   `"postgres"`.
+6. **RTO redigido como META (target), não prova em escala** — o tempo observado é do dataset sintético
+   de teste, não de um volume representativo de produção; mais um motivo para PG-21 permanecer aberto.
+
+Nenhuma dessas correções altera H1-H4, autenticação, MFA, sessões, rate limiting, CORS/CSP, Monday,
+Calendar. `docs/MASTER_HANDOFF.md` permanece intocado.
+
 Esta decisão não altera D1/D4/D2-CLOSE/PROD-GATE-01/PROD-H1-01/PROD-H1B-01/PROD-H2-01/PROD-H3-01/
 PROD-H4-01 já homologadas — apenas registra o avanço parcial do H5 dentro do gate de produção já aberto.
 
