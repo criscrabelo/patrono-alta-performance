@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, seed, parseCsv, hash, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, isValidCivilDate, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, hasGlobalScope, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, validateLegalDeadline, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, legalDeadlineLabels, legalDeadlineConfirmationLabel, filterCalendarEventsByWindow } = require('../server');
+const { ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, seed, parseCsv, hash, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, isValidCivilDate, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, hasGlobalScope, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, validateLegalDeadline, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, legalDeadlineLabels, legalDeadlineConfirmationLabel, filterCalendarEventsByWindow, canBeResponsibleForLegalDeadline } = require('../server');
 const { WIDGET_TYPES, DASHBOARD_DEFINITIONS } = require('../dashboard-model');
 const { dashboardPayload } = require('../dashboard-service');
 const { PROJECT_ID, ensureProjectStore, projectDetail, projectPermissions } = require('../project-service');
@@ -1134,7 +1134,7 @@ test('D4.15/D4.4: item categorizado como REQUIRES_REVIEW nunca recebe confirmati
   assert.equal(items[0].confirmationLabel, null);
 });
 
-test('filterCalendarEventsByWindow() (P1.3, revisão pós-PR #8): mantém apenas eventos dentro da janela civil da semana, sem alterar hora externa', () => {
+test('filterCalendarEventsByWindow() (P1.3, revisão pós-PR #8): evento de segunda entra, domingo entra, domingo seguinte e semana anterior não entram', () => {
   const window = { start: '2026-09-14', end: '2026-09-20' };
   const events = [
     { id: 'evt-segunda', date: '2026-09-14T09:00:00.000Z', start: '09:00' },
@@ -1145,7 +1145,33 @@ test('filterCalendarEventsByWindow() (P1.3, revisão pós-PR #8): mantém apenas
   ];
   const filtered = filterCalendarEventsByWindow(events, window);
   assert.deepEqual(filtered.map(e => e.id), ['evt-segunda', 'evt-domingo']);
-  assert.equal(filtered[0].date, '2026-09-14T09:00:00.000Z', 'a hora/valor externo do evento nunca é alterado pelo filtro — só decide inclusão/exclusão');
+});
+
+test('filterCalendarEventsByWindow() (P1.3): hora externa, campos start/end e allDay nunca são alterados pelo filtro — só decide inclusão/exclusão', () => {
+  const window = { start: '2026-09-14', end: '2026-09-20' };
+  const eventoComHora = { id: 'evt-com-hora', date: '2026-09-15T14:30:00.000Z', start: '14:30', end: '15:30', allDay: false, title: 'Reunião externa' };
+  const eventoDiaInteiro = { id: 'evt-dia-inteiro', date: '2026-09-16', allDay: true };
+  const filtered = filterCalendarEventsByWindow([eventoComHora, eventoDiaInteiro], window);
+  assert.deepEqual(filtered, [eventoComHora, eventoDiaInteiro], 'os objetos de evento são preservados exatamente como vieram do adapter — nenhum campo é reescrito');
+});
+
+test('canBeResponsibleForLegalDeadline() (P1.1, revisão pós-PR #8): combina allowedContent(juridico,read) + scoped() sobre o candidato e sobre o processo relacionado', () => {
+  const candidate = { department: 'Jurídico', companyId: undefined, speId: undefined, scopeType: undefined };
+  const relatedProcess = { department: 'Jurídico' };
+  assert.equal(canBeResponsibleForLegalDeadline({ role: 'colaborador', department: 'Jurídico' }, candidate, relatedProcess), true, 'colaborador do mesmo departamento pode ser responsável');
+  assert.equal(canBeResponsibleForLegalDeadline({ role: 'lider', department: 'TI' }, candidate, relatedProcess), false, 'TI não pode ser responsável por prazo jurídico sem permissão real de conteúdo');
+  assert.equal(canBeResponsibleForLegalDeadline({ role: 'administrador', department: null }, candidate, relatedProcess), false, 'administrador técnico não vira content user só por ser indicado responsável');
+  assert.equal(canBeResponsibleForLegalDeadline({ role: 'diretoria', department: null }, candidate, relatedProcess), true, 'diretoria (alçada global) é consistentemente elegível, sem regra especial — hasGlobalScope() já cobre isso dentro de scoped()');
+});
+
+test('canBeResponsibleForLegalDeadline() (P1.1): companyId/speId diferentes do processo relacionado são rejeitados mesmo com permissão de módulo', () => {
+  const candidateEmpresaB = { department: 'Jurídico', companyId: 'empresa-b', scopeType: 'company' };
+  const processoEmpresaB = { department: 'Jurídico', companyId: 'empresa-b', scopeType: 'company' };
+  assert.equal(canBeResponsibleForLegalDeadline({ role: 'colaborador', department: 'Jurídico', companyId: 'empresa-a' }, candidateEmpresaB, processoEmpresaB), false, 'companyId diferente do processo rejeita');
+  assert.equal(canBeResponsibleForLegalDeadline({ role: 'colaborador', department: 'Jurídico', companyId: 'empresa-b' }, candidateEmpresaB, processoEmpresaB), true, 'companyId igual ao processo aceita');
+  const candidateSpeY = { department: 'Jurídico', speId: 'spe-y', scopeType: 'spe' };
+  const processoSpeY = { department: 'Jurídico', speId: 'spe-y', scopeType: 'spe' };
+  assert.equal(canBeResponsibleForLegalDeadline({ role: 'colaborador', department: 'Jurídico', speId: 'spe-x' }, candidateSpeY, processoSpeY), false, 'speId diferente do processo rejeita');
 });
 
 test('server.js não contém nenhum método de escrita do Google Calendar (events.insert/update/patch/delete) — Calendar é somente leitura', () => {

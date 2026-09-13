@@ -257,11 +257,14 @@ entidade nova nem tabela/coleção paralela:
   POST/PATCH): quando informado, deve referenciar um `user.id` existente; uma **nova** atribuição
   (diferente da atribuição anterior a este PATCH/POST) exige que o usuário (1) não esteja com `deletedAt`
   preenchido, e (2) tenha acesso ao próprio Legal Deadline/processo relacionado pelo MESMO RBAC + `scoped()`
-  já vigente (`allowedContent(responsible,'juridico','read') && scoped(responsible,candidate) &&
-  scoped(responsible,relatedProcess)`) — revisão pós-PR #8 (P1.1): a checagem original só validava
+  já vigente, extraída como função nomeada e testável isoladamente:
+  `canBeResponsibleForLegalDeadline(responsible, candidate, relatedProcess)` =
+  `allowedContent(responsible,'juridico','read') && scoped(responsible,candidate) &&
+  scoped(responsible,relatedProcess)` — revisão pós-PR #8 (P1.1): a checagem original só validava
   existência/atividade, permitindo (na criação) registrar como responsável alguém de outro
   departamento/companyId/speId, ou até administrador técnico, que não poderia sequer acessar o próprio
-  registro. Uma atribuição já existente que depois deixa de satisfazer este critério (ex.: o processo
+  registro. Diretoria (alçada global) permanece elegível sem regra especial (`hasGlobalScope()` já cobre
+  isso dentro de `scoped()`). Uma atribuição já existente que depois deixa de satisfazer este critério (ex.: o processo
   muda de escopo) NÃO é revalidada retroativamente — só a NOVA atribuição é bloqueada (D4.11).
   **Convenção de "usuário ativo":** não existia nenhum campo `active`/`isActive`/`status` de usuário no
   modelo antes desta rodada — a auditoria confirmou que a única convenção de "registro não mais válido"

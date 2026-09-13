@@ -1973,11 +1973,27 @@ test('[HTTP] POST /api/entities/legalDeadlines com responsibleUserId inexistente
   assert.equal(readStore().records.legalDeadlines.length, before, 'nada foi persistido quando responsibleUserId é inválido');
 });
 
-test('[HTTP] POST /api/entities/legalDeadlines: campos textuais responsible/responsibleName/ownerName nunca substituem responsibleUserId', async () => {
+test('[HTTP] POST /api/entities/legalDeadlines: campos textuais responsible/responsibleName/ownerName nunca substituem responsibleUserId nem são persistidos (P2, revisão pós-PR #8)', async () => {
   const token = await loginAs(EMAILS.liderJuridico);
   const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Prazo com nome textual (Fase 4B)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', responsible: 'Fulano de Tal', responsibleName: 'Fulano', ownerName: 'Fulano' } });
   assert.equal(created.status, 201);
   assert.equal(created.body.responsibleUserId, undefined, 'nenhum campo textual é aceito como substituto de responsibleUserId');
+  assert.ok(!('responsible' in created.body) && !('responsibleName' in created.body) && !('ownerName' in created.body), 'a resposta do POST não contém nenhum dos campos textuais');
+
+  const stored = readStore().records.legalDeadlines.find(item => item.id === created.body.id);
+  assert.ok(!('responsible' in stored) && !('responsibleName' in stored) && !('ownerName' in stored), 'o registro persistido no store não contém nenhum dos campos textuais — não viram propriedades paralelas');
+});
+
+test('[HTTP] PATCH de Legal Deadline: campos textuais responsible/responsibleName/ownerName enviados no PATCH também não são persistidos (P2)', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'Prazo para PATCH textual (Fase 4B)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
+  const patched = await api('PATCH', `/api/entities/legalDeadlines/${created.body.id}`, { token, json: { responsible: 'Fulano de Tal', responsibleName: 'Fulano', ownerName: 'Fulano' } });
+  assert.equal(patched.status, 200);
+  assert.ok(!('responsible' in patched.body) && !('responsibleName' in patched.body) && !('ownerName' in patched.body));
+  assert.equal(patched.body.responsibleUserId, undefined);
+
+  const stored = readStore().records.legalDeadlines.find(item => item.id === created.body.id);
+  assert.ok(!('responsible' in stored) && !('responsibleName' in stored) && !('ownerName' in stored));
 });
 
 test('[HTTP] PATCH de responsável: reatribuição para outro usuário ativo é aceita, incrementa version e gera auditoria before/after', async () => {
@@ -2141,6 +2157,14 @@ test('[HTTP] POST /api/entities/legalDeadlines: atribuir responsável a administ
   const token = await loginAs(EMAILS.liderJuridico);
   const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'P1.1 — responsável administrador (Fase 4B)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', responsibleUserId: 'usr-teste-administrador' } });
   assert.equal(created.status, 403);
+});
+
+test('[HTTP] POST /api/entities/legalDeadlines: atribuir responsável à diretoria (alçada global) é aceito — comportamento consistente com scoped()/hasGlobalScope() (P1.1)', async () => {
+  const token = await loginAs(EMAILS.liderJuridico);
+  const diretoria = readStore().users.find(u => u.email === EMAILS.diretoria);
+  const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-juridico-teste', origin: 'P1.1 — responsável diretoria (Fase 4B)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL', responsibleUserId: diretoria.id } });
+  assert.equal(created.status, 201, 'diretoria tem alçada global (hasGlobalScope()) e pode ser responsável por qualquer Legal Deadline dentro do módulo jurídico');
+  assert.equal(created.body.responsibleUserId, diretoria.id);
 });
 
 test('[HTTP] GET /api/my-week: líder de TI não recebe conteúdo jurídico de outro usuário, mesmo autenticado', async () => {

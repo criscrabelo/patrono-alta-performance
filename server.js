@@ -89,6 +89,18 @@ const LEGAL_DEADLINE_ORIGIN_TYPES = Object.freeze(['JUDICIAL_PROCESSUAL', 'INTER
 // são valores persistidos — reabertura é o retorno a 'ativo' (ver PATCH de /api/entities/legalDeadlines),
 // e atraso é condição derivada (ver isLegalDeadlineOverdue(), abaixo).
 const LEGAL_DEADLINE_STATUSES = Object.freeze(['ativo', 'suspenso', 'cumprido', 'cancelado']);
+// Sprint 2, Fase 4B (revisão pós-PR #8, P1.1): elegibilidade de responsável extraída como função pura e
+// nomeada — reaproveitada por validateLegalDeadline() e testável isoladamente. Ser responsável exige o
+// MESMO acesso que ler o próprio registro exigiria: `allowedContent()` (não `allowedInDepartment()`
+// isolado, que tem bypass técnico para administrador) cobre "technical admin != content superuser" e
+// "TI não pode ser responsável por prazo jurídico sem permissão real de conteúdo"; `scoped()` sobre o
+// candidato (já com department/companyId/speId herdados do processo) e sobre o próprio processo
+// relacionado cobre companyId/speId/department — mesma defesa em profundidade de
+// `scopedLegalDeadlineRows()`. Diretoria (alçada global) passa em `scoped()` normalmente, sem regra
+// especial: `hasGlobalScope()` já a libera dentro de `scoped()`.
+function canBeResponsibleForLegalDeadline(responsibleUser, legalDeadlineCandidate, relatedProcess) {
+  return allowedContent(responsibleUser, 'juridico', 'read') && scoped(responsibleUser, legalDeadlineCandidate) && scoped(responsibleUser, relatedProcess);
+}
 function validateLegalDeadline(candidate, user, store, previousResponsibleUserId = null) {
   const missing = ['processId','origin','date','originType'].filter(field => !candidate[field]);
   if (missing.length) return { status: 422, error: `Prazo jurídico sem origem identificada bloqueia a operação. Campos obrigatórios ausentes: ${missing.join(', ')}` };
@@ -135,8 +147,7 @@ function validateLegalDeadline(candidate, user, store, previousResponsibleUserId
   if (candidate.responsibleUserId !== undefined && candidate.responsibleUserId !== null && candidate.responsibleUserId !== previousResponsibleUserId) {
     const responsible = (store.users || []).find(u => u.id === candidate.responsibleUserId);
     if (responsible.deletedAt) return { status: 422, error: 'Não é possível atribuir um Legal Deadline a um usuário inativo' };
-    const responsibleCanAccess = allowedContent(responsible, 'juridico', 'read') && scoped(responsible, candidate) && scoped(responsible, relatedProcess);
-    if (!responsibleCanAccess) return { status: 403, error: 'O usuário indicado como responsável não tem permissão para acessar este Legal Deadline ou o processo relacionado' };
+    if (!canBeResponsibleForLegalDeadline(responsible, candidate, relatedProcess)) return { status: 403, error: 'O usuário indicado como responsável não tem permissão para acessar este Legal Deadline ou o processo relacionado' };
   }
   return null;
 }
@@ -1134,5 +1145,5 @@ function handler(req, res) {
   return json(res,404,{error:'Rota não encontrada'});
 }
 if (require.main === module) { ensureStore(); http.createServer((req,res)=>handler(req,res)).listen(PORT,()=>console.log(`COEVO Alta Performance disponível em http://localhost:${PORT}`)); setInterval(()=>scheduledMondayTick().catch(error=>console.error('Monday scheduler:',error.message)),60000); }
-module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, ORIGIN_TYPE_LABELS, STATUS_LABELS, CATEGORY_LABELS, legalDeadlineLabels, legalDeadlineConfirmationLabel, LEGAL_DEADLINE_TEXTUAL_RESPONSIBLE_FIELDS, filterCalendarEventsByWindow };
+module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, ORIGIN_TYPE_LABELS, STATUS_LABELS, CATEGORY_LABELS, legalDeadlineLabels, legalDeadlineConfirmationLabel, LEGAL_DEADLINE_TEXTUAL_RESPONSIBLE_FIELDS, filterCalendarEventsByWindow, canBeResponsibleForLegalDeadline };
 
