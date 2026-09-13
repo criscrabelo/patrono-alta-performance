@@ -31,8 +31,7 @@ if (!TEST_DATABASE_URL) {
     // Tabela zerada antes da suíte — nunca reaproveita dado de uma execução anterior, nunca toca um
     // banco que não seja o TEST_DATABASE_URL isolado apontado explicitamente pelo operador/CI.
     const cleanup = new Pool({ connectionString: TEST_DATABASE_URL });
-    await cleanup.query('DROP TABLE IF EXISTS app_store');
-    await cleanup.query('DROP TABLE IF EXISTS schema_migrations');
+    await cleanup.query('DROP TABLE IF EXISTS legal_deadlines, legal_processes, audit_log, app_users, data_migrations, app_store, schema_migrations CASCADE');
     await cleanup.end();
 
     // storage.init() em Postgres agora VALIDA o schema em vez de criá-lo — o mesmo caminho de produção
@@ -40,12 +39,28 @@ if (!TEST_DATABASE_URL) {
     const { run: migrate } = require('../scripts/migrate');
     await migrate();
 
+    // Sprint 2, Hardening H1B (revisão final): storage.init() agora também falha (fail-closed) se a
+    // migration 004 já foi aplicada mas o cutover de dados H1B ainda não ocorreu (marcador ausente em
+    // data_migrations). Este arquivo testa o comportamento HTTP geral sob Postgres (não o script de
+    // cutover em si, coberto por tests/h1b-core-relational.test.js) — grava o marcador diretamente para
+    // simular "cutover já concluído, tabelas vazias, prontas para a ponte gravar".
+    const cutoverPool = new Pool({ connectionString: TEST_DATABASE_URL });
+    await cutoverPool.query("INSERT INTO data_migrations (key) VALUES ('h1b_core_relational_cutover') ON CONFLICT (key) DO NOTHING");
+    await cutoverPool.end();
+
     const { handler, readStore, writeStore, storage } = require('../server');
     // Fora do boot real (`require.main === module`), ninguém chama storage.init() automaticamente —
     // replica aqui o mesmo passo que o processo faria ao subir de verdade.
     await storage.init();
     const store = await readStore();
-    store.users.push({ id: 'usr-pg-teste', name: 'Usuário Postgres Teste', email: 'pg.teste@coevo.local', role: 'lider', department: 'Jurídico', mfa: false });
+    store.users.push(
+      { id: 'usr-pg-teste', name: 'Usuário Postgres Teste', email: 'pg.teste@coevo.local', role: 'lider', department: 'Jurídico', mfa: false },
+      // O marcador de cutover é gravado diretamente acima (sem rodar a migração de dados real), então
+      // app_users está genuinamente vazio: o seed padrão de server.js (usr-diretoria/usr-juridico) nunca
+      // chega a existir aqui. Precisa de um usuário próprio com alçada global (`diretoria`) para os
+      // testes que exigem `scopes:['*']` (aprovação de backup/restore).
+      { id: 'usr-pg-diretoria', name: 'Diretoria Postgres Teste', email: 'diretoria.pg.teste@coevo.local', role: 'diretoria', department: null, mfa: false }
+    );
     if (!store.records) store.records = {};
     store.records.processos = [{ id: 'proc-pg-teste', source: 'monday', department: 'Jurídico', deletedAt: null }];
     await writeStore(store);
@@ -58,7 +73,7 @@ if (!TEST_DATABASE_URL) {
   test.after(async () => {
     await new Promise(resolve => server.close(resolve));
     const cleanup = new Pool({ connectionString: TEST_DATABASE_URL });
-    await cleanup.query('DROP TABLE IF EXISTS app_store');
+    await cleanup.query('DROP TABLE IF EXISTS legal_deadlines, legal_processes, audit_log, app_users, data_migrations, app_store CASCADE');
     await cleanup.end();
   });
 
@@ -97,15 +112,16 @@ if (!TEST_DATABASE_URL) {
 
   test('[HTTP/Postgres] POST /api/backup/restore é bloqueado explicitamente sob PostgreSQL (RESTORE_NOT_SUPPORTED_FOR_POSTGRES)', async () => {
     const token = await loginAs('pg.teste@coevo.local');
-    // usr-pg-teste não tem alçada de aprovação — usamos a diretoria do seed, que tem `scopes:['*']`.
-    const tokenDiretoria = await loginAs('juridico@coevoconstrutora.com.br');
+    // usr-pg-teste não tem alçada de aprovação — usa-se o usuário diretoria criado neste arquivo,
+    // que tem `scopes:['*']`.
+    const tokenDiretoria = await loginAs('diretoria.pg.teste@coevo.local');
     const res = await api('POST', '/api/backup/restore', { token: tokenDiretoria, json: { algorithm: 'aes-256-gcm', iv: 'x', tag: 'x', payload: 'x', checksum: 'x' } });
     assert.equal(res.status, 501);
     assert.equal(res.body.error, 'RESTORE_NOT_SUPPORTED_FOR_POSTGRES');
   });
 
   test('[HTTP/Postgres] concorrência real: dois PATCH simultâneos no mesmo Legal Deadline — um vence (200), o outro recebe 409, nunca os dois sobrescrevem silenciosamente', async () => {
-    const token = await loginAs('juridico@coevoconstrutora.com.br');
+    const token = await loginAs('diretoria.pg.teste@coevo.local');
     const created = await api('POST', '/api/entities/legalDeadlines', { token, json: { processId: 'proc-pg-teste', origin: 'Prazo para teste de concorrência real (H1A)', date: '2026-12-01', originType: 'JUDICIAL_PROCESSUAL' } });
     assert.equal(created.status, 201);
     const id = created.body.id;

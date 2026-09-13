@@ -531,10 +531,10 @@ aqui; esta seção apenas consolida o estado de QA já registrado nas Fases 1–
 
 ## QA — Hardening H1B (normalização relacional do núcleo canônico)
 
-- **314 testes totais** com `TEST_DATABASE_URL` (278 do H1A + 36 novos: 25 em
-  `tests/h1b-core-relational.test.js`, 9 de validação pura de `scripts/migrate-h1b-data.js` em
+- **319 testes totais** com `TEST_DATABASE_URL` (278 do H1A + 41 novos: 29 em
+  `tests/h1b-core-relational.test.js`, 11 de validação pura de `scripts/migrate-h1b-data.js` em
   `tests/storage.test.js`), 0 falhando, sem remoção de nenhum teste anterior.
-- Sem `TEST_DATABASE_URL`: **279 testes**, 276 passam, 3 pulados explicitamente (os 2 já existentes do
+- Sem `TEST_DATABASE_URL`: **280 testes**, 277 passam, 3 pulados explicitamente (os 2 já existentes do
   H1A + 1 novo de `tests/h1b-core-relational.test.js`) — nunca fingindo cobertura de Postgres que não
   existe.
 - Cobertura por categoria (nomenclatura A–Z do plano de execução do H1B):
@@ -567,6 +567,19 @@ aqui; esta seção apenas consolida o estado de QA já registrado nas Fases 1–
     de leitura das tabelas relacionais (`ORDER BY id`) mudava a ordem efetiva de `store.users` em relação
     à ordem de inserção original do array JSONB, alterando silenciosamente qual usuário “vence” em um
     `find()` por email duplicado — corrigido para `ORDER BY created_at, id` e coberto por teste próprio.
+  - **Marcador de cutover H1B** (blocker P1 corrigido em revisão final, antes da homologação): migration
+    de schema (004 aplicada) ≠ migração de dados. Testes dedicados com Postgres real confirmam: (A/B/C)
+    migration 004 aplicada sem o marcador de cutover em `data_migrations` faz `storage.init()` falhar
+    explicitamente, `app_users` permanece vazio (nenhum bootstrap automático) e as 4 coleções continuam
+    íntegras no `app_store`; (D/E) depois que `scripts/migrate-h1b-data.js` grava o marcador,
+    `storage.init()` passa a funcionar normalmente; (F/G/H) uma falha no MEIO da transação de cutover
+    (um valor de `date` inválido para a coluna SQL, depois de usuário/processo/um Legal Deadline válido já
+    terem sido inseridos na mesma transação) reverte TUDO — tabelas relacionais, blob e marcador, nunca
+    estado parcial; (J/K) `healthcheck()` reporta `schemaReady:false` antes do cutover e `true` depois.
+    Também corrigido: `hasCriticalIssues()` em `scripts/migrate-h1b-data.js` calculava
+    `processesReport.invalid`/`auditReport.invalid` mas nunca os usava na decisão de abortar — corrigido
+    para depender só da validação já conhecida no `--dry-run`, nunca de uma constraint SQL posterior
+    detectar algo que o relatório já sabia.
 - CI roda `tests/h1b-core-relational.test.js` contra bancos Postgres **isolados**, criados e derrubados
   pelo próprio arquivo de teste (`CREATE DATABASE`/`DROP DATABASE`), para nunca colidir com
   `tests/storage.test.js`/`tests/security-integration-postgres.test.js` rodando em paralelo no mesmo

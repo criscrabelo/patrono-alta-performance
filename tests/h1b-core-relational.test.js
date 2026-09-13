@@ -41,8 +41,15 @@ if (!TEST_DATABASE_URL) {
 
   async function dropIsolatedDatabase() {
     const admin = new Pool({ connectionString: TEST_DATABASE_URL });
-    await admin.query(`DROP DATABASE IF EXISTS ${ISOLATED_DB_NAME}`);
-    await admin.end();
+    try {
+      // `WITH (FORCE)` (Postgres 13+) evita a corrida entre `pool.end()` do backend Postgres do
+      // servidor de teste (test.after() já chamou `storage.close()` acima) e a liberação efetiva da
+      // conexão no lado do servidor — sem isso, um DROP DATABASE imediato pode ver a conexão ainda
+      // "em uso" por uma fração de segundo e falhar (55006).
+      await admin.query(`DROP DATABASE IF EXISTS ${ISOLATED_DB_NAME} WITH (FORCE)`);
+    } finally {
+      await admin.end();
+    }
   }
 
   let server, baseUrl, storage, readStore, writeStore;
@@ -52,6 +59,13 @@ if (!TEST_DATABASE_URL) {
     delete require.cache[require.resolve('../scripts/migrate')];
     const { run: migrate } = require('../scripts/migrate');
     await migrate();
+    // Este arquivo testa o núcleo relacional/bridge em si (não o script de cutover, coberto à parte
+    // pelos testes "[H1B-cutover ...]" abaixo) — grava o marcador de cutover diretamente para simular
+    // "cutover já concluído, tabelas vazias, prontas para a ponte gravar" (equivalente a uma instalação
+    // nova que acabou de rodar `migrate:h1b:data` sobre um app_store igualmente vazio).
+    const cutoverPool = new Pool({ connectionString: isolatedDatabaseUrl });
+    await cutoverPool.query("INSERT INTO data_migrations (key) VALUES ('h1b_core_relational_cutover') ON CONFLICT (key) DO NOTHING");
+    await cutoverPool.end();
     delete require.cache[require.resolve('../server')];
     const serverModule = require('../server');
     ({ readStore, writeStore, storage } = serverModule);
@@ -61,7 +75,13 @@ if (!TEST_DATABASE_URL) {
       { id: 'usr-h1b-lider', name: 'Líder Jurídico H1B', email: 'h1b.lider@coevo.local', role: 'lider', department: 'Jurídico', mfa: false },
       { id: 'usr-h1b-ti', name: 'Líder TI H1B', email: 'h1b.ti@coevo.local', role: 'lider', department: 'TI', mfa: false },
       { id: 'usr-h1b-admin', name: 'Administrador H1B', email: 'h1b.admin@coevo.local', role: 'administrador', department: null, mfa: false },
-      { id: 'usr-h1b-inativo', name: 'Usuário Inativo H1B', email: 'h1b.inativo@coevo.local', role: 'colaborador', department: 'Jurídico', mfa: false, deletedAt: new Date().toISOString() }
+      { id: 'usr-h1b-inativo', name: 'Usuário Inativo H1B', email: 'h1b.inativo@coevo.local', role: 'colaborador', department: 'Jurídico', mfa: false, deletedAt: new Date().toISOString() },
+      // O marcador de cutover é gravado diretamente (sem rodar a migração de dados real — ver comentário
+      // acima), então `app_users` está genuinamente vazio: o seed padrão de `server.js`
+      // (usr-diretoria/usr-juridico/usr-ti) nunca chega a existir aqui. Precisa de um usuário com alçada
+      // global própria (`diretoria`, único papel com a ação `restore`) para os testes que exercitam
+      // permissões que nenhum dos 4 usuários acima cobre.
+      { id: 'usr-h1b-diretoria', name: 'Diretoria H1B', email: 'h1b.diretoria@coevo.local', role: 'diretoria', department: null, mfa: false }
     );
     store.records.processos = [
       { id: 'proc-h1b-1', source: 'monday', department: 'Jurídico', title: 'Processo H1B 1', deletedAt: null, version: 1 },
@@ -298,7 +318,7 @@ if (!TEST_DATABASE_URL) {
     assert.ok(afterArchive.rows[0].deleted_at, 'deleted_at deve estar preenchido após archive');
     // "restore" só está na alçada de diretoria (ROLES.lider não inclui 'restore') — RBAC pré-existente,
     // inalterado por H1B.
-    const tokenDiretoria = await loginAs('juridico@coevoconstrutora.com.br');
+    const tokenDiretoria = await loginAs('h1b.diretoria@coevo.local');
     const restored = await api('POST', `/api/entities/legalDeadlines/${id}/restore`, { token: tokenDiretoria });
     assert.equal(restored.status, 200);
     const afterRestore = await pool.query('SELECT deleted_at FROM legal_deadlines WHERE id = $1', [id]);
@@ -417,30 +437,35 @@ if (!TEST_DATABASE_URL) {
       const usersAfter = await checkPool2.query('SELECT count(*)::int AS n FROM app_users');
       const deadlinesAfter = await checkPool2.query('SELECT count(*)::int AS n FROM legal_deadlines');
       const blobAfter = await checkPool2.query('SELECT data FROM app_store WHERE id = 1');
+      const markerAfter = await checkPool2.query('SELECT key FROM data_migrations WHERE key = $1', ['h1b_core_relational_cutover']);
       await checkPool2.end();
       assert.equal(usersAfter.rows[0].n, 1);
       assert.equal(deadlinesAfter.rows[0].n, 1);
       assert.equal(Boolean(blobAfter.rows[0].data.users), false, 'cutover deve remover "users" do blob');
       assert.equal(Boolean(blobAfter.rows[0].data.records && blobAfter.rows[0].data.records.legalDeadlines), false, 'cutover deve remover "records.legalDeadlines" do blob');
+      assert.equal(markerAfter.rows.length, 1, 'marcador de cutover deve existir depois da importação real bem-sucedida');
 
-      // Z: reimportar sem --force é recusado; idempotência real é ON CONFLICT DO NOTHING (não duplica)
+      // Z: reimportar sem --force é recusado (marcador já presente); idempotência real é ON CONFLICT DO
+      // NOTHING (não duplica) e o marcador continua único (upsert, nunca uma segunda linha)
       process.exitCode = undefined;
       await migrateH1bData([]);
-      assert.equal(process.exitCode, 1, 'reimportação sem --force deve ser recusada (tabela já populada)');
+      assert.equal(process.exitCode, 1, 'reimportação sem --force deve ser recusada (cutover já concluído)');
 
       process.exitCode = undefined;
       await migrateH1bData(['--force']);
       assert.notEqual(process.exitCode, 1);
       const checkPool3 = new Pool({ connectionString: isolatedUrl });
       const usersAfterForce = await checkPool3.query('SELECT count(*)::int AS n FROM app_users');
+      const markerCountAfterForce = await checkPool3.query('SELECT count(*)::int AS n FROM data_migrations WHERE key = $1', ['h1b_core_relational_cutover']);
       await checkPool3.end();
       assert.equal(usersAfterForce.rows[0].n, 1, '--force reimporta idempotentemente — não duplica registros já existentes');
+      assert.equal(markerCountAfterForce.rows[0].n, 1, 'o marcador de cutover nunca duplica — upsert, sempre uma única linha por chave');
 
       process.exitCode = originalExitCode;
       process.env.DATABASE_URL = previousDatabaseUrl;
     } finally {
       const admin2 = new Pool({ connectionString: TEST_DATABASE_URL });
-      await admin2.query(`DROP DATABASE IF EXISTS ${isolatedDbName}`);
+      await admin2.query(`DROP DATABASE IF EXISTS ${isolatedDbName} WITH (FORCE)`);
       await admin2.end();
     }
   });
@@ -482,8 +507,209 @@ if (!TEST_DATABASE_URL) {
       process.env.DATABASE_URL = previousDatabaseUrl;
     } finally {
       const admin2 = new Pool({ connectionString: TEST_DATABASE_URL });
-      await admin2.query(`DROP DATABASE IF EXISTS ${isolatedDbName}`);
+      await admin2.query(`DROP DATABASE IF EXISTS ${isolatedDbName} WITH (FORCE)`);
       await admin2.end();
     }
+  });
+
+  // ================================================================================================
+  // Marcador explícito de cutover H1B (revisão final) — "migration de SCHEMA" (004 aplicada,
+  // schema_migrations) é DIFERENTE de "migração de DADOS" (users/legalProcesses/legalDeadlines/audit
+  // efetivamente extraídos do app_store, marcados em `data_migrations`). Estes testes usam uma instância
+  // TOTALMENTE ISOLADA de `storage/index.js` (require.cache limpo, nunca tocando `../server` — que
+  // continua com sua própria instância de storage, configurada pelo test.before() do arquivo) para
+  // exercitar `storage.configure()`/`storage.init()` sem afetar o restante da suíte.
+  // ================================================================================================
+  async function withIsolatedDb(prefix, fn) {
+    const dbName = `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const admin = new Pool({ connectionString: TEST_DATABASE_URL });
+    await admin.query(`CREATE DATABASE ${dbName}`);
+    await admin.end();
+    const url = TEST_DATABASE_URL.replace(/\/[^/]+$/, `/${dbName}`);
+    try {
+      return await fn(url);
+    } finally {
+      const admin2 = new Pool({ connectionString: TEST_DATABASE_URL });
+      await admin2.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`);
+      await admin2.end();
+    }
+  }
+
+  function freshStorageModule() {
+    delete require.cache[require.resolve('../storage')];
+    return require('../storage');
+  }
+
+  const PRECUTOVER_BLOB = {
+    users: [{ id: 'usr-precutover', name: 'Pre Cutover', email: 'precutover@coevo.local', role: 'lider', department: 'Jurídico', mfa: false }],
+    records: {
+      processos: [{ id: 'proc-precutover', source: 'monday', department: 'Jurídico', title: 'Processo pré-cutover', deletedAt: null, version: 1 }],
+      legalDeadlines: []
+    },
+    audit: [],
+    departments: [], financials: [], agenda: [], committees: [], compliance: [], registrationRequests: [], mondayRuns: []
+  };
+
+  test('[H1B-cutover A/B/C] migration 004 aplicada SEM cutover: storage.init() falha (fail-closed), app_users permanece vazio, as 4 coleções continuam no app_store', async () => {
+    await withIsolatedDb('patrono_h1b_cutover_abc', async isolatedUrl => {
+      delete require.cache[require.resolve('../scripts/migrate')];
+      const { run: migrate } = require('../scripts/migrate');
+      const previousDatabaseUrl = process.env.DATABASE_URL;
+      process.env.DATABASE_URL = isolatedUrl;
+      await migrate();
+      process.env.DATABASE_URL = previousDatabaseUrl;
+
+      const seedPool = new Pool({ connectionString: isolatedUrl });
+      await seedPool.query('INSERT INTO app_store (id, data, version) VALUES (1, $1, 1)', [JSON.stringify(PRECUTOVER_BLOB)]);
+      await seedPool.end();
+
+      const isolatedStorage = freshStorageModule();
+      isolatedStorage.configure({ databaseUrl: isolatedUrl, nodeEnv: 'test', seed: { users: [] } });
+
+      // A: storage.init() falha explicitamente — schema (004) aplicado não é o mesmo que dados migrados.
+      await assert.rejects(() => isolatedStorage.init(), /cutover|migrate:h1b:data/i);
+      await isolatedStorage.close();
+
+      const checkPool = new Pool({ connectionString: isolatedUrl });
+      // B: nenhum bootstrap automático de app_users
+      const usersCount = await checkPool.query('SELECT count(*)::int AS n FROM app_users');
+      assert.equal(usersCount.rows[0].n, 0, 'nenhum usuário deve ser inserido em app_users antes do cutover');
+      // C: as 4 coleções ainda existem no app_store, intactas
+      const blobRow = await checkPool.query('SELECT data FROM app_store WHERE id = 1');
+      await checkPool.end();
+      assert.equal(blobRow.rows[0].data.users.length, 1);
+      assert.equal(blobRow.rows[0].data.records.processos.length, 1);
+    });
+  });
+
+  test('[H1B-cutover D/E] migrate-h1b-data concluído grava o marcador; storage.init() passa a funcionar normalmente depois', async () => {
+    await withIsolatedDb('patrono_h1b_cutover_de', async isolatedUrl => {
+      delete require.cache[require.resolve('../scripts/migrate')];
+      const { run: migrate } = require('../scripts/migrate');
+      const previousDatabaseUrl = process.env.DATABASE_URL;
+      process.env.DATABASE_URL = isolatedUrl;
+      await migrate();
+
+      const seedPool = new Pool({ connectionString: isolatedUrl });
+      await seedPool.query('INSERT INTO app_store (id, data, version) VALUES (1, $1, 1)', [JSON.stringify(PRECUTOVER_BLOB)]);
+      await seedPool.end();
+
+      delete require.cache[require.resolve('../scripts/migrate-h1b-data')];
+      const { run: migrateH1bData } = require('../scripts/migrate-h1b-data');
+      const originalExitCode = process.exitCode;
+      process.exitCode = undefined;
+      await migrateH1bData([]);
+      assert.notEqual(process.exitCode, 1, 'cutover deve ter sucesso com dado consistente');
+      process.exitCode = originalExitCode;
+      process.env.DATABASE_URL = previousDatabaseUrl;
+
+      // D: marcador gravado
+      const checkPool = new Pool({ connectionString: isolatedUrl });
+      const marker = await checkPool.query('SELECT key FROM data_migrations WHERE key = $1', ['h1b_core_relational_cutover']);
+      await checkPool.end();
+      assert.equal(marker.rows.length, 1);
+
+      // E: storage.init() agora passa
+      const isolatedStorage = freshStorageModule();
+      isolatedStorage.configure({ databaseUrl: isolatedUrl, nodeEnv: 'test', seed: { users: [] } });
+      await isolatedStorage.init();
+      const health = await isolatedStorage.healthcheck();
+      assert.equal(health.schemaReady, true, 'depois do cutover, schemaReady deve refletir estado pronto');
+      await isolatedStorage.close();
+    });
+  });
+
+  test('[H1B-cutover F/G/H] falha no meio da transação de cutover reverte TUDO — tabelas relacionais, blob e marcador', async () => {
+    await withIsolatedDb('patrono_h1b_cutover_fgh', async isolatedUrl => {
+      delete require.cache[require.resolve('../scripts/migrate')];
+      const { run: migrate } = require('../scripts/migrate');
+      const previousDatabaseUrl = process.env.DATABASE_URL;
+      process.env.DATABASE_URL = isolatedUrl;
+      await migrate();
+
+      // Um Legal Deadline com `date` inválida para a coluna SQL `date` (não checado por
+      // validateLegalDeadlines — só orphan/enum/duplicado são validados ali) passa pela validação
+      // crítica pré-voo, mas falha no INSERT, DEPOIS de users/legal_processes/o primeiro deadline já
+      // terem sido inseridos na MESMA transação — prova que o rollback desfaz também o que já havia
+      // "sucedido" antes da falha, não só a linha que efetivamente falhou.
+      const blob = {
+        users: [{ id: 'usr-rollback', name: 'Rollback', email: 'rollback@coevo.local', role: 'lider', department: 'Jurídico', mfa: false }],
+        records: {
+          processos: [{ id: 'proc-rollback', source: 'monday', department: 'Jurídico', title: 'p', deletedAt: null, version: 1 }],
+          legalDeadlines: [
+            { id: 'ld-rollback-ok', processId: 'proc-rollback', origin: 'ok', date: '2026-01-01', originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', version: 1 },
+            { id: 'ld-rollback-bad', processId: 'proc-rollback', origin: 'bad', date: 'data-invalida-para-sql', originType: 'JUDICIAL_PROCESSUAL', status: 'ativo', version: 1 }
+          ]
+        },
+        audit: [], departments: [], financials: [], agenda: [], committees: [], compliance: [], registrationRequests: [], mondayRuns: []
+      };
+      const seedPool = new Pool({ connectionString: isolatedUrl });
+      await seedPool.query('INSERT INTO app_store (id, data, version) VALUES (1, $1, 1)', [JSON.stringify(blob)]);
+      await seedPool.end();
+
+      delete require.cache[require.resolve('../scripts/migrate-h1b-data')];
+      const { run: migrateH1bData } = require('../scripts/migrate-h1b-data');
+      const originalExitCode = process.exitCode;
+      process.exitCode = undefined;
+      await migrateH1bData([]);
+      assert.equal(process.exitCode, 1, 'a falha de INSERT deve abortar a migração com exit code de erro');
+      process.exitCode = originalExitCode;
+      process.env.DATABASE_URL = previousDatabaseUrl;
+
+      const checkPool = new Pool({ connectionString: isolatedUrl });
+      const usersCount = await checkPool.query('SELECT count(*)::int AS n FROM app_users');
+      const processesCount = await checkPool.query('SELECT count(*)::int AS n FROM legal_processes');
+      const deadlinesCount = await checkPool.query('SELECT count(*)::int AS n FROM legal_deadlines');
+      const marker = await checkPool.query('SELECT key FROM data_migrations WHERE key = $1', ['h1b_core_relational_cutover']);
+      const blobRow = await checkPool.query('SELECT data FROM app_store WHERE id = 1');
+      await checkPool.end();
+      // F/G: nada parcialmente inserido — nem o que "teria dado certo" antes da linha que falhou
+      assert.equal(usersCount.rows[0].n, 0, 'ROLLBACK deve desfazer o usuário já inserido antes da falha');
+      assert.equal(processesCount.rows[0].n, 0, 'ROLLBACK deve desfazer o processo já inserido antes da falha');
+      assert.equal(deadlinesCount.rows[0].n, 0, 'ROLLBACK deve desfazer o Legal Deadline válido já inserido antes da falha');
+      // H: marcador ausente — nunca gravado se a transação não chegou a COMMIT
+      assert.equal(marker.rows.length, 0, 'marcador de cutover não pode existir se a transação foi revertida');
+      // blob nunca é alterado quando a transação falha
+      assert.equal(blobRow.rows[0].data.users.length, 1, 'blob deve permanecer intacto — a transação nunca chegou a cortar o blob');
+    });
+  });
+
+  test('[H1B-cutover J/K] healthcheck() reporta schemaReady:false antes do cutover e schemaReady:true depois', async () => {
+    await withIsolatedDb('patrono_h1b_cutover_jk', async isolatedUrl => {
+      delete require.cache[require.resolve('../scripts/migrate')];
+      const { run: migrate } = require('../scripts/migrate');
+      const previousDatabaseUrl = process.env.DATABASE_URL;
+      process.env.DATABASE_URL = isolatedUrl;
+      await migrate();
+
+      const seedPool = new Pool({ connectionString: isolatedUrl });
+      await seedPool.query('INSERT INTO app_store (id, data, version) VALUES (1, $1, 1)', [JSON.stringify(PRECUTOVER_BLOB)]);
+      await seedPool.end();
+
+      // J: antes do cutover — banco alcançável, mas não pronto
+      const preCutoverStorage = freshStorageModule();
+      preCutoverStorage.configure({ databaseUrl: isolatedUrl, nodeEnv: 'test', seed: { users: [] } });
+      const healthBefore = await preCutoverStorage.healthcheck();
+      assert.equal(healthBefore.reachable, true);
+      assert.equal(healthBefore.schemaReady, false, 'antes do cutover, a aplicação não deve ser reportada como pronta');
+      await preCutoverStorage.close();
+
+      delete require.cache[require.resolve('../scripts/migrate-h1b-data')];
+      const { run: migrateH1bData } = require('../scripts/migrate-h1b-data');
+      const originalExitCode = process.exitCode;
+      process.exitCode = undefined;
+      await migrateH1bData([]);
+      assert.notEqual(process.exitCode, 1);
+      process.exitCode = originalExitCode;
+      process.env.DATABASE_URL = previousDatabaseUrl;
+
+      // K: depois do cutover — pronto
+      const postCutoverStorage = freshStorageModule();
+      postCutoverStorage.configure({ databaseUrl: isolatedUrl, nodeEnv: 'test', seed: { users: [] } });
+      const healthAfter = await postCutoverStorage.healthcheck();
+      assert.equal(healthAfter.reachable, true);
+      assert.equal(healthAfter.schemaReady, true, 'depois do cutover, a aplicação deve ser reportada como pronta');
+      await postCutoverStorage.close();
+    });
   });
 }

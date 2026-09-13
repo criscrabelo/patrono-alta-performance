@@ -885,15 +885,29 @@ detalhamento técnico completo — esta decisão não o duplica, apenas registra
 10. **Runbook de deploy obrigatório, nesta ordem**: (a) `npm run migrate` (aplica
     `004_h1b_core_relational`); (b) `npm run migrate:h1b:data` (extrai as 4 coleções do `app_store`
     existente para as tabelas relacionais, com `--dry-run` disponível antes); só então (c) subir o
-    processo normalmente. Rodar o processo entre (a) e (b) não falha nenhuma leitura (a ponte hidrata as
-    4 coleções como vazias a partir de tabelas igualmente vazias, e o bootstrap idempotente de usuários
-    seed evita o problema de "ovo e galinha" de uma instalação nova), mas qualquer escrita nesse intervalo
-    deixaria de reconciliar o dado antigo do blob até o passo (b) rodar — por isso a ordem é obrigatória e
-    documentada, nunca deixada implícita.
+    processo normalmente. **O runtime não depende apenas do operador seguir essa ordem** (correção da
+    revisão final do H1B, ver item 12 abaixo): "migration de SCHEMA" (passo (a), `schema_migrations`) é
+    DIFERENTE de "migração de DADOS" (passo (b)) — um marcador explícito e persistente
+    (`data_migrations`, chave `h1b_core_relational_cutover`, gravado por `scripts/migrate-h1b-data.js` na
+    MESMA transação que popula as tabelas e corta o blob) registra que o cutover de fato ocorreu.
+    `storage.init()` (a fachada em `storage/index.js`, chamada no boot real) falha explicitamente
+    (fail-closed) se o backend é PostgreSQL e esse marcador ainda não existe — nunca ativa a ponte
+    relacional sobre tabelas vazias enquanto o blob ainda tem o dado real, mesmo que o passo (a) já tenha
+    rodado.
 11. **Esta decisão não fecha o Gate de Produção nem declara H1 integralmente concluído** — apenas
     os critérios PG-01/PG-02/PG-03 de `docs/PRODUCTION_GATE.md` ganham uma camada adicional de rigor (FK
     real para o núcleo canônico). Demais entidades permanecem no documento JSONB único (H1A). O gate como
     um todo permanece **NO-GO PARA PRODUÇÃO**. H2–H11 não foram alterados por esta decisão.
+12. **Correção de revisão final (blocker P1 corrigido antes da homologação)**: a versão original desta
+    decisão dependia apenas do runbook documentado (item 10) para a ordem migrate→migrate:h1b:data — sem
+    nenhuma checagem em runtime. Corrigido para o mecanismo fail-closed descrito no item 10: o marcador
+    de cutover em `data_migrations` é a fonte de verdade real (não uma contagem de linhas em `app_users`,
+    que poderia estar vazia por outro motivo), e `GET /api/health` (`schemaReady`) reflete o mesmo estado
+    — um schema fisicamente presente cujo cutover ainda não ocorreu nunca é reportado como pronto.
+    `scripts/migrate-h1b-data.js` também teve `hasCriticalIssues()` corrigido: `processesReport.invalid`/
+    `auditReport.invalid` já eram calculados mas nunca entravam na decisão de abortar o `--dry-run`/
+    importação real — corrigido para depender só da validação já conhecida, nunca de uma constraint SQL
+    posterior detectar algo que o relatório já sabia.
 
 Esta decisão não altera D1/D4/D2-CLOSE/PROD-GATE-01/PROD-H1-01 já homologadas — apenas registra o avanço
 específico do H1B dentro do gate de produção já aberto.

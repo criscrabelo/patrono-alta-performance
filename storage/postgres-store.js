@@ -12,6 +12,7 @@
 //     users continuam validados só em JS, exatamente como hoje). Isso é H1B (normalização progressiva
 //     por entidade), deliberadamente fora desta rodada — não fechar esse gap silenciosamente.
 const { StoreConflictError, StoreUnavailableError } = require('./errors');
+const { DATA_MIGRATIONS_TABLE } = require('./cutover');
 
 const APP_STORE_ID = 1;
 
@@ -37,7 +38,7 @@ function createPostgresStore({ databaseUrl, ssl = false, seed }) {
   // não tem onde ler/gravar. Mesma rigidez do H1A: nunca criado pelo runtime, só validado.
   const REQUIRED_MIGRATIONS = ['003_app_store', '004_h1b_core_relational'];
   const REQUIRED_APP_STORE_COLUMNS = ['id', 'data', 'version', 'updated_at'];
-  const REQUIRED_CORE_TABLES = ['app_users', 'legal_processes', 'legal_deadlines', 'audit_log'];
+  const REQUIRED_CORE_TABLES = ['app_users', 'legal_processes', 'legal_deadlines', 'audit_log', DATA_MIGRATIONS_TABLE];
   const MIGRATE_HINT = 'Rode "npm run migrate" para aplicar as migrations pendentes antes de iniciar a aplicação.';
 
   // Valida (nunca cria) o schema canônico. O runtime NUNCA deve substituir migration por
@@ -103,6 +104,13 @@ function createPostgresStore({ databaseUrl, ssl = false, seed }) {
     );
   }
 
+  // Nota deliberada (revisão final H1B): este `init()`/`healthcheck()` validam e preparam só o BLOB
+  // (schema_migrations/app_store) — nunca sabem da existência do cutover de dados H1B (marcador em
+  // `data_migrations`). Esse é um conceito da PONTE relacional, não do backend de blob puro: quem o
+  // impõe é `storage/index.js` (o único chamador que de fato ativa a ponte), logo após chamar `init()`
+  // aqui. Manter esse conceito FORA daqui preserva `createPostgresStore()` utilizável isoladamente (como
+  // os testes de contrato em tests/storage.test.js já fazem) sem exigir um cutover que não lhes diz
+  // respeito.
   async function init() {
     await validateSchema();
     await bootstrapIfEmpty();

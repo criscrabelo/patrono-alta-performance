@@ -9,13 +9,15 @@
 //   DATABASE_URL=... node scripts/migrate-h1b-data.js [--force]
 //
 // --dry-run: lê e valida o app_store existente, reporta contagens/inconsistências por coleção, SEM
-// gravar nada. --force: só necessário quando as tabelas relacionais já contiverem dado — sem --force, a
-// importação real recusa reimportar por cima de dado já existente (idempotência).
+// gravar nada. --force: só necessário quando o CUTOVER já tiver sido concluído antes (marcador presente
+// em `data_migrations`, ver storage/cutover.js) — sem --force, a importação real recusa reimportar por
+// cima de um cutover já concluído (idempotência real, não uma contagem de linhas).
 //
 // NUNCA roda automaticamente (não faz parte do boot do servidor). NUNCA apaga o app_store nem qualquer
 // outro dado do blob além das 4 chaves migradas — o restante do documento (departments, financials,
 // agenda, projetos, etc.) permanece intocado.
 const { pool, configured } = require('../database');
+const { DATA_MIGRATIONS_TABLE, H1B_CORE_RELATIONAL_CUTOVER_KEY } = require('../storage/cutover');
 
 function parseArgs(argv) {
   const args = { dryRun: false, force: false };
@@ -41,8 +43,8 @@ function validateUsers(users) {
 }
 
 function validateLegalProcesses(processos) {
-  const invalid = processos.filter(p => !p || !p.id).length;
-  return { total: processos.length, valid: processos.length - invalid, duplicates: findDuplicateIds(processos) };
+  const invalid = processos.filter(p => !p || !p.id).map(p => p && p.id);
+  return { total: processos.length, valid: processos.length - invalid.length, invalid, duplicates: findDuplicateIds(processos) };
 }
 
 function validateLegalDeadlines(deadlines, processIds, userIds) {
@@ -61,16 +63,20 @@ function validateLegalDeadlines(deadlines, processIds, userIds) {
 }
 
 function validateAudit(events) {
-  const invalid = events.filter(e => !e || !e.id || !e.action || !e.entity || !e.entityId).length;
-  return { total: events.length, valid: events.length - invalid, duplicates: findDuplicateIds(events) };
+  const invalid = events.filter(e => !e || !e.id || !e.action || !e.entity || !e.entityId).map(e => e && e.id);
+  return { total: events.length, valid: events.length - invalid.length, invalid, duplicates: findDuplicateIds(events) };
 }
 
+// Corrigido (revisão final H1B): `processesReport.invalid`/`auditReport.invalid` já eram calculados,
+// mas nunca entravam nesta decisão — um registro que o próprio relatório já marcava como inválido só
+// seria pego depois, na hora do INSERT (dependendo de uma constraint SQL para detectar algo que o
+// dry-run já sabia). Nunca depender de uma falha posterior para um problema já conhecido aqui.
 function hasCriticalIssues(usersReport, processesReport, deadlinesReport, auditReport) {
   return Boolean(
     usersReport.invalid.length || usersReport.duplicates.length ||
-    processesReport.duplicates.length ||
+    processesReport.invalid.length || processesReport.duplicates.length ||
     deadlinesReport.orphanProcess.length || deadlinesReport.orphanResponsible.length || deadlinesReport.invalidEnum.length || deadlinesReport.duplicates.length ||
-    auditReport.duplicates.length
+    auditReport.invalid.length || auditReport.duplicates.length
   );
 }
 
@@ -157,9 +163,13 @@ async function run(argv = process.argv.slice(2)) {
 
     if (args.dryRun) { console.log('\n--dry-run: nenhuma gravação foi realizada.'); process.exitCode = 0; return; }
 
-    const existing = await client.query('SELECT count(*)::int AS n FROM app_users');
-    if (existing.rows[0].n > 0 && !args.force) {
-      console.error(`\nImportação abortada: a tabela "app_users" já contém ${existing.rows[0].n} registro(s). Use --force para reimportar mesmo assim (idempotente via ON CONFLICT DO NOTHING — nunca sobrescreve linha já existente).`);
+    // Idempotência decidida pelo MARCADOR de cutover, não pela contagem de `app_users` — é a fonte de
+    // verdade real de "o cutover já ocorreu", a mesma que `storage.init()` valida no boot
+    // (storage/postgres-store.js, validateCutover()). Uma tabela vazia por outro motivo nunca deveria
+    // ser confundida com "cutover pendente", nem o inverso.
+    const cutoverDone = await client.query(`SELECT 1 FROM ${DATA_MIGRATIONS_TABLE} WHERE key = $1`, [H1B_CORE_RELATIONAL_CUTOVER_KEY]);
+    if (cutoverDone.rows.length && !args.force) {
+      console.error('\nImportação abortada: o cutover H1B já foi concluído anteriormente (marcador presente em ' + DATA_MIGRATIONS_TABLE + '). Use --force para reimportar mesmo assim (idempotente via ON CONFLICT DO NOTHING — nunca sobrescreve linha já existente).');
       process.exitCode = 1;
       return;
     }
@@ -182,6 +192,14 @@ async function run(argv = process.argv.slice(2)) {
         delete strippedBlob.records.legalDeadlines;
       }
       await client.query('UPDATE app_store SET data = $1, version = version + 1, updated_at = now() WHERE id = 1', [JSON.stringify(strippedBlob)]);
+
+      // Marcador de cutover — gravado por ÚLTIMO, ainda dentro da mesma transação: se qualquer etapa
+      // anterior falhar, nem os dados relacionais, nem o blob cortado, nem o marcador sobrevivem
+      // (ROLLBACK reverte tudo). O marcador só existe quando o blob já foi cortado, nunca antes.
+      await client.query(
+        `INSERT INTO ${DATA_MIGRATIONS_TABLE} (key, completed_at) VALUES ($1, now()) ON CONFLICT (key) DO UPDATE SET completed_at = now()`,
+        [H1B_CORE_RELATIONAL_CUTOVER_KEY]
+      );
 
       await client.query('COMMIT');
     } catch (error) {

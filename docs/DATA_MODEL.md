@@ -390,3 +390,15 @@ H1A).
 financials, agenda, committees, compliance, registrationRequests, mondayRuns, dashboardPreferences,
 budgetImports, e todas as coleções de projetos/recuperação. Nenhuma normalização adicional foi feita
 nesta rodada — big-bang rewrite explicitamente evitado, conforme decidido.
+
+**Marcador explícito de cutover (`data_migrations`, blocker P1 corrigido em revisão final):**
+`migrations/004_h1b_core_relational.sql` também cria a tabela `data_migrations` (key/completed_at),
+vazia por padrão. Migration de SCHEMA (a própria 004 aplicada, registrada em `schema_migrations`) é
+DIFERENTE de migração de DADOS — as 4 tabelas do núcleo relacional podem existir fisicamente sem que
+users/legalProcesses/legalDeadlines/audit tenham sido de fato extraídos do `app_store` ainda. Só quando
+`scripts/migrate-h1b-data.js` roda com sucesso é que a chave `h1b_core_relational_cutover` é gravada
+nessa tabela — na MESMA transação que popula as 4 tabelas e remove as 4 coleções do blob. `storage.init()`
+(a fachada em `storage/index.js`) exige esse marcador antes de considerar o backend PostgreSQL pronto:
+sem ele, o boot falha explicitamente (fail-closed), com mensagem apontando para
+`npm run migrate:h1b:data` — nunca ativa a ponte relacional sobre tabelas vazias enquanto o blob ainda
+tem o dado real. `GET /api/health` (`schemaReady`) reflete o mesmo estado.

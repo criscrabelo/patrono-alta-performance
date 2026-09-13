@@ -24,14 +24,27 @@
 // já contêm os dados antes existentes no blob. A ordem obrigatória é: (1) `npm run migrate` (aplica
 // 004_h1b_core_relational); (2) `npm run migrate:h1b:data` (extrai users/legalProcesses/legalDeadlines/
 // audit do app_store existente para as tabelas relacionais, com --dry-run disponível antes); só então
-// (3) subir o processo normalmente. Rodar o processo entre (1) e (2) faz a ponte hidratar as 4 coleções
-// como vazias — nenhuma leitura falha, mas qualquer escrita subsequente deixaria de reconciliar o dado
-// antigo do blob (que só é migrado pelo passo (2)). Ver docs/DECISIONS.md, PROD-H1B-01.
-const { FailFastError, StoreConflictError } = require('./errors');
+// (3) subir o processo normalmente. Migration de SCHEMA (passo 1) é DIFERENTE de migração de DADOS
+// (passo 2) — o runtime NÃO depende apenas do operador seguir essa ordem: `init()` (abaixo) falha
+// explicitamente (fail-closed) se a migration 004 já foi aplicada mas o marcador de cutover
+// (`data_migrations`) ainda não existe, com mensagem apontando para `npm run migrate:h1b:data`. A ponte
+// relacional só ativa depois que o cutover é confirmado — nunca hidrata tabelas vazias silenciosamente.
+// Este é o ÚNICO lugar que impõe essa checagem — `storage/postgres-store.js` continua sem saber que o
+// conceito de cutover H1B existe, para que `createPostgresStore()` continue utilizável isoladamente
+// (ex.: os testes de contrato do blob em tests/storage.test.js) sem exigir um cutover que não lhes diz
+// respeito. Ver docs/DECISIONS.md, PROD-H1B-01.
+const { FailFastError, StoreConflictError, StoreUnavailableError } = require('./errors');
 const repositories = require('./repositories');
+const { DATA_MIGRATIONS_TABLE, H1B_CORE_RELATIONAL_CUTOVER_KEY } = require('./cutover');
+
+const CUTOVER_HINT = 'H1B schema aplicado, mas migração de dados/cutover ainda não concluída. Execute "npm run migrate:h1b:data" antes de iniciar a aplicação.';
+
+async function isCutoverComplete(pool) {
+  const { rows } = await pool.query(`SELECT 1 FROM ${DATA_MIGRATIONS_TABLE} WHERE key = $1`, [H1B_CORE_RELATIONAL_CUTOVER_KEY]);
+  return rows.length > 0;
+}
 
 let backend = null;
-let configuredSeed = null;
 
 function isProductionEnv(nodeEnv) { return nodeEnv === 'production'; }
 
@@ -39,7 +52,6 @@ function isProductionEnv(nodeEnv) { return nodeEnv === 'production'; }
 // fallback local explícito (JSON), permitido só fora de produção — em produção sem DATABASE_URL, o
 // processo nunca deve subir silenciosamente em modo arquivo (fail-fast, P0 do Gate de Produção).
 function configure({ databaseUrl, nodeEnv, dataDir, seed, ssl = false } = {}) {
-  configuredSeed = seed;
   if (databaseUrl) {
     const { createPostgresStore } = require('./postgres-store');
     backend = createPostgresStore({ databaseUrl, ssl, seed });
@@ -115,15 +127,17 @@ async function persistCoreEntities(client, store, baseline) {
   await persistNewAuditEvents(client, store.audit, baseline.auditCount);
 }
 
+// Nenhum bootstrap de `app_users` acontece aqui — só existe UM caminho para popular as tabelas
+// relacionais: `scripts/migrate-h1b-data.js` (o cutover), que lê o seed (ou dado real) de dentro do
+// `app_store` (`backend.init()`, abaixo, já garante via `bootstrapIfEmpty()` que uma instalação nova tem
+// algo ali para o cutover ler). Fail-closed: se o backend é PostgreSQL e o marcador de cutover ainda não
+// existe, o boot falha aqui — nunca se chega a hidratar/gravar a ponte relacional sobre tabelas vazias
+// enquanto o blob ainda tem o dado real.
 async function init() {
   await requireBackend().init();
   if (isRelationalBridgeActive()) {
-    // Bootstrap idempotente dos usuários seed — mesmo padrão do `bootstrapIfEmpty()` do blob H1A: só
-    // popula id que ainda não existe, nunca sobrescreve dado real já persistido. Resolve o problema de
-    // "ovo e galinha" de uma instalação nova (sem isso, ninguém conseguiria logar num Postgres recém-
-    // migrado, já que a ponte relacional hidrataria `store.users` como vazio a partir de uma tabela
-    // igualmente vazia).
-    await repositories.users.bootstrapSeed(backend.getPool(), (configuredSeed && configuredSeed.users) || []);
+    const cutoverDone = await isCutoverComplete(backend.getPool());
+    if (!cutoverDone) throw new StoreUnavailableError(CUTOVER_HINT);
   }
 }
 
@@ -167,6 +181,14 @@ async function writeStore(store) {
 async function healthcheck() {
   const active = requireBackend();
   const result = await active.healthcheck();
+  // `schemaReady` do backend só cobre schema_migrations/tabelas (H1A). Sob PostgreSQL, dobrar essa
+  // checagem com o cutover H1B: um schema fisicamente presente mas cujo cutover de dados ainda não
+  // ocorreu nunca deve ser reportado como pronto (nunca 503 aqui — GET /api/health responde 200 com
+  // schemaReady:false, igual a qualquer outro schema incompatível).
+  if (result.schemaReady && active.mode === 'postgres') {
+    const cutoverDone = await isCutoverComplete(active.getPool()).catch(() => false);
+    if (!cutoverDone) return { mode: active.mode, ...result, schemaReady: false };
+  }
   return { mode: active.mode, ...result };
 }
 async function close() { if (backend) await backend.close(); }
@@ -174,6 +196,6 @@ function mode() { return backend ? backend.mode : null; }
 // Exposto só para os testes poderem reconfigurar o backend entre suites isoladas (COEVO_DATA_DIR já
 // cumpre esse papel para o modo JSON; suites que testam o modo Postgres chamam configure() de novo
 // apontando para um DATABASE_URL de teste isolado).
-function reset() { backend = null; configuredSeed = null; }
+function reset() { backend = null; }
 
 module.exports = { configure, init, readStore, writeStore, healthcheck, close, mode, reset };

@@ -12,6 +12,17 @@
 --
 -- IDs preservados como `text` (não `uuid`): ids existentes incluem strings não-uuid como
 -- 'usr-diretoria'/'usr-juridico'/'usr-ti' (seed) — usar `uuid` quebraria a preservação de ID exigida.
+--
+-- `data_migrations`: migration de SCHEMA (esta migration, registrada em `schema_migrations`) é
+-- DIFERENTE de migração de DADOS. A tabela abaixo nasce sempre VAZIA — só ganha uma linha quando
+-- `scripts/migrate-h1b-data.js` efetivamente extrai users/legalProcesses/legalDeadlines/audit do
+-- app_store para as tabelas relacionais (cutover). Enquanto a linha `h1b_core_relational_cutover` não
+-- existir, `storage.init()` em modo Postgres falha explicitamente (fail-closed) — mesmo que as 4
+-- tabelas relacionais já existam fisicamente. Ver storage/cutover.js e docs/DECISIONS.md, PROD-H1B-01.
+CREATE TABLE IF NOT EXISTS data_migrations (
+  key text PRIMARY KEY,
+  completed_at timestamptz NOT NULL DEFAULT now()
+);
 
 CREATE TABLE IF NOT EXISTS app_users (
   id text PRIMARY KEY,

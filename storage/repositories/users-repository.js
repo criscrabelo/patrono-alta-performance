@@ -24,19 +24,6 @@ async function list(executor) {
   return rows.map(rowToUser);
 }
 
-// Seed idempotente — só popula usuários cujo id ainda não existe (nunca sobrescreve dado real já
-// persistido), mesmo padrão de `bootstrapIfEmpty()` do app_store em H1A.
-async function bootstrapSeed(executor, users) {
-  for (const user of users || []) {
-    await executor.query(
-      `INSERT INTO app_users (id, name, email, role, department, mfa, temporary_password, company_id, spe_id, deleted_at, version)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1)
-       ON CONFLICT (id) DO NOTHING`,
-      [user.id, user.name, user.email, user.role, user.department ?? null, Boolean(user.mfa), Boolean(user.temporaryPassword), user.companyId ?? null, user.speId ?? null, user.deletedAt ?? null]
-    );
-  }
-}
-
 async function insert(executor, user) {
   await executor.query(
     `INSERT INTO app_users (id, name, email, role, department, mfa, temporary_password, company_id, spe_id, deleted_at, version)
@@ -59,4 +46,4 @@ async function update(executor, user, expectedVersion) {
   return rowCount > 0 ? nextVersion : null;
 }
 
-module.exports = { list, bootstrapSeed, insert, update, rowToUser };
+module.exports = { list, insert, update, rowToUser };

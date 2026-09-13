@@ -394,9 +394,22 @@ Legal Deadline + evento de auditoria são persistidos juntos ou nenhum dos dois)
   duplicados/órfãos/enum inválido, nunca grava), importação real transacional e idempotente (recusa
   reimportar sem `--force`; com `--force`, `ON CONFLICT DO NOTHING` nunca duplica), aborta inteiramente
   (nenhum dado gravado) diante de qualquer inconsistência crítica (órfão, duplicado, enum inválido).
-  Cutover: a importação real remove as 4 chaves do blob na mesma transação.
-- `storage.init()`/`healthcheck()` também exigem a migration `004_h1b_core_relational` e as 4 tabelas do
-  núcleo relacional — schema incompatível/ausente falha explicitamente, nunca silenciosamente.
+  Cutover: a importação real remove as 4 chaves do blob e grava o marcador de cutover
+  (`data_migrations`, chave `h1b_core_relational_cutover`) na MESMA transação.
+- `storage.init()`/`healthcheck()` (backend) também exigem a migration `004_h1b_core_relational` e as 4
+  tabelas do núcleo relacional — schema incompatível/ausente falha explicitamente, nunca silenciosamente.
+- **Migration de schema ≠ migração de dados (blocker P1 corrigido antes da homologação):** a migration
+  004 aplicada (schema_migrations) NÃO significa que o cutover de dados já ocorreu — as 4 tabelas podem
+  existir fisicamente, vazias, enquanto o blob ainda tem o dado real. `storage.init()` (a fachada em
+  `storage/index.js`, chamada no boot real) valida ADICIONALMENTE o marcador de cutover e falha
+  explicitamente (fail-closed, mensagem apontando para `npm run migrate:h1b:data`) se ele ainda não
+  existe — nunca ativa a ponte relacional sobre tabelas vazias. Nenhum bootstrap automático de
+  `app_users` acontece nesse meio-tempo (único caminho de população é o cutover real).
+  `GET /api/health` (`schemaReady`) reflete o mesmo estado: um schema fisicamente presente cujo cutover
+  ainda não ocorreu nunca é reportado como pronto. Testado com Postgres real: init() falha sem o
+  marcador; app_users permanece vazio; as 4 coleções continuam no blob; após o cutover, init() passa e
+  healthcheck reporta pronto; falha no meio da transação de cutover reverte tabelas relacionais, blob e
+  marcador juntos (nunca estado parcial).
 
 **O que H1B NÃO fecha (deliberadamente fora desta rodada):**
 - Demais coleções (departments, financials, agenda, projetos, etc.) permanecem no documento JSONB único
@@ -411,10 +424,10 @@ Legal Deadline + evento de auditoria são persistidos juntos ou nenhum dos dois)
   restore de produção, logging, incident response, retenção/legal hold, dependências, OAuth Calendar,
   deploy).
 
-**Testes:** 25 novos em `tests/h1b-core-relational.test.js` (mais 1 "pulado explicitamente" sem
-`TEST_DATABASE_URL`) + 9 novos testes puros de validação de `scripts/migrate-h1b-data.js` em
-`tests/storage.test.js`. Total: 314 testes passam com Postgres real conectado (0 pulados); 279 passam sem
-Postgres disponível (3 pulados explicitamente — fallback local). CI (Node 20.x/22.x) roda
+**Testes:** 29 em `tests/h1b-core-relational.test.js` (mais 1 "pulado explicitamente" sem
+`TEST_DATABASE_URL`) + 11 testes puros de validação de `scripts/migrate-h1b-data.js` em
+`tests/storage.test.js`. Total: 319 testes passam com Postgres real conectado (0 pulados); 280 (277 +
+3 pulados explicitamente) sem Postgres disponível (fallback local). CI (Node 20.x/22.x) roda
 `tests/h1b-core-relational.test.js` contra bancos Postgres isolados criados/derrubados pelo próprio teste
 (evita colidir com os demais arquivos de teste rodando em paralelo no mesmo serviço `postgres:16`).
 
