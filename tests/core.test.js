@@ -61,12 +61,15 @@ test('tela de login não traz credenciais pré-preenchidas nem chave de exemplo 
   assert.equal(backupKey, '', 'COEVO_BACKUP_KEY do .env.example deve ficar vazio');
   assert.ok(backupKey.length < 32, 'placeholder não pode satisfazer o mínimo de 32 caracteres exigido por encryptBackup');
 });
-test('autenticação não aceita bypass usr-* nem challenge como token de sessão', () => {
+test('autenticação individual (H2): sem bypass usr-*, sem senha/MFA global, sessão persistida por hash de token', () => {
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  assert.doesNotMatch(server, /token\.startsWith\('usr-'\)/, 'bypass usr-* deve estar removido de getUser');
-  assert.doesNotMatch(server, /IS_PRODUCTION/, 'constante deixa de existir junto com o bypass');
-  assert.match(server, /!session\.challenge/, 'challenge não pode ser aceito como sessão');
-  assert.match(server, /if \(!requireMfa\(found\)\)[\s\S]{0,200}sessions\.set\(token/, 'login deve emitir token quando MFA não é exigido');
+  assert.doesNotMatch(server, /token\.startsWith\('usr-'\)/, 'bypass usr-* deve continuar removido de getUser');
+  assert.doesNotMatch(server, /const sessions = new Map\(\)/, 'sessão não pode voltar a viver em memória (Map) — precisa ser persistida (auth_sessions)');
+  assert.doesNotMatch(server, /hash\(input\.password\) !== hash\(configured\)/, 'login não pode mais comparar contra uma senha global (COEVO_DEMO_PASSWORD)');
+  assert.doesNotMatch(server, /process\.env\.COEVO_MFA_CODE/, 'MFA não pode mais comparar contra um código global (COEVO_MFA_CODE)');
+  assert.match(server, /authCrypto\.verifyPassword\(input\.password, found\.passwordHash\)/, 'login deve verificar a senha individual do usuário (hash próprio), nunca uma senha global');
+  assert.match(server, /\(store\.authSessions \|\| \[\]\)\.find\(s => s\.tokenHash === tokenHash\)/, 'getUser deve resolver a sessão em auth_sessions pelo hash do token, nunca pelo token bruto nem por um Map em memória');
+  assert.match(server, /if \(requireMfa\(found\) && found\.mfaEnabled\)/, 'login só emite desafio de MFA quando o próprio usuário tem MFA individual confirmado, nunca por um código global');
   const app = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
   assert.doesNotMatch(app, /Bearer usr-/, 'frontend não deve ter fallback de bearer privilegiado');
   assert.match(app, /window\.__coevoToken=result\.data\.token;state\.authenticated=true/, 'submitLogin deve guardar o token antes de autenticar');

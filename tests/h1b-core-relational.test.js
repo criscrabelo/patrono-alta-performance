@@ -17,9 +17,11 @@ if (!TEST_DATABASE_URL) {
   const http = require('node:http');
   const { Pool } = require('pg');
 
+  // Sprint 2, Hardening H2: ver tests/security-integration.test.js para a explicação completa da
+  // migração de senha global/código MFA global para credenciais individuais reais.
   process.env.COEVO_DEMO_PASSWORD = 'integration-test-password-0000000000';
-  process.env.COEVO_MFA_CODE = '000000';
   process.env.COEVO_SESSION_MS = '300000';
+  process.env.MFA_ENCRYPTION_KEY = process.env.MFA_ENCRYPTION_KEY || 'test-mfa-encryption-key-at-least-32-characters';
   process.env.NODE_ENV = 'test';
   delete process.env.MONDAY_TOKEN;
 
@@ -110,12 +112,15 @@ if (!TEST_DATABASE_URL) {
     return { status: res.status, body };
   }
 
+  const authCrypto = require('../auth/crypto');
+  const DEV_SEED_TOTP_SECRET = process.env.COEVO_SEED_TOTP_SECRET || 'JBSWY3DPEHPK3PXP';
   async function loginAs(email) {
     const login = await api('POST', '/api/auth/login', { json: { email, password: process.env.COEVO_DEMO_PASSWORD } });
     assert.equal(login.status, 200, `login deveria aceitar credenciais válidas para ${email}: ${JSON.stringify(login.body)}`);
     if (login.body.token) return login.body.token;
     assert.equal(login.body.mfaRequired, true);
-    const mfa = await api('POST', '/api/auth/mfa', { json: { challenge: login.body.challenge, code: process.env.COEVO_MFA_CODE } });
+    const code = authCrypto.totpAt(DEV_SEED_TOTP_SECRET, Date.now());
+    const mfa = await api('POST', '/api/auth/mfa/verify', { json: { challenge: login.body.challenge, code } });
     assert.equal(mfa.status, 200, `MFA deveria ser aceito para ${email}: ${JSON.stringify(mfa.body)}`);
     return mfa.body.token;
   }

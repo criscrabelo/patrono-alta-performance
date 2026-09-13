@@ -75,7 +75,16 @@ Verificado nesta execução:
 - `MONDAY_TOKEN` só é lido de `process.env` dentro de `mondayQuery()` (`server.js`), nunca devolvido em
   nenhuma resposta HTTP. `/api/monday/status` devolve apenas `configured: boolean` e metadados de board.
 - `COEVO_DEMO_PASSWORD`, `COEVO_MFA_CODE` e `COEVO_BACKUP_KEY` só existem em `.env` (não versionado) e
-  nunca são enviados ao cliente.
+  nunca são enviados ao cliente. **A partir de H2**, `COEVO_DEMO_PASSWORD` deixou de ser comparada
+  diretamente no login (senha global removida) — passou a ser reaproveitada, fora de produção, apenas
+  como fonte da senha de conveniência que `migrateLegacyStore()`/`seedAuthFields()` atribuem a usuários
+  seed/legados de desenvolvimento e teste; `COEVO_MFA_CODE` não é mais lida em nenhum ponto do runtime.
+  Novos nomes de variável introduzidos por H2 (só o NOME é documentado aqui — nenhum valor real): 
+  `MFA_ENCRYPTION_KEY` (chave de cifragem em repouso do segredo TOTP, AES-256-GCM — mesmo padrão de
+  `COEVO_BACKUP_KEY`; obrigatória para qualquer enrolamento/validação de MFA, sem valor padrão embutido),
+  `COEVO_SEED_PASSWORD` e `COEVO_SEED_TOTP_SECRET` (overrides opcionais, só fora de produção, para a
+  senha/segredo TOTP de conveniência atribuídos a usuários seed — nunca aplicados automaticamente quando
+  `NODE_ENV=production`).
 - `public/app.js` não usa `localStorage` nem `sessionStorage` para nada relacionado a autenticação — o
   token de sessão vive apenas em `window.__coevoToken` (variável de memória do processo do navegador,
   perdida ao recarregar a página, sem persistência em disco do lado cliente).
@@ -220,8 +229,8 @@ que não se confunda "PR mergeado" com "plataforma pronta para produção":
 | Item | Severidade | Bloqueia merge deste PR? | Bloqueia homologação? | Bloqueia produção/go-live? |
 |---|---|---|---|---|
 | Persistência em `data/store.json` sem transação/concorrência real | Crítico | Não — fora do escopo desta rodada (ADR-001) | Não, para o piloto em ambiente controlado de um único processo | **Sim** — antes de dados reais em escala (§33.8 backup/restauração testados pressupõe persistência transacional confiável) |
-| Senha global (`COEVO_DEMO_PASSWORD`) | Alto | Não | Não, para homologação interna com usuários conhecidos | **Sim** — antes de qualquer usuário externo ao núcleo atual |
-| Código MFA global (`COEVO_MFA_CODE`) | Alto | Não | Não, mesma razão acima | **Sim** |
+| ~~Senha global (`COEVO_DEMO_PASSWORD`)~~ **FECHADO por H2** — senha individual por usuário (`docs/PRODUCTION_GATE.md`, seção 19; `docs/DECISIONS.md`, PROD-H2-01) | ~~Alto~~ Fechado | Não | Não | ~~Sim~~ Fechado |
+| ~~Código MFA global (`COEVO_MFA_CODE`)~~ **FECHADO por H2** — TOTP individual por usuário (mesma referência acima) | ~~Alto~~ Fechado | Não | Não | ~~Sim~~ Fechado |
 | 2 vulnerabilidades altas em `image-size` (via `pptxgenjs`) | Alto | Não — não é exercitado pelos testes desta rodada, e o CI adicionado reporta via `npm audit` sem bloquear | Não, se a exportação PPTX/PDF não for usada com dados sensíveis | **Sim**, antes de expor exportação de apresentações a dado sensível real |
 | E-mail duplicado `usr-diretoria`/`usr-juridico` | Médio | Não | Não — é limitação de cadastro conhecida e aceita pela gestão | Recomendado corrigir, mas não é um controle de segurança per se |
 | Ausência de rate limiting/CSRF/CSP/cabeçalhos adicionais | Alto | Não | Recomendado antes de expor a instância além da rede controlada de homologação | **Sim** |
@@ -241,8 +250,8 @@ testado nas seções acima.
 
 | Controle | Situação |
 |---|---|
-| Auth e sessões | Presente — corrigido nesta execução (MFA por papel) |
-| MFA para perfis privilegiados | Presente e corrigido nesta execução |
+| Auth e sessões | **Reforçado por H2** — credencial individual por usuário, sessão persistida (Postgres), revogação real (logout/logout-all/troca-reset de senha/inativação) |
+| MFA para perfis privilegiados | **Reforçado por H2** — TOTP individual (RFC 6238) por usuário, nunca ativo antes de confirmação, segredo cifrado em repouso |
 | Secrets fora do código | Presente — verificado nesta execução |
 | Service account por finalidade nos conectores | Presente para Monday (token único, finalidade de leitura jurídica) |
 | Menor privilégio nos conectores | Presente para Monday |
@@ -251,7 +260,7 @@ testado nas seções acima.
 | Logs sem dado bancário completo | Sem dado bancário no fluxo atual — nada a mascarar hoje |
 | IA sem permissão além da usuária | N/A — IA não implementada (ver `docs/AI_GOVERNANCE.md`) |
 | Automação dentro de alçada | N/A — nenhuma automação crítica implementada |
-| Revogação de sessão/usuário/credencial testada | **Gap** — não há endpoint de revogação explícita de sessão além da expiração por TTL |
+| Revogação de sessão/usuário/credencial testada | **FECHADO por H2** — `logout`/`logout-all` revogam no servidor; troca/reset de senha e inativação invalidam sessão imediatamente (`docs/PRODUCTION_GATE.md`, seção 19) |
 | Plano mínimo de resposta a incidentes | **Gap** — não existe ainda; recomendado antes de produção com dados reais em escala |
 | Retenção/hold definidos | **Gap** — não definido; depende de decisão de negócio por categoria de dado |
 | Backup e restauração testados | Parcial — mecanismo existe (`/api/backup`, `/api/backup/restore`) e foi validado isoladamente (ver `docs/SEGURANCA-CORRECOES.md`), mas não em ambiente de produção real |
@@ -370,3 +379,17 @@ em vez do blob JSONB — cobertos por testes de regressão dedicados
 destrutivo) — inativação continua sendo exclusivamente `deletedAt` (soft-delete), nunca remoção física.
 `email` de `app_users` continua sem constraint de unicidade (gap preexistente, documentado e não fechado
 por H1B — `docs/DECISIONS.md`, PROD-H1B-01, item 7). Gate como um todo permanece NO-GO.
+
+**H2 (autenticação individual, MFA individual e sessões persistentes) implementado — aguardando
+homologação** (`docs/DECISIONS.md`, PROD-H2-01; `docs/PRODUCTION_GATE.md`, seção 19): substitui
+integralmente a senha global (`COEVO_DEMO_PASSWORD` comparada diretamente), o código MFA global
+(`COEVO_MFA_CODE`) e a sessão em memória (`sessions = new Map()`) por senha individual (`crypto.scrypt`),
+MFA individual (TOTP/RFC 6238, segredo cifrado em repouso, nunca ativo antes de confirmação) e sessão
+persistida em `auth_sessions` (Postgres, token opaco cujo hash é o único valor gravado). Revogação real:
+logout, logout-all, troca/reset de senha e inativação (`deletedAt`) invalidam sessão(ões) imediatamente,
+sem depender do cliente descartar o token. Bloqueio por tentativas malsucedidas é por conta
+(`failed_login_count`/`locked_until`) — não é o rate limiting global/por IP de H3, que continua em
+aberto. Nenhum controle de autorização já auditado foi alterado: RBAC (`allowed()`/
+`allowedInDepartment()`/`allowedContent()`), segregação departamental, `scoped()` e "administrador
+técnico ≠ superusuário de conteúdo" permanecem exatamente como estavam — autenticação decide quem,
+autorização continua decidindo o quê. Gate como um todo permanece NO-GO.

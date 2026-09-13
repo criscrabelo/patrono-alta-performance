@@ -585,3 +585,60 @@ aqui; esta seção apenas consolida o estado de QA já registrado nas Fases 1–
   `tests/storage.test.js`/`tests/security-integration-postgres.test.js` rodando em paralelo no mesmo
   serviço `postgres:16`.
 - `npm audit`: inalterado (2 vulnerabilidades altas conhecidas, `image-size`/`pptxgenjs` — H9).
+
+## QA — Hardening H2 (autenticação individual, MFA individual e sessões persistentes)
+
+- **342 testes totais** com `TEST_DATABASE_URL` (319 do H1B + 23 novos em
+  `tests/h2-auth-sessions.test.js`), 0 falhando, sem remoção de nenhum teste anterior. As 3 suítes
+  pré-existentes que fazem login via HTTP (`security-integration.test.js`,
+  `security-integration-postgres.test.js`, `h1b-core-relational.test.js`) foram atualizadas para o novo
+  fluxo — `loginAs()` usa senha individual (via `authCrypto.verifyPassword`) e, quando MFA é exigido, um
+  código TOTP real calculado a partir do segredo fixo de desenvolvimento, contra o endpoint renomeado
+  `POST /api/auth/mfa/verify` — sem alterar o que cada teste efetivamente verifica.
+- Sem `TEST_DATABASE_URL`: comportamento inalterado (os testes específicos de Postgres continuam pulados
+  explicitamente, nunca fingindo cobertura).
+- Cobertura por categoria (`tests/h2-auth-sessions.test.js`, nomenclatura A–Z/restart/multi-instância):
+  - **A** (senha): correta aceita, incorreta e e-mail inexistente recebem o mesmo 401 genérico.
+  - **B** (hash nunca exposto): `GET /api/me` nunca devolve `passwordHash`/`mfaSecretEncrypted`; a coluna
+    `password_hash` no banco está sempre no formato `scrypt$...`, nunca a senha em texto puro.
+  - **C** (senha temporária): `temporaryPassword:true` restringe a conta a uma allowlist de autogestão
+    (`ACCOUNT_SETUP_REQUIRED`) até a troca de senha; a senha temporária não pode virar a senha nova.
+  - **D** (MFA individual): o segredo TOTP do usuário A nunca valida o código do usuário B; cada usuário
+    com MFA próprio loga corretamente com o próprio segredo.
+  - **E** (código/challenge inválido): código incorreto rejeitado sem emitir token; challenge expirado
+    rejeitado mesmo com código correto (expiração ajustada via SQL direto, já que o repository de
+    `auth_challenges` só persiste `used_at`/`attempts` em `update()` — `expires_at` é imutável após a
+    criação, por design).
+  - **F** (uso único do challenge): um challenge já confirmado não pode emitir uma segunda sessão.
+  - **G/H/I** (sessão persistida/hash/token bruto): `auth_sessions.token_hash` bate com o hash do token
+    devolvido ao cliente; nenhuma linha da tabela contém o token bruto em qualquer coluna.
+  - **J** (expiração): sessão expirada nega acesso (401) sem esperar logout.
+  - **K/L** (logout/logout-all): logout revoga só a sessão atual; logout-all revoga todas as sessões do
+    usuário, inclusive as emitidas por outros logins.
+  - **M/N** (troca/reset de senha revogam sessões): sessão emitida antes da troca/reset deixa de
+    funcionar (`credentials_version` divergente); a nova sessão emitida pela própria troca continua
+    válida; o token de reset é reaproveitado por SQL direto (o repository de `password_reset_tokens` só
+    persiste `used_at` em `update()` — `token_hash` é imutável pela ponte, por design) para exercitar o
+    fluxo completo sem depender de um canal de e-mail (fora de escopo desta rodada).
+  - **O** (`deletedAt`): usuário inativado perde acesso imediatamente, dentro da própria janela de
+    expiração original; não consegue iniciar nova sessão.
+  - **P** (`credentials_version`): sessão com versão divergente da do usuário é rejeitada.
+  - **Q/R** (bloqueio/desbloqueio): 5 tentativas malsucedidas bloqueiam a conta por um período; após o
+    período (simulado ajustando `locked_until` para o passado), o login volta a funcionar com a senha
+    correta.
+  - **S/T** (auditoria): `LOGIN_FAILURE`/`MFA_CHALLENGE`/`MFA_SUCCESS`/`LOGIN_SUCCESS`/`LOGOUT` presentes;
+    nenhum evento contém a senha em texto puro, o segredo MFA ou o hash do token de sessão.
+  - **U** (token de reset expirado): rejeitado mesmo dentro da janela de uso único.
+  - **Restart**: sessão emitida antes de um "restart" simulado (módulo `server.js`/`storage` recarregado
+    do zero, HTTP e pool de Postgres anteriores encerrados) continua válida depois — prova de que a
+    sessão nunca dependeu de estado em memória do processo.
+  - **Multi-instância**: duas instâncias independentes (dois módulos `server.js`/`storage` carregados
+    separadamente, cada uma com seu próprio Pool) compartilhando o MESMO Postgres — uma sessão criada
+    pela instância A é validada pela instância B; uma revogação feita na instância A reflete
+    IMEDIATAMENTE na instância B (sem esperar expiração), confirmando que a revogação é uma propriedade
+    do banco compartilhado, não do processo que a emitiu.
+- CI roda `tests/h2-auth-sessions.test.js` contra um banco Postgres **isolado**, criado e derrubado pelo
+  próprio arquivo de teste, no mesmo padrão de `tests/h1b-core-relational.test.js` — nunca colide com os
+  demais arquivos de teste rodando em paralelo no mesmo serviço `postgres:16`.
+- `npm audit`: inalterado (2 vulnerabilidades altas conhecidas, `image-size`/`pptxgenjs` — H9; não
+  corrigidas nesta rodada, deliberadamente fora do escopo de H2).

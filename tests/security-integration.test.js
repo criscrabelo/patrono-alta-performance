@@ -16,14 +16,21 @@ const assert = require('node:assert/strict');
 
 const TEST_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'patrono-integration-'));
 process.env.COEVO_DATA_DIR = TEST_DATA_DIR;
+// Sprint 2, Hardening H2: COEVO_DEMO_PASSWORD deixou de ser a senha global comparada no login — agora é
+// só a fonte da senha de desenvolvimento/teste que o backfill de migrateLegacyStore() usa para dar a
+// cada usuário legado (sem passwordHash próprio) uma senha individual utilizável nos testes.
+// COEVO_MFA_CODE foi retirado (o login não compara mais um código MFA global); MFA usa TOTP individual
+// real, com o mesmo segredo fixo de desenvolvimento (DEV_SEED_TOTP_SECRET) que o backfill atribui.
 process.env.COEVO_DEMO_PASSWORD = 'integration-test-password-0000000000';
-process.env.COEVO_MFA_CODE = '000000';
 process.env.COEVO_SESSION_MS = '300000';
+process.env.MFA_ENCRYPTION_KEY = process.env.MFA_ENCRYPTION_KEY || 'test-mfa-encryption-key-at-least-32-characters';
 process.env.NODE_ENV = 'test';
 delete process.env.MONDAY_TOKEN; // garante que nenhuma chamada real ao Monday seja tentada nos testes
 
 const { handler, readStore, writeStore } = require('../server');
 const { PROJECT_ID } = require('../project-service');
+const authCrypto = require('../auth/crypto');
+const DEV_SEED_TOTP_SECRET = process.env.COEVO_SEED_TOTP_SECRET || 'JBSWY3DPEHPK3PXP';
 
 let server;
 let baseUrl;
@@ -123,7 +130,8 @@ async function loginAs(email) {
   assert.equal(login.status, 200, `login deveria aceitar credenciais válidas para ${email}: ${JSON.stringify(login.body)}`);
   if (login.body.token) return login.body.token;
   assert.equal(login.body.mfaRequired, true);
-  const mfa = await api('POST', '/api/auth/mfa', { json: { challenge: login.body.challenge, code: process.env.COEVO_MFA_CODE } });
+  const code = authCrypto.totpAt(DEV_SEED_TOTP_SECRET, Date.now());
+  const mfa = await api('POST', '/api/auth/mfa/verify', { json: { challenge: login.body.challenge, code } });
   assert.equal(mfa.status, 200, `MFA deveria ser aceito para ${email}: ${JSON.stringify(mfa.body)}`);
   assert.ok(mfa.body.token);
   return mfa.body.token;
@@ -322,7 +330,7 @@ test('[HTTP] challenge de MFA não funciona como token de sessão', async () => 
 
 test('[HTTP] MFA com código incorreto é rejeitado e não emite token', async () => {
   const login = await api('POST', '/api/auth/login', { json: { email: EMAILS.liderJuridico, password: process.env.COEVO_DEMO_PASSWORD } });
-  const mfa = await api('POST', '/api/auth/mfa', { json: { challenge: login.body.challenge, code: '999999' } });
+  const mfa = await api('POST', '/api/auth/mfa/verify', { json: { challenge: login.body.challenge, code: '999999' } });
   assert.equal(mfa.status, 401);
   assert.equal(mfa.body.token, undefined);
 });
@@ -2194,8 +2202,12 @@ test('[HTTP] GET /api/my-week: diretoria só vê em Minha Semana os Legal Deadli
 });
 
 test('[HTTP] GET /api/my-week não cria nem altera nenhum registro (é uma view pura, chamadas repetidas são idempotentes)', async () => {
-  const before = JSON.stringify((await readStore()));
+  // Sprint 2, Hardening H2: o snapshot de comparação é tirado DEPOIS do login (não antes) — login em si
+  // agora legitimamente persiste estado (sessão em auth_sessions, lastLoginAt) por ser uma sessão real,
+  // não mais em memória; o que este teste continua garantindo é que a VIEW em si (GET /api/my-week) não
+  // persiste nada além disso.
   const token = await loginAs(EMAILS.responsavelAtivo);
+  const before = JSON.stringify((await readStore()));
   await api('GET', '/api/my-week', { token });
   await api('GET', '/api/my-week', { token });
   const after = JSON.stringify((await readStore()));

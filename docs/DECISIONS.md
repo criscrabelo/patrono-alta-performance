@@ -914,6 +914,87 @@ específico do H1B dentro do gate de produção já aberto.
 
 ---
 
+## 1.7. Hardening H2 — Decisão PROD-H2-01
+
+### PROD-H2-01 — Autenticação individual e sessões persistentes
+
+**Status: IMPLEMENTADO / AGUARDANDO HOMOLOGAÇÃO** (ver `docs/PRODUCTION_GATE.md`, seção 19, para o
+detalhamento técnico completo — esta decisão não o duplica, apenas registra o que foi decidido).
+
+**Conteúdo da decisão:**
+
+1. **Toda credencial passa a ser individual por usuário.** Fica proibido, a partir desta decisão: senha
+   compartilhada, código MFA global/compartilhado, segredo de usuário global, e sessão que viva apenas em
+   memória do processo. O modelo temporário descrito em PG-04/PG-05/PG-06/PG-07/PG-08/PG-09
+   (`docs/PRODUCTION_GATE.md`) é substituído integralmente, não coexiste com o novo modelo.
+2. **`app_users` continua sendo a única tabela de usuários** (reaproveitada de H1B, nunca duplicada) —
+   H2 acrescenta apenas colunas, por migração aditiva (`migrations/005_h2_auth_sessions.sql`,
+   `ADD COLUMN IF NOT EXISTS`, nunca remove/renomeia coluna existente, preserva todo dado já migrado por
+   H1B): `password_hash`, `password_changed_at`, `mfa_enabled`, `mfa_method`, `mfa_secret_encrypted`,
+   `mfa_enrolled_at`, `failed_login_count`, `locked_until`, `last_login_at`, `credentials_version`.
+3. **Senha: `crypto.scrypt`** (Node built-in), substituição deliberada de bcrypt/Argon2id — nenhuma das
+   duas era dependência já presente no projeto, e ambas exigem binding nativo; `scrypt` é um KDF de
+   memória intensiva igualmente aceito pelo OWASP, sem novo pacote. Nunca texto puro, nunca logada, nunca
+   devolvida por nenhuma rota. Política mínima (comprimento ≥ 10, rejeita repetição/sequência trivial),
+   sem rotação periódica obrigatória sem causa (só: senha temporária, reset, comprometimento, decisão
+   administrativa).
+4. **`temporaryPassword` passa a ter efeito real** (antes de H2 era um campo decorativo, nunca lido em
+   nenhuma rota) — força a rota de troca de senha antes de qualquer conteúdo de negócio; a senha
+   temporária não pode ser reaproveitada como senha permanente.
+5. **Reset de senha**: token opaco (CSPRNG) de uso único, hash apenas persistido (`password_reset_tokens`
+   — nunca o token bruto), com expiração; conclui invalidando todas as sessões anteriores do usuário. O
+   envio por e-mail está fora de escopo desta rodada (sem provedor de e-mail integrado no repositório) —
+   o endpoint de geração/consumo do token existe e está pronto para uma entrega futura de e-mail.
+6. **MFA: TOTP individual (RFC 6238)**, implementado com `node:crypto` — algoritmo público e padronizado,
+   não criptografia caseira; escolhido sobre SMS/e-mail para não depender de um provedor externo (que
+   ficaria fora do escopo homologado desta rodada) e sobre uma biblioteca de terceiros para manter o
+   padrão de dependência mínima já estabelecido (H1/H9). Enrolamento em duas etapas — o segredo só é
+   ativado (`mfa_enabled:true`) após confirmação por um código válido, nunca antes. Segredo cifrado em
+   repouso (AES-256-GCM, `MFA_ENCRYPTION_KEY`, mesmo padrão de `COEVO_BACKUP_KEY`) — mecanismo de chave
+   já viável no repositório, portanto esta decisão NÃO precisou invocar a cláusula de "documentar a
+   decisão pendente em vez de gravar o segredo em texto puro"; `encryptSecret()`/`decryptSecret()` falham
+   explicitamente (fail-fast) se a chave estiver ausente/curta.
+7. **MFA obrigatório por papel: reaproveita `requireMfa()` já homologado** (diretoria/administrador/
+   lider) — não introduz uma nova política de negócio sem decisão prévia; esta decisão não precisou
+   "parar e reportar" por já existir e coincidir com a preferência declarada para esta rodada.
+8. **Sessão: token opaco (CSPRNG) persistido por hash** (`auth_sessions.token_hash`, SHA-256 — nunca um
+   KDF lento, dado que o token já tem 256 bits de entropia própria, ao contrário de uma senha escolhida
+   por humano) — substitui `sessions = new Map()`. Expiração absoluta; sem idle timeout nesta rodada
+   (simplificação documentada, item opcional do escopo original). `credentials_version`, copiado do
+   usuário no momento da emissão da sessão, é o mecanismo de revogação cross-cutting: uma troca/reset de
+   senha incrementa a versão do usuário, invalidando toda sessão emitida antes, sem precisar apagar linha
+   por linha.
+9. **Revogação real**: `POST /api/auth/logout` revoga a sessão atual; `POST /api/auth/logout-all` revoga
+   todas as sessões do usuário; troca/reset de senha e inativação (`deletedAt`) invalidam sessão(ões)
+   imediatamente — nunca depende do cliente "esquecer" o token.
+10. **Bloqueio por tentativas malsucedidas é POR CONTA, não é o rate limiting global de H3** —
+    `failed_login_count`/`locked_until` (5 tentativas, bloqueio de 15 minutos). PG-10/PG-11 (rate
+    limiting por IP/global) permanecem abertos, fora de escopo desta decisão.
+11. **Sessões/challenges/tokens de reset reaproveitam a MESMA ponte relacional de H1B**
+    (`storage/index.js`) — três novas coleções (`store.authSessions`/`store.authChallenges`/
+    `store.passwordResetTokens`) hidratadas/diferenciadas pelo mesmo mecanismo já usado por
+    users/legalProcesses/legalDeadlines/audit, dentro da mesma transação Postgres — não uma arquitetura
+    paralela de acesso direto ao pool a partir de `server.js`.
+12. **Fail-closed**: `storage/postgres-store.js` passa a exigir a migration `005_h2_auth_sessions` e as 3
+    tabelas novas — sem elas, `schemaReady:false` e `init()` falha explicitamente. Produção nunca cai de
+    volta para sessão em memória/senha global/MFA global como alternativa insegura.
+13. **Seed/desenvolvimento**: fora de produção, usuários seed e usuários legados de teste recebem senha/
+    MFA de conveniência (`temporaryPassword:false`, pronta para uso imediato) via `seedAuthFields()`/
+    `migrateLegacyStore()` — em produção (`NODE_ENV=production`), nenhuma credencial é atribuída
+    automaticamente; o usuário seed nasce sem senha/MFA utilizáveis, exigindo o fluxo de reset de senha
+    administrado antes do primeiro acesso.
+14. **RBAC/`scoped()`/`allowedContent()`/segregação departamental e "administrador técnico ≠
+    superusuário de conteúdo" permanecem inalterados** — autenticação decide quem, autorização continua
+    decidindo o quê. Nenhuma rota de autorização foi tocada por esta decisão.
+15. **Esta decisão não fecha o Gate de Produção nem declara H2 integralmente concluído** — apenas os
+    critérios PG-04 a PG-09 de `docs/PRODUCTION_GATE.md` são fechados (ver seção 5/16). O gate como um
+    todo permanece **NO-GO PARA PRODUÇÃO**. H3–H11 não foram alterados por esta decisão.
+
+Esta decisão não altera D1/D4/D2-CLOSE/PROD-GATE-01/PROD-H1-01/PROD-H1B-01 já homologadas — apenas
+registra o avanço específico do H2 dentro do gate de produção já aberto.
+
+---
+
 ## 2. ADRs de Engenharia — Fase 0 (Sprint 1)
 
 Decisões técnicas locais e reversíveis, permitidas pela v1.3 (§27, linhas D8/D9: "Não bloqueia decisão
