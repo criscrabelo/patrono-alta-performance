@@ -101,6 +101,16 @@ if (!TEST_DATABASE_URL) {
     await dropIsolatedDatabase();
   });
 
+  // Sprint 2, Hardening H3 (docs/DECISIONS.md, PROD-H3-01): este arquivo faz login repetidas vezes por
+  // identidade/IP (uso legítimo de teste, não abuso) — zera os buckets de rate limit antes de cada
+  // teste para não interferir com a semântica H1B sendo validada aqui (H3 tem sua própria suíte
+  // dedicada em tests/h3-rate-limiting.test.js).
+  test.beforeEach(async () => {
+    const pool = new Pool({ connectionString: isolatedDatabaseUrl });
+    await pool.query('DELETE FROM rate_limit_buckets');
+    await pool.end();
+  });
+
   async function api(method, pathname, { token, json } = {}) {
     const res = await fetch(`${baseUrl}${pathname}`, {
       method,

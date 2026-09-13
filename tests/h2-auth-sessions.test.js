@@ -47,6 +47,12 @@ if (!TEST_DATABASE_URL) {
   function loadFreshServerModule() {
     delete require.cache[require.resolve('../server')];
     delete require.cache[require.resolve('../storage')];
+    // Sprint 2, Hardening H3 (docs/DECISIONS.md, PROD-H3-01): auth/rate-limit.js faz
+    // `const storage = require('../storage')` uma única vez, na primeira vez que é carregado — sem
+    // limpar seu cache aqui, ele mantém uma referência ao módulo/pool ANTIGO (já fechado por
+    // storage.close() acima), e toda checagem de rate limit passa a falhar (fail-closed → 429
+    // permanente) para qualquer teste que rode depois de um "restart"/nova instância neste arquivo.
+    delete require.cache[require.resolve('../auth/rate-limit')];
     return require('../server');
   }
 
@@ -136,6 +142,17 @@ if (!TEST_DATABASE_URL) {
     await new Promise(resolve => server.close(resolve));
     await storage.close();
     await dropIsolatedDatabase();
+  });
+
+  // Sprint 2, Hardening H3 (docs/DECISIONS.md, PROD-H3-01): estes testes exercitam login/MFA/forgot-
+  // password/reset-token repetidas vezes por identidade/IP — comportamento legítimo de teste, não abuso
+  // — mas cairia nos mesmos buckets de rate limit que H3 introduziu. H3 tem sua PRÓPRIA suíte dedicada
+  // (tests/h3-rate-limiting.test.js); aqui, zera os buckets antes de cada teste para que este arquivo
+  // continue validando exclusivamente a semântica de H2, sem interferência cruzada entre casos de teste.
+  test.beforeEach(async () => {
+    const pool = new Pool({ connectionString: isolatedDatabaseUrl });
+    await pool.query('DELETE FROM rate_limit_buckets');
+    await pool.end();
   });
 
   // --- A. senha correta/incorreta -----------------------------------------------------------------

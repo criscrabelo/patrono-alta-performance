@@ -220,9 +220,18 @@ async function healthcheck() {
 }
 async function close() { if (backend) await backend.close(); }
 function mode() { return backend ? backend.mode : null; }
+// Sprint 2, Hardening H3 (docs/PRODUCTION_GATE.md; docs/DECISIONS.md, PROD-H3-01): rate limiting
+// precisa de upsert atômico por linha (compare-and-increment sob concorrência real), não do CAS de
+// documento inteiro que a ponte relacional usa para users/legalProcesses/legalDeadlines/audit/sessões.
+// Por isso `auth/rate-limit.js` fala com o pool Postgres DIRETAMENTE (nunca por dentro de
+// readStore()/writeStore()) — este getter é o único ponto de acesso exposto para isso, e só retorna algo
+// quando o backend ativo é PostgreSQL (mode:'postgres'); no fallback local (JSON, só fora de produção),
+// retorna `null` e o chamador desativa o rate limiting nesse modo (nunca inventa uma semântica paralela
+// em memória com garantias diferentes do runtime real — ver docs/SECURITY.md).
+function getPool() { return isRelationalBridgeActive() ? backend.getPool() : null; }
 // Exposto só para os testes poderem reconfigurar o backend entre suites isoladas (COEVO_DATA_DIR já
 // cumpre esse papel para o modo JSON; suites que testam o modo Postgres chamam configure() de novo
 // apontando para um DATABASE_URL de teste isolado).
 function reset() { backend = null; }
 
-module.exports = { configure, init, readStore, writeStore, healthcheck, close, mode, reset };
+module.exports = { configure, init, readStore, writeStore, healthcheck, close, mode, reset, getPool };

@@ -467,3 +467,40 @@ com sua própria auditoria.
 `storage/postgres-store.js` (`REQUIRED_MIGRATIONS`) passa a exigir também `006_h2_unique_login_identity`
 — mesma disciplina fail-closed: schema sem essa migration falha explicitamente em `init()`/
 `healthcheck()`.
+
+## Hardening H3 — rate limiting global e proteção contra abuso
+(docs/PRODUCTION_GATE.md, docs/DECISIONS.md PROD-H3-01)
+
+**Uma tabela nova, aditiva** (`migrations/007_h3_rate_limiting.sql` — não altera 001-006):
+
+- **`rate_limit_buckets`** — `bucket_key` (`text PRIMARY KEY`, sempre um HMAC-SHA256 derivado — nunca o
+  IP/e-mail/identificador/token em texto puro), `scope` (rótulo da política, ex.: `login:combined`,
+  indexado para inspeção operacional), `window_started_at` (início da janela fixa atual),
+  `count` (tentativas na janela atual), `blocked_until` (nulável — instante em que a janela/bloqueio
+  atual termina, só preenchido quando `count` excede o limite da política), `updated_at` (usado pela
+  limpeza oportunística).
+
+**Deliberadamente FORA da ponte relacional de `storage/index.js`** (que hidrata/persiste
+`users`/`legalProcesses`/`legalDeadlines`/`audit`/`authSessions`/`authChallenges`/
+`passwordResetTokens` com CAS por versão do DOCUMENTO inteiro dentro de uma transação) —
+`storage/repositories/rate-limits-repository.js` acessa o pool Postgres diretamente (nova função
+`storage.getPool()`), porque um incremento atômico por LINHA sob concorrência real (duas requisições
+simultâneas no mesmo bucket nunca podem ambas ler `count=7` e gravar `count=8` quando o limite seria 8)
+exige uma única instrução SQL atômica, não uma comparação de versão de documento inteiro. Não é uma
+segunda coleção do `store` — `rate_limit_buckets` nunca aparece em `readStore()`/`writeStore()`.
+
+`bucket_key` é sempre derivado por `hashIdentifier(scope, value)`/`hashIp(ip, secret)` (HMAC-SHA256,
+`RATE_LIMIT_HMAC_KEY`) — nunca o IP, e-mail, `login_identifier`, `userId`, challenge id ou token brutos
+persistidos (minimização LGPD; `userId`/challenge id não são dado pessoal sensível em si, mas o mesmo
+mecanismo de derivação é reaproveitado uniformemente para todas as chaves de bucket, em vez de uma regra
+por tipo de valor).
+
+**Nenhum modelo de dados de negócio foi alterado.** RBAC, `scoped()`, segregação departamental,
+`app_users`/`auth_sessions`/`auth_challenges`/`password_reset_tokens` (H2) e as demais entidades
+permanecem exatamente como estavam — H3 é estritamente proteção contra abuso, nunca autenticação nem
+autorização (`failed_login_count`/`locked_until` de H2, o bloqueio POR CONTA, continua intocado; H3 é a
+camada complementar de proteção por ORIGEM/abuso distribuído).
+
+**`storage/postgres-store.js` (`REQUIRED_MIGRATIONS`/`REQUIRED_CORE_TABLES`) exige a migration
+`007_h3_rate_limiting` e a tabela `rate_limit_buckets`** — mesma disciplina fail-closed de H1B/H2: schema
+incompatível/ausente falha explicitamente em `init()`/`healthcheck()`.

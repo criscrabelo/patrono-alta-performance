@@ -233,7 +233,7 @@ que não se confunda "PR mergeado" com "plataforma pronta para produção":
 | ~~Código MFA global (`COEVO_MFA_CODE`)~~ **FECHADO por H2** — TOTP individual por usuário (mesma referência acima) | ~~Alto~~ Fechado | Não | Não | ~~Sim~~ Fechado |
 | 2 vulnerabilidades altas em `image-size` (via `pptxgenjs`) | Alto | Não — não é exercitado pelos testes desta rodada, e o CI adicionado reporta via `npm audit` sem bloquear | Não, se a exportação PPTX/PDF não for usada com dados sensíveis | **Sim**, antes de expor exportação de apresentações a dado sensível real |
 | E-mail duplicado `usr-diretoria`/`usr-juridico` | Médio | Não | Não — é limitação de cadastro conhecida e aceita pela gestão | Recomendado corrigir, mas não é um controle de segurança per se |
-| Ausência de rate limiting/CSRF/CSP/cabeçalhos adicionais | Alto | Não | Recomendado antes de expor a instância além da rede controlada de homologação | **Sim** |
+| ~~Ausência de rate limiting~~ **FECHADO por H3** (rotas de autenticação sensíveis — login/MFA/forgot-reset-password/reset-token administrativo, ver `docs/PRODUCTION_GATE.md` seção 20); CSRF/CSP/cabeçalhos adicionais continuam em aberto | ~~Alto~~ Fechado (rate limiting) / Alto (CSRF/CSP/headers) | Não | Recomendado antes de expor a instância além da rede controlada de homologação | ~~Sim~~ Fechado (rate limiting) / **Sim** (CSRF/CSP/headers, H4) |
 | Auditoria no mesmo arquivo mutável, sem append-only/assinatura | Médio | Não | Não | Recomendado antes de auditoria ser usada como evidência formal/legal |
 | Revogação de sessão/usuário/credencial (fora do TTL) | Alto | Não | Recomendado | **Sim** |
 | Plano mínimo de resposta a incidentes | Alto (operacional) | Não | Não | **Sim**, antes de dados reais em escala (§33.11) |
@@ -252,6 +252,7 @@ testado nas seções acima.
 |---|---|
 | Auth e sessões | **Reforçado por H2** — credencial individual por usuário, sessão persistida (Postgres), revogação real (logout/logout-all/troca-reset de senha/inativação) |
 | MFA para perfis privilegiados | **Reforçado por H2** — TOTP individual (RFC 6238) por usuário, nunca ativo antes de confirmação, segredo cifrado em repouso |
+| Rate limiting em rotas sensíveis | **FECHADO por H3** — distribuído via PostgreSQL (sobrevive a restart/múltiplas instâncias), por IP/identidade/combinado, cobrindo login/MFA/forgot-reset-password/reset-token administrativo/enroll-confirm-disable de MFA/change-password/logout-all/aprovação de cadastro (`docs/PRODUCTION_GATE.md`, seção 20) |
 | Secrets fora do código | Presente — verificado nesta execução |
 | Service account por finalidade nos conectores | Presente para Monday (token único, finalidade de leitura jurídica) |
 | Menor privilégio nos conectores | Presente para Monday |
@@ -411,3 +412,20 @@ MFA);
 conta existe e está bloqueada) e passa a responder o mesmo `401` de qualquer outra falha de login;
 (5) **TOTP verificado em teste automatizado** contra os vetores oficiais do RFC 6238. Nenhum controle
 de autorização foi alterado. Gate como um todo permanece NO-GO.
+
+**H3 (rate limiting global e proteção contra abuso distribuída) implementado — aguardando
+homologação** (`docs/DECISIONS.md`, PROD-H3-01; `docs/PRODUCTION_GATE.md`, seção 20): fecha PG-10/PG-11.
+Proteção distribuída via PostgreSQL (nova tabela `rate_limit_buckets`, migração aditiva
+`007_h3_rate_limiting.sql`) contra força bruta/abuso por IP, por identidade resolvida antes de
+autenticar, ou pela combinação dos dois — nunca um limitador em memória (`new Map()`), que perderia
+estado a cada restart e não funcionaria com múltiplas instâncias. Camada isolada
+(`auth/rate-limit.js`), deliberadamente fora da ponte relacional de H1B/H2 — acesso direto ao pool
+Postgres, porque o incremento atômico por linha sob concorrência exige uma única instrução SQL, não uma
+CAS de documento inteiro. `X-Forwarded-For` nunca confiado sem uma política explícita de proxy
+confiável (`TRUST_PROXY_HOPS`); toda chave de bucket é derivada por HMAC-SHA256
+(`RATE_LIMIT_HMAC_KEY`, mesmo padrão de `MFA_ENCRYPTION_KEY`) — nunca IP/e-mail/token em texto puro
+persistido. Rotas protegidas: login, MFA verify, forgot-password, reset-password, reset-token
+administrativo, MFA enroll/confirm/disable, change-password, logout-all, aprovação de cadastro.
+Resposta 429 genérica, sem revelar contador/existência de conta/motivo interno. Complementar ao
+bloqueio POR CONTA já fechado por H2 (`failed_login_count`/`locked_until`) — nenhuma das duas camadas
+substitui a outra. Nenhum controle de autorização foi alterado. Gate como um todo permanece NO-GO.

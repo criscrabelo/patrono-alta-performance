@@ -1045,6 +1045,115 @@ original acima — os complementa.
     considerado tecnicamente correto para revisão. O gate como um todo permanece **NO-GO PARA
     PRODUÇÃO**. H3–H11 não foram alterados.
 
+## 1.8. Hardening H3 — Decisão PROD-H3-01
+
+### PROD-H3-01 — Rate limiting global e proteção contra abuso distribuída
+
+**Status: IMPLEMENTADO / AGUARDANDO HOMOLOGAÇÃO** (ver `docs/PRODUCTION_GATE.md`, seção 20, para o
+detalhamento técnico completo — esta decisão não o duplica, apenas registra o que foi decidido).
+
+**Conteúdo da decisão:**
+
+1. **Limitador nunca em memória (`new Map()`) como fonte canônica.** Um limitador em processo perde todo
+   estado a cada restart e não funciona com múltiplas instâncias — permitiria bypass trivial alternando
+   processo/instância, exatamente o vetor de abuso que H3 existe para fechar. Estado compartilhado via
+   **PostgreSQL** (preferência explícita do escopo desta rodada sobre Redis — nenhuma dependência nova
+   adicionada).
+2. **Nova tabela `rate_limit_buckets`** (`migrations/007_h3_rate_limiting.sql`, aditiva — não altera
+   001-006): `bucket_key` (sempre um HMAC-SHA256 derivado, nunca o dado bruto), `scope`,
+   `window_started_at`, `count`, `blocked_until`, `updated_at`.
+3. **Camada isolada, deliberadamente FORA da ponte relacional H1B/H2** (`storage/index.js`, que faz CAS
+   por versão do DOCUMENTO inteiro) — `auth/rate-limit.js` e
+   `storage/repositories/rate-limits-repository.js` acessam o pool Postgres diretamente (nova função
+   `storage.getPool()`). Um incremento atômico por LINHA sob concorrência real (duas requisições
+   simultâneas no mesmo bucket nunca podem ambas ler `count=7` e gravar `count=8` quando o limite seria
+   8) exige uma única instrução SQL atômica (`INSERT ... ON CONFLICT DO UPDATE`, computando também
+   `blocked_until` no mesmo `SET` — nunca uma segunda consulta à tabela dentro do mesmo comando, que sob
+   o snapshot de uma CTE gravável do Postgres não enxergaria a linha recém-inserida na primeira gravação
+   de uma chave nova), sem transação explícita nem lock manual — nenhuma lógica de limite espalhada
+   manualmente pelas rotas de `server.js`.
+4. **Janela fixa determinística** — cada linha representa uma janela ativa por `bucket_key`; a mesma
+   instrução SQL reinicia a janela (count=1) se expirada, ou incrementa, sempre usando `now()` do
+   servidor Postgres (nunca um timestamp fornecido pelo cliente). Preferida sobre uma janela deslizante
+   ou um algoritmo de token bucket mais elaborado — atende ao pedido explícito de não implementar um
+   algoritmo excessivamente complexo, mantendo garantia real de atomicidade sob concorrência.
+5. **Resolução segura de IP do cliente** (`auth/client-ip.js`, `resolveClientIp()`) — `X-Forwarded-For`
+   NUNCA é confiado diretamente (forjável por qualquer requisição que fale direto com a aplicação).
+   Política explícita via `TRUST_PROXY_HOPS` (mesmo modelo numérico do `trust proxy` do Express/nginx):
+   `0` (padrão) usa sempre `req.socket.remoteAddress`, ignorando XFF por completo; `N >= 1` resolve
+   deterministicamente a entrada `chain.length - 1 - N` da cadeia — nunca a primeira entrada da
+   esquerda (forjável por um atacante sem proxy nenhum), nunca escolhida arbitrariamente por uma cadeia
+   maior ou menor que o esperado. IPv4-mapped IPv6 (`::ffff:1.2.3.4`) é normalizado para não contar como
+   duas identidades diferentes. IP nunca é exposto em resposta HTTP.
+6. **Toda chave de bucket é derivada (HMAC-SHA256, `RATE_LIMIT_HMAC_KEY`), nunca o dado bruto
+   persistido** — minimização LGPD (item 30 do escopo): IP, e-mail/`login_identifier`, challenge id,
+   `userId` e token de reset são sempre hasheados antes de virar `bucket_key`. Nunca senha, OTP, token de
+   reset ou segredo MFA em qualquer bucket. `RATE_LIMIT_HMAC_KEY` segue exatamente o mesmo padrão de
+   `MFA_ENCRYPTION_KEY` (PROD-H2-01): obrigatória (≥32 caracteres) em produção
+   (`validateAuthRuntimeConfig()`, fail-fast no boot), cai para um valor fixo de desenvolvimento fora de
+   produção.
+7. **Buckets avaliados e política inicial conservadora** (centralizada em `POLICIES`, nunca números
+   soltos espalhados pelas rotas): login por IP (30/10min), por identidade (10/10min) e por IP+identidade
+   combinado (8/10min) — um atacante não pode testar muitas senhas para uma conta trocando de IP, nem
+   muitas contas a partir de um IP, nem escapar alternando só uma das duas dimensões. MFA verify por IP
+   (30/10min) e por challenge (10/10min) — o `attempts` já existente por challenge (H2) é preservado
+   integralmente; H3 acrescenta a proteção por ORIGEM por cima. Forgot-password por IP (10/15min) e por
+   identidade derivada do e-mail (3/15min) — mesmo com resposta sempre genérica, o endpoint pode ser
+   abusado para gerar tokens em massa. Reset-password por IP (10/15min) e por hash do token apresentado
+   (5/15min) — nunca o token bruto como chave persistida. Reset-token administrativo por operador
+   (10/15min) e por usuário-alvo (3/15min) — nunca permite geração em massa de tokens para o mesmo
+   alvo. Também avaliados e protegidos: change-password, logout-all, mfa/enroll, mfa/confirm,
+   mfa/disable, aprovação de cadastro — todos por usuário autenticado (`userId`), nunca só por IP. Nenhum
+   conflito com regra de negócio existente foi identificado nesta rodada; caso surja em homologação, a
+   política é ajustada e registrada aqui, nunca imposta silenciosamente por cima de uma regra já
+   homologada.
+8. **Resposta 429 genérica** ("Muitas tentativas. Tente novamente mais tarde.") em todo bloqueio — nunca
+   revela o contador, se a identidade existe, o limite interno específico ou o motivo exato do bloqueio.
+   `Retry-After` refletindo o bloqueio real quando disponível. Nenhum pacote completo de cabeçalhos de
+   rate limit (`X-RateLimit-*`) foi adicionado — fica para H4, para não misturar hardening HTTP geral
+   nesta rodada.
+9. **Fail-closed controlado.** Se a consulta ao backend Postgres do limitador falhar (conexão caiu,
+   timeout), a rota de autenticação responde 429 (bloqueado) com um `Retry-After` curto e fixo — nunca
+   permite tentativas ilimitadas por uma falha de infraestrutura, e nunca derruba a aplicação inteira por
+   uma falha pontual do limitador.
+10. **Limpeza oportunística** (baixa probabilidade a cada consumo real) remove linhas cuja janela/
+    bloqueio expiraram há mais tempo do que qualquer janela configurada precisaria manter — nunca exige
+    um cron externo obrigatório, nunca cresce indefinidamente.
+11. **Fora de produção, o fallback JSON desativa H3 por completo** (decisão explícita — alternativa B do
+    item 47 do escopo: "produção exige PostgreSQL; dev/test pode usar implementação local claramente
+    marcada como não production-grade" foi simplificada para "H3 fica inerte fora do PostgreSQL", em vez
+    de construir um segundo limitador em memória com garantias diferentes do runtime real de produção).
+    `rateLimit.backendAvailable()` verifica `storage.mode() === 'postgres' && storage.getPool() != null`;
+    quando falso, toda checagem retorna `allowed:true` — nunca contamina produção, que já exige
+    PostgreSQL por fail-fast desde H1A.
+12. **Fail-closed em produção**: `storage/postgres-store.js` (`REQUIRED_MIGRATIONS`/
+    `REQUIRED_CORE_TABLES`) passa a exigir a migration `007_h3_rate_limiting` e a tabela
+    `rate_limit_buckets` — sem elas, `schemaReady:false` e `init()` falha explicitamente, nunca cai
+    silenciosamente para um limitador em memória.
+13. **H2 (`failed_login_count`/`locked_until`, bloqueio POR CONTA) permanece completamente intocado** —
+    H3 é a camada COMPLEMENTAR de proteção por ORIGEM/abuso distribuído (IP, identidade resolvida antes
+    de autenticar, ou a combinação dos dois); nenhuma das duas substitui a outra.
+14. **Auditoria de rate limit não registrada como evento próprio nesta rodada** — os eventos de
+    auditoria já existentes (`LOGIN_FAILURE`, `MFA_FAILURE`, etc.) continuam sendo a fonte de auditoria
+    de negócio; um bloqueio de rate limit em si é observável operacionalmente pela própria tabela
+    `rate_limit_buckets` (nunca exposta por nenhuma rota) e pela resposta HTTP 429, sem duplicar em
+    `store.audit` um evento que não é uma ação de negócio de um usuário identificado.
+15. **Correção incidental descoberta durante a implementação, corrigida na mesma rodada**: o handler de
+    login e de verificação de MFA usavam `writeStore()` diretamente (em vez de `commitStore()`) no
+    caminho de senha/código incorreto — sob concorrência real contra a MESMA conta (exatamente o cenário
+    que o teste de concorrência de H3 exercita), um `StoreConflictError` não tratado nesse ponto virava
+    uma rejeição de promise não capturada pelo `try/catch` do roteador (que não alcança um `return
+    promise` sem `await`), deixando a requisição sem resposta indefinidamente em vez de devolver
+    401/409. Corrigido para usar `commitStore()` (mesma disciplina já aplicada em todas as demais rotas
+    de mutação) nos dois pontos afetados — nenhuma outra rota tinha esse padrão.
+16. **Esta decisão não fecha o Gate de Produção nem declara H3 integralmente concluído** — apenas os
+    critérios PG-10 (fração de rate limiting por IP/global) e PG-11 de `docs/PRODUCTION_GATE.md` são
+    fechados (ver seção 20). O gate como um todo permanece **NO-GO PARA PRODUÇÃO**. H4–H11 não foram
+    alterados por esta decisão.
+
+Esta decisão não altera D1/D4/D2-CLOSE/PROD-GATE-01/PROD-H1-01/PROD-H1B-01/PROD-H2-01 já homologadas —
+apenas registra o avanço específico do H3 dentro do gate de produção já aberto.
+
 ---
 
 ## 2. ADRs de Engenharia — Fase 0 (Sprint 1)

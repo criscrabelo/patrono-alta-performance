@@ -98,8 +98,13 @@ test('MFA_ENCRYPTION_KEY (H2, revisão pós-PR #13): fail-fast em produção, de
   const { validateAuthRuntimeConfig } = require('../server');
   const originalEnv = process.env.NODE_ENV;
   const originalKey = process.env.MFA_ENCRYPTION_KEY;
+  // H3 (docs/DECISIONS.md, PROD-H3-01): validateAuthRuntimeConfig() também exige RATE_LIMIT_HMAC_KEY em
+  // produção — fixada aqui com um valor válido para que este teste continue isolando especificamente o
+  // comportamento de MFA_ENCRYPTION_KEY, sem falhar por causa da checagem irmã.
+  const originalRateLimitKey = process.env.RATE_LIMIT_HMAC_KEY;
   try {
     process.env.NODE_ENV = 'production';
+    process.env.RATE_LIMIT_HMAC_KEY = 'chave-de-producao-valida-com-32-caracteres-ou-mais';
     delete process.env.MFA_ENCRYPTION_KEY;
     assert.throws(() => validateAuthRuntimeConfig(), /MFA_ENCRYPTION_KEY/, 'produção sem a chave deve falhar explicitamente antes de escutar a porta');
 
@@ -115,6 +120,35 @@ test('MFA_ENCRYPTION_KEY (H2, revisão pós-PR #13): fail-fast em produção, de
   } finally {
     process.env.NODE_ENV = originalEnv;
     if (originalKey === undefined) delete process.env.MFA_ENCRYPTION_KEY; else process.env.MFA_ENCRYPTION_KEY = originalKey;
+    if (originalRateLimitKey === undefined) delete process.env.RATE_LIMIT_HMAC_KEY; else process.env.RATE_LIMIT_HMAC_KEY = originalRateLimitKey;
+  }
+});
+test('RATE_LIMIT_HMAC_KEY (H3, docs/DECISIONS.md PROD-H3-01): fail-fast em produção, degradação graciosa fora dela', () => {
+  const { validateAuthRuntimeConfig } = require('../server');
+  const originalEnv = process.env.NODE_ENV;
+  const originalKey = process.env.RATE_LIMIT_HMAC_KEY;
+  // Mesma disciplina do teste irmão acima: fixa MFA_ENCRYPTION_KEY com um valor válido para isolar
+  // especificamente o comportamento de RATE_LIMIT_HMAC_KEY.
+  const originalMfaKey = process.env.MFA_ENCRYPTION_KEY;
+  try {
+    process.env.NODE_ENV = 'production';
+    process.env.MFA_ENCRYPTION_KEY = 'chave-de-producao-valida-com-32-caracteres-ou-mais';
+    delete process.env.RATE_LIMIT_HMAC_KEY;
+    assert.throws(() => validateAuthRuntimeConfig(), /RATE_LIMIT_HMAC_KEY/, 'produção sem a chave deve falhar explicitamente antes de escutar a porta');
+
+    process.env.RATE_LIMIT_HMAC_KEY = 'curta-demais';
+    assert.throws(() => validateAuthRuntimeConfig(), /RATE_LIMIT_HMAC_KEY/, 'produção com chave curta (<32 caracteres) deve falhar explicitamente, igual à ausência');
+
+    process.env.RATE_LIMIT_HMAC_KEY = 'chave-de-producao-valida-com-32-caracteres-ou-mais';
+    assert.doesNotThrow(() => validateAuthRuntimeConfig(), 'produção com uma chave válida (>=32 caracteres) deve aceitar a configuração normalmente');
+
+    process.env.NODE_ENV = 'test';
+    delete process.env.RATE_LIMIT_HMAC_KEY;
+    assert.doesNotThrow(() => validateAuthRuntimeConfig(), 'fora de produção, a ausência da chave nunca impede o boot/carregamento do módulo');
+  } finally {
+    process.env.NODE_ENV = originalEnv;
+    if (originalKey === undefined) delete process.env.RATE_LIMIT_HMAC_KEY; else process.env.RATE_LIMIT_HMAC_KEY = originalKey;
+    if (originalMfaKey === undefined) delete process.env.MFA_ENCRYPTION_KEY; else process.env.MFA_ENCRYPTION_KEY = originalMfaKey;
   }
 });
 test('processos e demais pastas oferecem filtros múltiplos e títulos do Monday', () => {
@@ -1225,4 +1259,40 @@ test('server.js não contém nenhum método de escrita do Google Calendar (event
   for (const writeMethod of ['events.insert', 'events.update', 'events.patch', 'events.delete', 'calendar.events.insert', 'calendar.events.delete']) {
     assert.ok(!source.includes(writeMethod), `server.js não deve conter o método de escrita do Google Calendar: ${writeMethod}`);
   }
+});
+
+// --- H3 (docs/PRODUCTION_GATE.md; docs/DECISIONS.md, PROD-H3-01): resolução segura de IP do cliente ---
+test('resolveClientIp (H3-proxy-A): sem TRUST_PROXY_HOPS configurado, X-Forwarded-For forjado é ignorado — usa sempre o endereço remoto real', () => {
+  const originalHops = process.env.TRUST_PROXY_HOPS;
+  delete process.env.TRUST_PROXY_HOPS;
+  delete require.cache[require.resolve('../auth/client-ip')];
+  const { resolveClientIp } = require('../auth/client-ip');
+  const req = { socket: { remoteAddress: '203.0.113.9' }, headers: { 'x-forwarded-for': '1.2.3.4' } };
+  assert.equal(resolveClientIp(req), '203.0.113.9', 'sem proxy confiável configurado, o X-Forwarded-For forjado nunca deve ser usado');
+  if (originalHops === undefined) delete process.env.TRUST_PROXY_HOPS; else process.env.TRUST_PROXY_HOPS = originalHops;
+});
+
+test('resolveClientIp (H3-proxy-B/C): com proxy confiável, resolve o IP conforme o número de saltos configurado, sem escolher arbitrariamente a primeira entrada', () => {
+  const originalHops = process.env.TRUST_PROXY_HOPS;
+  process.env.TRUST_PROXY_HOPS = '1';
+  delete require.cache[require.resolve('../auth/client-ip')];
+  const { resolveClientIp } = require('../auth/client-ip');
+  // Cadeia esperada com 1 proxy confiável: "cliente, proxy1" — o cliente é a entrada a 1 posição do fim.
+  const reqOk = { socket: { remoteAddress: '10.0.0.1' }, headers: { 'x-forwarded-for': '198.51.100.7, 10.0.0.2' } };
+  assert.equal(resolveClientIp(reqOk), '198.51.100.7');
+  // Cadeia MAIOR que o esperado (um atacante tentando inserir entradas extras à esquerda): a posição
+  // resolvida acompanha a fórmula determinística (chain.length - hops), nunca escolhe arbitrariamente a
+  // primeira entrada da esquerda como se fosse sempre o cliente.
+  const reqLonger = { socket: { remoteAddress: '10.0.0.1' }, headers: { 'x-forwarded-for': '9.9.9.9, 198.51.100.7, 10.0.0.2' } };
+  assert.equal(resolveClientIp(reqLonger), '198.51.100.7', 'com hops=1, a posição resolvida é sempre chain.length-1, nunca a primeira entrada da cadeia');
+  if (originalHops === undefined) delete process.env.TRUST_PROXY_HOPS; else process.env.TRUST_PROXY_HOPS = originalHops;
+});
+
+test('resolveClientIp (H3-proxy-D): normaliza IPv4-mapped IPv6', () => {
+  delete require.cache[require.resolve('../auth/client-ip')];
+  const { resolveClientIp, normalizeIp } = require('../auth/client-ip');
+  assert.equal(normalizeIp('::ffff:203.0.113.9'), '203.0.113.9');
+  assert.equal(normalizeIp('2001:db8::1'), '2001:db8::1', 'IPv6 nativo (não IPv4-mapped) não deve ser alterado');
+  const req = { socket: { remoteAddress: '::ffff:203.0.113.9' }, headers: {} };
+  assert.equal(resolveClientIp(req), '203.0.113.9');
 });

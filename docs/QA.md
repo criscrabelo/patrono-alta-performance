@@ -689,3 +689,83 @@ Correção de 5 blockers identificados na revisão técnica humana do PR #13, an
   que nunca declaram esse campo continuam recebendo a senha de conveniência.
 - CI roda a mesma bateria (Node 20.x/22.x, Postgres real) sem nenhum teste pulado.
 - `npm audit`: inalterado (2 vulnerabilidades altas conhecidas — H9, não corrigidas nesta rodada).
+
+## QA — Hardening H3 (rate limiting global e proteção contra abuso distribuída)
+
+- **374 testes totais** com `TEST_DATABASE_URL` (352 do adendo H2 + 4 novos em `tests/core.test.js` +
+  18 novos em `tests/h3-rate-limiting.test.js`), 0 falhando, nenhum teste removido.
+- **4 testes novos em `tests/core.test.js`**:
+  - Resolução segura de IP do cliente (`auth/client-ip.js`, `resolveClientIp()`, 3 testes):
+    - Sem `TRUST_PROXY_HOPS` configurado, um `X-Forwarded-For` forjado é ignorado — usa sempre o
+      endereço remoto real da conexão.
+    - Com proxy confiável configurado (`TRUST_PROXY_HOPS=1`), o IP resolvido é a entrada correta da
+      cadeia (`chain.length - 1 - hops`) tanto para uma cadeia do tamanho esperado quanto para uma
+      maior — nunca escolhe arbitrariamente a primeira entrada.
+    - IPv4-mapped IPv6 (`::ffff:1.2.3.4`) é normalizado para `1.2.3.4`.
+  - `RATE_LIMIT_HMAC_KEY`: mesmo padrão de teste já existente para `MFA_ENCRYPTION_KEY` — produção sem a
+    chave falha; produção com chave curta (<32 caracteres) falha; produção com chave válida aceita; fora
+    de produção, ausência da chave nunca impede o boot/carregamento do módulo. O teste original de
+    `MFA_ENCRYPTION_KEY` foi ajustado para fixar `RATE_LIMIT_HMAC_KEY` com um valor válido durante sua
+    própria verificação (e vice-versa) — cada teste isola apenas a chave que está verificando.
+- **18 testes novos em `tests/h3-rate-limiting.test.js`** (nomenclatura login A–F, multi-instância,
+  restart, concorrência, MFA, forgot-password, admin-reset, reset-password, anti-bypass):
+  - **Login A–F**: abaixo do limite, login segue normal; limite por IP excedido responde 429 com
+    `Retry-After`; limite por identidade é isolado por identidade (não por IP); bucket combinado
+    (IP+identidade) bloqueia quando é o mais restrito; outro usuário no mesmo IP tem bucket de
+    identidade isolado, não compartilhado; a mesma identidade seguiria bloqueada mesmo de outro IP
+    simulado.
+  - **Multi-instância**: instância A consome tentativas; instância B, carregando um módulo
+    `server.js`/`storage` independente mas apontando para o MESMO Postgres, continua do mesmo contador
+    — nunca reinicia por instância.
+  - **Restart**: bloqueio por rate limit sobrevive a um "restart" simulado (módulo recarregado do zero,
+    HTTP e pool de Postgres anteriores encerrados) — nunca dependeu de estado em memória.
+  - **Concorrência**: uma rajada de 14 requisições simultâneas contra o mesmo bucket combinado (limite
+    8) nunca aceita mais do que o limite permite, mesmo sob concorrência real.
+  - **MFA**: várias tentativas incorretas levam a 429 por challenge; um novo challenge do mesmo usuário
+    não herda o bucket do challenge anterior; a proteção por IP continua ativa independentemente.
+  - **Forgot-password**: resposta genérica idêntica para e-mail existente/inexistente abaixo do limite;
+    429 após exceder o limite por identidade; e-mail ambíguo (duplicado) nunca gera token, com ou sem
+    rate limit ativo.
+  - **Admin-reset**: aprovador autorizado emite token abaixo do limite; operador sem permissão continua
+    403 (nunca consome o bucket de aprovador); bloqueio por usuário-alvo após excesso de tentativas;
+    nenhum token novo é gerado depois do bloqueio.
+  - **Reset-password**: tentativas abaixo do limite seguem normais; token inválido repetido leva a 429;
+    o rate limit nunca torna um token válido reutilizável.
+  - **Anti-bypass**: troca de User-Agent não contorna o bucket; `X-Forwarded-For` forjado sem
+    `TRUST_PROXY_HOPS` configurado não contorna o bloqueio; reiniciar o processo não contorna;
+    alternar instância não contorna.
+- **Correção nos 3 arquivos de teste Postgres pré-existentes** (`tests/h1b-core-relational.test.js`,
+  `tests/h2-auth-sessions.test.js`, `tests/security-integration-postgres.test.js`): adicionado
+  `test.beforeEach()` que zera `rate_limit_buckets` antes de cada teste — esses arquivos fazem login
+  repetidamente por identidade/IP como uso legítimo de teste (não abuso), e H3 tem sua própria suíte
+  dedicada para validar o comportamento de rate limit em si.
+- **Dois bugs reais encontrados e corrigidos durante a execução desta suíte** (não apenas ajuste de
+  teste):
+  1. **`consumeAndCheck()` (`storage/repositories/rate-limits-repository.js`) bloqueava toda primeira
+     tentativa de qualquer bucket novo.** A versão inicial usava uma CTE gravável (`INSERT ... ON
+     CONFLICT DO UPDATE`) seguida de um `UPDATE` separado que reconsultava a tabela para gravar
+     `blocked_until` — um erro clássico de CTE gravável no Postgres: instruções de um mesmo comando
+     enxergam o snapshot de ANTES do comando começar, então o `UPDATE` externo não encontrava a linha
+     recém-inserida na primeira gravação de uma `bucket_key` nova, o `RETURNING` externo vinha vazio, e
+     o fail-closed (item 27 do escopo) tratava a exceção resultante como bloqueado — bloqueando a
+     primeira tentativa de qualquer identidade/IP nunca visto antes. Corrigido para uma única instrução
+     `INSERT ... ON CONFLICT DO UPDATE` que já calcula `blocked_until` no mesmo `SET`, sem segunda
+     consulta à tabela. Descoberto pelo teste [H1B-C] (primeiro teste do arquivo a fazer login),
+     confirmado por reprodução isolada fora da suíte.
+  2. **Login e MFA verify podiam deixar uma requisição sem resposta sob concorrência real contra a
+     mesma conta.** O caminho de senha/código incorreto usava `writeStore()` diretamente em vez de
+     `commitStore()` — um `StoreConflictError` real (esperado sob concorrência, quando duas requisições
+     modificam o mesmo usuário ao mesmo tempo) virava uma rejeição de promise não capturada pelo
+     `try/catch` do roteador (que não alcança um `return promise` sem `await`), e a requisição nunca
+     recebia resposta. Descoberto pelo teste de concorrência de H3 (14 tentativas de login simultâneas
+     contra a mesma conta) travando indefinidamente; reproduzido isoladamente fora da suíte de testes
+     para confirmar a causa raiz antes de corrigir. Corrigido para `commitStore()` nos dois pontos
+     afetados (login, MFA verify) — mesma disciplina já usada em todas as demais rotas de mutação.
+  3. **Teste de concorrência disparava o lockout POR CONTA de H2 (`failed_login_count`/`locked_until`)
+     como efeito colateral**, deixando contas seedadas bloqueadas para os testes seguintes do mesmo
+     arquivo que precisavam logar normalmente com elas. Corrigido acrescentando
+     `resetAccountLockouts()` ao `test.beforeEach()` do arquivo — H2 não é o alvo deste arquivo (tem sua
+     própria suíte em `tests/h2-auth-sessions.test.js`), então cada teste de H3 começa com as contas
+     seedadas destravadas.
+- CI roda a mesma bateria (Node 20.x/22.x, Postgres real) sem nenhum teste pulado.
+- `npm audit`: inalterado (2 vulnerabilidades altas conhecidas — H9, não corrigidas nesta rodada).
