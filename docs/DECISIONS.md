@@ -1622,6 +1622,93 @@ continua NO-GO. `docs/MASTER_HANDOFF.md` intocado.
 
 ---
 
+## 1.12. Hardening H7 — Decisão PROD-H7-01
+
+### PROD-H7-01 — Incident Response (resposta operacional a incidentes)
+
+**Status: IMPLEMENTADO PARCIALMENTE / PG-20 ABERTO.** Ver `docs/PRODUCTION_GATE.md`, seção 24;
+`docs/INCIDENT_RESPONSE.md` (documento de referência completo); `docs/SECURITY.md`/`docs/QA.md`
+(seções H7).
+
+**Contexto**: PG-20 apontava ausência total de processo de resposta a incidentes — sem detecção,
+contenção ou comunicação formal em caso de violação. O critério de aceite exige um checklist existente,
+com responsável nomeado e canal de comunicação definido.
+
+**Decisão**: implementar um processo **provider-neutro** (sem PagerDuty/Opsgenie/Datadog Incident
+Management/Sentry Incident/qualquer SaaS pago), majoritariamente documental, reaproveitando os eventos
+já detectáveis via H2-H6:
+
+1. **`docs/INCIDENT_RESPONSE.md`** — severidade formal (SEV-1..SEV-4) com critérios objetivos, 13
+   categorias (`AUTH`, `ACCESS_CONTROL`, `DATA_EXPOSURE`, `DATA_INTEGRITY`, `DATA_LOSS`, `AVAILABILITY`,
+   `MALWARE_OR_COMPROMISE`, `SECRETS`, `BACKUP_RESTORE`, `INTEGRATION`, `CONFIGURATION`,
+   `LEGAL_OPERATIONAL`, `OTHER`), 6 papéis funcionais (Incident Commander, Technical Lead,
+   Security/Privacy Lead, Business/Legal Lead, Communications Owner, Scribe/Evidence Keeper — nunca
+   nomes pessoais hardcoded), lifecycle de 11 estados, checklist operacional de 18 itens, modelo de
+   registro de incidente, escalation matrix, e checklists de Incident Commander para os primeiros
+   15/60 minutos.
+2. **5 runbooks específicos** (`docs/incidents/runbooks/`): autenticação comprometida, exposição de
+   dados, disponibilidade, backup/restore (reaproveita H5 sem alterar `BackupTrackingError`/
+   `RestoreEvidenceError` e seus exit codes), segredo comprometido.
+3. **Templates**: registro de incidente, postmortem (sem linguagem punitiva), comunicação interna/
+   externa (a externa sempre condicionada a aprovação jurídica/gestão — nunca automática).
+4. **`docs/incidents/TABLETOP_EXERCISE.md`** — exercício de mesa (credencial administrativa
+   comprometida + tentativa de acesso jurídico) validando que o processo é executável na prática.
+5. **`scripts/create-incident.js`** — único código novo desta rodada: gera um registro local a partir
+   do template. `incidentId` no formato `INC-YYYYMMDD-XXXXXXXX` (sufixo aleatório via
+   `crypto.randomBytes`, nunca incremental/previsível); severidade/categoria validadas contra listas
+   fechadas; diretório de saída sempre fixo (`incidents/`, nunca versionado — elimina path traversal
+   por construção, não apenas por validação); nunca sobrescreve um registro existente; resumo
+   sanitizado (quebra de linha removida, impedindo forjar outro campo do arquivo gerado).
+
+**Gatilho de LGPD/legal hold, sem expandir escopo**: todo runbook inclui a etapa "avaliar se o
+incidente envolve dados pessoais" e "avaliar necessidade de comunicação à ANPD/titulares conforme
+análise jurídica aplicável" — sem fixar prazo legal específico (depende de avaliação jurídica real no
+momento do incidente). O registro marca `legalHoldReviewRequired` como **gatilho de revisão**, nunca
+uma política de retenção em si — H8 permanece integralmente fora de escopo.
+
+**Por que PG-20 permanece ABERTO**: o processo está implementado e testado, mas o critério de aceite
+exige responsável nomeado e canal de comunicação definido. Nenhum nome individual real nem canal real
+(Slack/Teams/e-mail/telefone) foi parametrizado nesta rodada — nomes pessoais nunca são versionados em
+código-fonte, e nenhum canal real foi inventado (`INCIDENT_PRIMARY_CHANNEL`, `INCIDENT_SECONDARY_CHANNEL`,
+`INCIDENT_SECURITY_CONTACT`, `INCIDENT_PRIVACY_CONTACT` permanecem vazios em `.env.example`). Essa
+parametrização é uma decisão operacional pré-produção, fora do escopo técnico desta rodada. Fechar
+PG-20 sem essa evidência seria fechar por intenção — mesma disciplina já aplicada a PG-21/H5 e PG-17/H6.
+
+**Limitações documentadas**: lifecycle não persistido em banco (runbook + arquivo local/testável, sem
+justificativa real para um novo modelo transacional); nenhum maintenance mode criado; nenhuma automação
+de resposta destrutiva; nenhum canal/responsável real parametrizado.
+
+**Testes**: 546/546 passando com PostgreSQL real (527 anteriores + 19 novos em
+`tests/h7-incident-response.test.js` — consistência documental e comportamento real de
+`scripts/create-incident.js`). `npm audit`: inalterado (2 vulnerabilidades altas conhecidas —
+H9); nenhuma dependência nova adicionada.
+
+Esta decisão não altera D1/D4/D2-CLOSE/PROD-GATE-01/PROD-H1-01/PROD-H1B-01/PROD-H2-01/PROD-H3-01/
+PROD-H4-01/PROD-H5-01/PROD-H6-01 já homologadas — apenas registra o avanço parcial do H7 dentro do gate
+de produção já aberto. Não altera H5/PG-21 nem H6/PG-17. Não implementa H8/H9/H10/H11/PG-23/PG-24.
+`docs/MASTER_HANDOFF.md` intocado.
+
+**Adendo (correção técnica final, PR #18) — 2 pontos corrigidos, sem expandir escopo:**
+
+1. **Criação atômica do registro de incidente** (`scripts/create-incident.js`): a checagem anterior
+   (`fs.existsSync()` seguida de `fs.writeFileSync()`) tinha uma janela TOCTOU entre verificar e
+   escrever. Corrigida com criação exclusiva atômica (`flag: 'wx'`) e retry limitado
+   (`MAX_ID_ATTEMPTS = 5`) — em colisão real (`EEXIST`), o arquivo existente nunca é tocado e um novo
+   `incidentId` é gerado; se todas as tentativas colidirem, falha explicitamente sem alterar nenhum
+   arquivo existente. Documentado explicitamente que o registro local é uma ferramenta operacional,
+   nunca um armazenamento forense/durável de produção (isso depende do ambiente — H8/H11).
+2. **Correção documental**: `docs/INCIDENT_RESPONSE.md` e os runbooks afirmavam, como fato já existente,
+   um supervisor que reinicia o processo automaticamente após uma exceção fatal — mas H11 (deploy/
+   infraestrutura) ainda não foi implementado. Corrigido para condicionar essas ações ("reiniciar",
+   "reverter deploy", "redeploy") ao mecanismo disponível no ambiente operacional, nunca afirmando que
+   ele já existe.
+
+**Testes**: 549/549 passando com PostgreSQL real (546 anteriores + 3 novos, mais a reescrita do teste de
+não-sobrescrita para forçar uma colisão real via seam de teste `generateIdOverride`). `npm audit`
+inalterado. PG-20 continua ABERTO, sem alteração da pendência específica já registrada acima.
+
+---
+
 ## 2. ADRs de Engenharia — Fase 0 (Sprint 1)
 
 Decisões técnicas locais e reversíveis, permitidas pela v1.3 (§27, linhas D8/D9: "Não bloqueia decisão

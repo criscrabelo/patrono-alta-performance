@@ -90,7 +90,7 @@ e um checklist mínimo de LGPD. Não cobre: desenho de novas funcionalidades de 
 | PG-17 | Logging/Monitoramento | **H6 IMPLEMENTADO PARCIALMENTE (ver seção 23) — PERMANECE ABERTO.** Logger estruturado JSON provider-neutro, redaction defensiva (segredo nunca aparece por nome de campo nem por padrão em texto livre), requestId/correlação por requisição, access log HTTP normalizado, serializador seguro de erro, eventos de boot/shutdown/Monday/backup-restore, health liveness/readiness, alerta via webhook HTTPS com HMAC/cooldown/anti-recursão — tudo implementado e testado (`tests/h6-observability.test.js`, 33/33). Falta apenas: agregação/busca real de produção (nenhum coletor/agregador real foi configurado ou exercitado) e/ou destino de alerta real (nenhum `ALERT_WEBHOOK_URL` de produção foi validado contra infraestrutura real) — ambos dependentes de H11 | Incidente pode passar despercebido; sem visibilidade operacional | **P1** | SIM | Logging estruturado (sem PII/segredo) + alerta básico de erro/disponibilidade | Log de erro em produção é buscável e não contém segredo/PII — **atendido do lado da aplicação (JSON estruturado, correlação, redaction); falta a busca real num agregador de produção** | H6 (parcial), H11 |
 | PG-18 | Auditoria | Eventos de auditoria não capturam IP/sessão/user-agent; sem rotação/retenção | Rastreabilidade incompleta para investigação; crescimento não controlado do arquivo | **P2** | NÃO (MVP aceitável) | Adicionar metadados de origem e política de retenção ao evoluir para produção | Auditoria permite reconstruir "quem, quando, de onde, o quê" | H8 |
 | PG-19 | Retenção/Legal Hold | Nenhuma política de retenção/exclusão/legal hold definida para nenhuma entidade | Impossível responder a obrigação legal de retenção ou a um pedido de exclusão (LGPD) | **P0** | SIM | Definir política por tipo de dado (audit, Legal Deadline, documentos, backups) | Política documentada e aplicável tecnicamente (mesmo que manual no início) | H8 |
-| PG-20 | Incident Response | Nenhum processo de resposta a incidente definido | Sem detecção/contenção/comunicação formal em caso de violação | **P0** | SIM | Checklist mínimo de IR (ver seção 8) | Checklist existe, tem responsável nomeado e canal de comunicação definido | H7 |
+| PG-20 | Incident Response | **H7 IMPLEMENTADO PARCIALMENTE (ver seção 24) — PERMANECE ABERTO.** Processo completo documentado em `docs/INCIDENT_RESPONSE.md`: severidade (SEV-1..SEV-4), categorias, papéis funcionais, lifecycle, checklist de 18 itens, modelo de registro, 5 runbooks específicos (auth/dados/disponibilidade/backup-restore/segredos), templates de comunicação/postmortem, exercício de mesa (tabletop), e `scripts/create-incident.js` testado. Falta apenas: nenhum canal de comunicação real nem nome individual real foi parametrizado (`INCIDENT_PRIMARY_CHANNEL`/`INCIDENT_SECONDARY_CHANNEL`/`INCIDENT_SECURITY_CONTACT`/`INCIDENT_PRIVACY_CONTACT` permanecem vazios em `.env.example`, corretamente — nenhum valor foi inventado) | Sem detecção/contenção/comunicação formal em caso de violação | **P0** | SIM | Checklist mínimo de IR (ver seção 8) | Checklist existe, tem responsável nomeado e canal de comunicação definido — **atendido para o processo em si (papéis, severidade, runbooks, templates, tabletop); falta a parametrização nominal/de canal real, decisão operacional pré-produção** | H7 (parcial) |
 | PG-21 | Backup/Restore | **H5 IMPLEMENTADO PARCIALMENTE (ver seção 22) — PERMANECE ABERTO.** `pg_dump`/`pg_restore` reais do PostgreSQL canônico, RPO=6h/RTO=4h definidos e comprovados por restore real, manifesto com integridade (SHA-256), política de ambiente/confirmação/replace, revogação de estado efêmero pós-restore — tudo implementado e testado (`tests/h5-backup-restore-postgres.test.js`, 18/18). Falta apenas: o adapter de storage offsite real (`s3`) nunca foi exercitado contra um bucket real (só testado com cliente S3 injetado) — nenhuma infraestrutura foi provisionada nesta rodada (fora de escopo de H5, ver H11); agendamento de produção real (cron/scheduler) também é H11 | Perda de dado sem recuperação viável em caso de incidente | **P0** | SIM | Backup agendado, offsite, com RPO/RTO definidos e teste de restore documentado | Restore de um backup real é executado e validado ao menos uma vez, com evidência — **atendido para o mecanismo em si; falta a validação com storage offsite real** | H5 (parcial), H11 |
 | PG-22 | Deploy/Infra | Não existe `fly.toml` nem `Dockerfile` no repositório — nenhuma infraestrutura como código versionada | Deploy depende de processo manual/tácito, não reprodutível | **P0** | SIM | Criar infraestrutura como código (container + config de deploy), healthcheck, variáveis de ambiente documentadas | Deploy reproduzível a partir do repositório, sem passo manual não documentado | H11 |
 | PG-23 | LGPD | Sem política formal de minimização, finalidade, retenção, descarte e direitos do titular | Exposição legal/regulatória em produção | **P1** | SIM | Checklist mínimo de LGPD (seção 9) formalizado com o time jurídico | Checklist preenchido e aprovado pelo responsável de negócio/jurídico | — |
@@ -158,6 +158,17 @@ e um checklist mínimo de LGPD. Não cobre: desenho de novas funcionalidades de 
 - **P2 inalterado** — H6 não altera nenhum outro achado.
 - **Fechados = 13** — inalterado (PG-01 a PG-13).
 
+**Após o Hardening H7 (ver seção 24) — nenhum fechamento de contagem:**
+
+- **P0 aberto = 4** — inalterado (PG-19, PG-20, PG-21, PG-22). PG-20 permanece aberto DELIBERADAMENTE:
+  o processo de resposta a incidentes (severidade, categorias, papéis, lifecycle, checklist, runbooks,
+  templates, tabletop, script testado) está implementado e testado, mas nenhum canal de comunicação real
+  nem nome individual real foi parametrizado nesta rodada — decisão operacional pré-produção, nunca
+  inventada. Fechar PG-20 sem essa parametrização seria fechar por intenção, não por comprovação — mesma
+  disciplina de PG-21/H5 e PG-17/H6.
+- **P1/P2 inalterados** — H7 não altera nenhum outro achado.
+- **Fechados = 13** — inalterado (PG-01 a PG-13).
+
 PG-01/PG-02 são exibidos como dois achados por clareza de causa raiz (persistência sem transação e sem
 lock são sintomas distintos do mesmo problema), mas compartilham a mesma correção (H1) — contados
 separadamente na tabela e nesta soma, não duplicados fora dela. PG-24 foi reclassificado de P2 para P1
@@ -181,7 +192,7 @@ própria classificação declarada.
 | Restore | **H5 (parcial)** — `pg_restore` real testado ponta a ponta com evidência (seção 22/`BACKUP_RESTORE_RUNBOOK.md`), RTO=4h comprovado; falta restaurar a partir de um backup que tenha passado por storage offsite real | SIM (até offsite real ser validado) | Restore testado e documentado ao menos uma vez — mecanismo atendido, falta o offsite real |
 | Logging/Monitoramento | **H6 (parcial, ver seção 23)** — logger JSON estruturado, redaction, requestId/correlação, access log, health liveness/readiness, alerta via webhook (HMAC/cooldown/anti-recursão) implementados e testados; falta agregador/busca real de produção e destino de alerta real exercitado | SIM (até agregação/alerta real serem exercitados) | Logging estruturado + alerta básico de erro/disponibilidade — mecanismo atendido, falta o destino real de produção |
 | Auditoria | Existe, sem IP/sessão/retenção | NÃO (MVP aceitável) | Evoluir metadados/retenção antes de escala maior |
-| Incident Response | Inexistente | SIM | Checklist mínimo formalizado com responsável nomeado |
+| Incident Response | **H7 (parcial, ver seção 24)** — processo documentado (severidade, categorias, papéis, lifecycle, checklist, 5 runbooks, templates, tabletop, script testado); falta parametrização real de canal/responsável nominal | SIM (até parametrização real) | Checklist mínimo formalizado com responsável nomeado — mecanismo atendido, falta a parametrização operacional |
 | Retenção/Legal Hold | Inexistente | SIM | Política definida por tipo de dado |
 | Dependências (`npm audit`) | 2 altas conhecidas, gate não bloqueante | SIM (a vulnerabilidade em si) | Corrigida ou com waiver formal aprovado |
 | OAuth Calendar | Não implementado (adapter seguro) | NÃO (feature opcional) | Necessário só para ativar a leitura real do Calendar |
@@ -1036,25 +1047,100 @@ do alerta passa a ser marcado somente após entrega bem-sucedida. **527/527 test
 anteriores + 42 em `tests/h6-observability.test.js`). `npm audit` inalterado. PG-17 permanece ABERTO,
 sem alteração da pendência específica já registrada acima.
 
+## 24. Status do Hardening H7 (IMPLEMENTADO PARCIALMENTE — PG-20 PERMANECE ABERTO)
+
+### Matriz H7 — Incidentes (auditoria pré-implementação)
+
+Ver `docs/INCIDENT_RESPONSE.md`, seção 2, para a matriz completa (Tipo | Fonte de detecção |
+Severidade | Responsável | Contenção | Evidência | Comunicação | Recuperação) mapeando os eventos já
+detectáveis via H2-H6 (login/lockout, `RATE_LIMIT_TRIGGERED`, `repeated_http_5xx`, `app_start_failed`,
+`uncaught_exception`/`unhandled_rejection`, `monday_sync_failed`, `backup_failed`/
+`backup_tracking_failed`, `restore_failed`/`restore_evidence_failed`, `readiness_check_failed`) para o
+processo de resposta a incidentes.
+
+### O que foi implementado
+
+- **`docs/INCIDENT_RESPONSE.md`** — processo completo: severidade (SEV-1..SEV-4) com critérios objetivos,
+  13 categorias, 6 papéis funcionais (nunca nomes pessoais hardcoded), lifecycle de 11 estados,
+  checklist de 18 itens, modelo de registro de incidente (`incidentId` formato `INC-YYYYMMDD-XXXXXXXX`),
+  escalation matrix, gatilho de LGPD/legal hold (sem implementar H8), checklist de Incident Commander
+  para os primeiros 15/60 minutos.
+- **5 runbooks específicos** (`docs/incidents/runbooks/`): `AUTH_COMPROMISE.md`, `DATA_EXPOSURE.md`,
+  `AVAILABILITY.md`, `BACKUP_RESTORE.md` (reaproveita H5 sem alterar `BackupTrackingError`/
+  `RestoreEvidenceError`), `SECRETS.md`.
+- **Templates**: `docs/incidents/INCIDENT_TEMPLATE.md`, `docs/incidents/POSTMORTEM_TEMPLATE.md`,
+  `docs/incidents/COMMUNICATION_TEMPLATE.md`.
+- **`docs/incidents/TABLETOP_EXERCISE.md`** — exercício de mesa (credencial administrativa
+  comprometida + tentativa de acesso jurídico) validando que o runbook é executável.
+- **`scripts/create-incident.js`** — gera um registro local de incidente a partir do template; valida
+  severidade/categoria contra listas fechadas; nunca aceita um caminho arbitrário (diretório de saída
+  fixo `incidents/`, nunca versionado); nunca sobrescreve um registro existente; sanitiza o resumo
+  (remove quebra de linha, impedindo forjar outro campo do arquivo gerado).
+- Canal de comunicação e contatos declarados via env vars (`INCIDENT_PRIMARY_CHANNEL`,
+  `INCIDENT_SECONDARY_CHANNEL`, `INCIDENT_SECURITY_CONTACT`, `INCIDENT_PRIVACY_CONTACT`) —
+  deliberadamente vazios em `.env.example`.
+
+### Por que PG-20 permanece ABERTO (não fechado por intenção)
+
+O processo em si — severidade, categorias, papéis, lifecycle, checklist, runbooks, templates, tabletop,
+script testado — está implementado e testado com evidência real. O critério de aceite de PG-20 exige,
+além disso, um **responsável nomeado** e um **canal de comunicação definido**: nenhum nome individual
+real nem canal real foi parametrizado nesta rodada — nomes pessoais nunca são versionados em
+código-fonte, e nenhum canal real (Slack/Teams/e-mail/telefone) foi inventado. Essa parametrização é uma
+decisão operacional pré-produção, fora do escopo técnico desta rodada. Fechar PG-20 sem essa evidência
+seria fechar por intenção, não por comprovação — mesma disciplina já aplicada a PG-21/H5 e PG-17/H6.
+
+### Limitações explicitamente documentadas
+
+- Nenhum canal de comunicação real (Slack/Teams/e-mail/telefone) foi configurado ou exercitado.
+- Nenhum nome individual real foi atribuído aos papéis (Incident Commander, Technical Lead,
+  Security/Privacy Lead, Business/Legal Lead) — apenas os papéis funcionais estão documentados.
+- O lifecycle do incidente não é persistido automaticamente em banco nesta rodada — runbook + registro
+  estruturado em arquivo local/testável (`scripts/create-incident.js`), sem justificativa real para um
+  novo modelo de armazenamento transacional para um evento operacionalmente raro.
+- Nenhum maintenance mode foi criado (fora de escopo — nenhum mecanismo desse tipo já existia).
+- Nenhuma automação de resposta destrutiva foi implementada — toda contenção/recuperação exige decisão
+  humana explícita, seguindo os runbooks.
+- H8 (retenção/legal hold) não foi implementado — o runbook apenas marca `legalHoldReviewRequired` como
+  gatilho de revisão, nunca uma política de retenção em si.
+
+### Testes
+
+**546/546 passando** com PostgreSQL real (527 anteriores + 19 novos em
+`tests/h7-incident-response.test.js` — consistência documental: severidades/categorias/papéis/checklist/
+lifecycle presentes, canal sem valor real, templates/runbooks existem e não contêm segredo, `.env.example`
+com placeholders vazios, `docs/MASTER_HANDOFF.md` intocado; e comportamento real de
+`scripts/create-incident.js` — ID único/formato, validação de severidade/categoria, diretório de saída
+fixo (nunca path arbitrário), timestamp UTC ISO-8601, nunca sobrescreve registro existente, template
+gerado com campos mínimos, resumo nunca permite forjar outro campo via quebra de linha), 0 falhando,
+nenhum teste removido. `npm audit`: inalterado (2 vulnerabilidades altas conhecidas, `image-size`/
+`pptxgenjs` — H9); nenhuma dependência nova adicionada nesta rodada.
+
+**Por que "implementado parcialmente" e não "aguardando homologação":** mesma disciplina de H5/H6 — o
+processo está completo e testado, mas depende de uma parametrização operacional real (canal e
+responsável nominal) fora do escopo técnico autorizado desta rodada.
+
 ## 16. Decisão final atual
 
 **NO-GO PARA PRODUÇÃO** — inalterado por esta rodada de hardening.
 
-Após o H1A/H1B/H2/H3/H4/H5(parcial)/H6(parcial): **4 P0 abertos** (ausência de retenção/legal hold — H8,
-ausência de incident response — H7, backup/restore de produção com offsite real ainda não validado —
-H5/PG-21, ausência de infraestrutura de deploy como código — H11), **4 P1 abertos** (dependências — H9,
-logging/monitoramento com agregação/alerta real ainda não validados — H6/PG-17, LGPD ×2), **4 P2
-abertos** — 12 achados abertos, **13 fechados** (PG-01 a PG-13, ver seções 17/18/19/20/21). Na matriz da
-seção 5, as linhas "Persistência", "Sessões", "Autenticação (credenciais)", "Rate limiting" e "Headers
-HTTP" deixam de bloquear; "Backup"/"Restore" e "Logging/Monitoramento" avançaram substancialmente
-(mecanismo real implementado e testado) mas continuam bloqueando até, respectivamente, o storage offsite
-real e o agregador/destino de alerta real serem exercitados; os demais gates bloqueantes (Incident
-Response, Retenção/Legal Hold, Dependências, Deploy/Infra) permanecem inalterados, mais o LGPD (P1, não
-bloqueante técnico mas pendente de decisão de negócio/jurídico). Nenhum waiver foi emitido.
+Após o H1A/H1B/H2/H3/H4/H5(parcial)/H6(parcial)/H7(parcial): **4 P0 abertos** (ausência de retenção/
+legal hold — H8, incident response avançado mas PG-20 aberto por parametrização real pendente — H7,
+backup/restore de produção com offsite real ainda não validado — H5/PG-21, ausência de infraestrutura de
+deploy como código — H11), **4 P1 abertos** (dependências — H9, logging/monitoramento com agregação/
+alerta real ainda não validados — H6/PG-17, LGPD ×2), **4 P2 abertos** — 12 achados abertos, **13
+fechados** (PG-01 a PG-13, ver seções 17/18/19/20/21). Na matriz da seção 5, as linhas "Persistência",
+"Sessões", "Autenticação (credenciais)", "Rate limiting" e "Headers HTTP" deixam de bloquear; "Backup"/
+"Restore", "Logging/Monitoramento" e "Incident Response" avançaram substancialmente (mecanismo/processo
+real implementado e testado) mas continuam bloqueando até, respectivamente, o storage offsite real, o
+agregador/destino de alerta real, e a parametrização real de canal/responsável serem exercitados; os
+demais gates bloqueantes (Retenção/Legal Hold, Dependências, Deploy/Infra) permanecem inalterados, mais o
+LGPD (P1, não bloqueante técnico mas pendente de decisão de negócio/jurídico). Nenhum waiver foi emitido.
 O Sprint 2 permanece concluído no escopo homologado (`docs/DECISIONS.md`, D2-CLOSE) — este documento não
 o reabre nem contradiz; apenas formaliza que produção é um gate técnico/de negócio separado, ainda não
 atendido, e que
 o H1A/H1B/H2/H3/H4 avançaram critérios específicos de persistência/sessão/autenticação/rate limiting/
-headers HTTP sem declarar o gate inteiro atendido, e H5/H6 avançaram substancialmente os mecanismos de
-backup/restore e observabilidade sem ainda fechar PG-21/PG-17 (pendências específicas e documentadas:
-storage offsite real; agregação/busca real de produção e destino de alerta real).
+headers HTTP sem declarar o gate inteiro atendido, e H5/H6/H7 avançaram substancialmente os mecanismos/
+processos de backup/restore, observabilidade e resposta a incidentes sem ainda fechar PG-21/PG-17/PG-20
+(pendências específicas e documentadas: storage offsite real; agregação/busca real de produção e
+destino de alerta real; parametrização real de canal de comunicação e responsável nomeado).

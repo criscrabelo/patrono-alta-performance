@@ -1,6 +1,11 @@
 data/store.json
 data/exports/
 node_modules/
+
+# Sprint 2, Hardening H7 (docs/PRODUCTION_GATE.md, PG-20): registros REAIS de incidente gerados por
+# scripts/create-incident.js nunca sao versionados (podem conter resumo/evidencia operacional real) -
+# apenas os templates em docs/incidents/ sao versionados.
+/incidents/
 .env
 .env.*
 !.env.example
