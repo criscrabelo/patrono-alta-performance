@@ -345,3 +345,10 @@ Separados em três categorias, para não misturar risco funcional do piloto com 
 
 **Nenhum item das categorias B/C declara produção pronta.** Produção continua exigindo um gate técnico/de
 negócio separado, com autorização própria.
+
+## Gate de Produção
+
+O gate técnico formal de produção — auditoria completa, achados classificados P0/P1/P2/P3, matriz
+GO/NO-GO, plano de hardening (H1–H11) e decisão atual — está em `docs/PRODUCTION_GATE.md` (decisão
+`PROD-GATE-01`, `docs/DECISIONS.md`). Estado atual: **NO-GO para produção**. Este documento não duplica
+aquele conteúdo — apenas referencia.

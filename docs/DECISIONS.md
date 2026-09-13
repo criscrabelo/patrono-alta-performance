@@ -772,6 +772,34 @@ e o estado real consolidado na master.
 
 ---
 
+## 1.4. Gate de Produção — Decisão PROD-GATE-01
+
+### PROD-GATE-01 — Abertura formal do Gate de Produção
+
+**Status: EM AVALIAÇÃO / NO-GO ATUAL**
+
+**Conteúdo da decisão:**
+
+1. O Sprint 2 está encerrado (D2-CLOSE) e concluído no escopo homologado — esta decisão não reabre nem
+   contradiz aquela.
+2. **Produção não está autorizada.** O gate técnico formal de produção — auditoria completa, achados
+   classificados P0/P1/P2/P3, matriz GO/NO-GO e plano de hardening — está documentado em
+   `docs/PRODUCTION_GATE.md`. Estado atual: **NO-GO para produção**, com 10 achados P0, 10 P1 e 5 P2 abertos,
+   nenhum waiver concedido.
+3. Os critérios objetivos de GO/NO-GO, o processo de waiver e a ordem proposta de hardening (H1–H11)
+   estão definidos em `docs/PRODUCTION_GATE.md` — esta decisão não os duplica, apenas os referencia como
+   fonte de autoridade sobre o estado do gate.
+4. **A implementação do hardening (H1–H11) exige PR(s) separado(s)** desta rodada, cada um com testes
+   próprios — nenhuma correção de código foi feita nesta decisão, que é estritamente documental/de
+   diagnóstico.
+5. **O Sprint 3 funcional é independente deste gate** — nem o inicia, nem depende dele para ser
+   autorizado a começar (podem correr em paralelo, sujeitos cada um à sua própria autorização), mas
+   nenhum deploy de produção pode ocorrer enquanto este gate permanecer NO-GO.
+
+Esta decisão não altera nenhuma decisão D1/D4/D2-CLOSE já homologada.
+
+---
+
 ## 2. ADRs de Engenharia — Fase 0 (Sprint 1)
 
 Decisões técnicas locais e reversíveis, permitidas pela v1.3 (§27, linhas D8/D9: "Não bloqueia decisão
