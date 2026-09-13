@@ -352,3 +352,9 @@ O gate técnico formal de produção — auditoria completa, achados classificad
 GO/NO-GO, plano de hardening (H1–H11) e decisão atual — está em `docs/PRODUCTION_GATE.md` (decisão
 `PROD-GATE-01`, `docs/DECISIONS.md`). Estado atual: **NO-GO para produção**. Este documento não duplica
 aquele conteúdo — apenas referencia.
+
+**H1A (persistência PostgreSQL) implementado — aguardando homologação** (`docs/DECISIONS.md`,
+PROD-H1-01): fecha PG-01/PG-02/PG-03 do gate. Segredos de conexão (`DATABASE_URL`) seguem a mesma
+prática já auditada — server-side only, nunca expostos por `/api/health` ou qualquer outra rota (só
+`persistence`/`databaseConfigured`/`databaseReachable`/`schemaReady`, nunca host/usuário/senha). Gate
+como um todo permanece NO-GO.

@@ -15,6 +15,27 @@ jobs:
     strategy:
       matrix:
         node-version: [20.x, 22.x]
+    # Sprint 2, Hardening H1A (docs/PRODUCTION_GATE.md): serviço de PostgreSQL isolado só para esta
+    # execução de CI — nunca aponta para nenhum banco real/produção. TEST_DATABASE_URL habilita os
+    # testes de tests/storage.test.js e tests/security-integration-postgres.test.js que exercitam o
+    # backend Postgres de verdade (concorrência real, transação, healthcheck); sem ela, esses mesmos
+    # testes são pulados explicitamente (nunca fingem cobertura que não existe).
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: patrono_ci_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/patrono_ci_test
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,7 +49,7 @@ jobs:
       - name: Instalação determinística das dependências
         run: npm ci
 
-      - name: npm test (unitários + integração HTTP real)
+      - name: npm test (unitários + integração HTTP real, incluindo backend PostgreSQL real)
         run: npm test
 
       - name: npm audit (relatório informativo, não bloqueia o merge)

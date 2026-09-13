@@ -800,6 +800,41 @@ Esta decisão não altera nenhuma decisão D1/D4/D2-CLOSE já homologada.
 
 ---
 
+## 1.5. Hardening H1A — Decisão PROD-H1-01
+
+### PROD-H1-01 — Persistência PostgreSQL como fonte canônica do runtime
+
+**Status: IMPLEMENTADO / AGUARDANDO HOMOLOGAÇÃO** (ver `docs/PRODUCTION_GATE.md`, seção 17, para o
+detalhamento técnico completo — esta decisão não o duplica, apenas registra o que foi decidido).
+
+**Conteúdo da decisão:**
+
+1. **PostgreSQL passa a ser a persistência canônica** quando `DATABASE_URL` está configurada — toda a
+   aplicação lê/escreve exclusivamente através de `storage/` (`readStore()`/`writeStore()`), nunca
+   diretamente em `fs`/`pg`.
+2. **JSON é somente fallback local explícito**, permitido apenas fora de produção. Em
+   `NODE_ENV=production` sem `DATABASE_URL` (ou com Postgres inalcançável/schema incompatível), o
+   processo falha ao iniciar (fail-fast) — nunca opera silenciosamente em modo arquivo.
+3. **Nenhuma dual-write**: um único backend ativo por processo, decidido uma vez no boot.
+4. **Importação de JSON para Postgres é um processo separado e explícito** (`scripts/import-data.js`,
+   com `--dry-run`), nunca automática, nunca apaga o arquivo de origem.
+5. **Migrations são versionadas** (`schema_migrations`, `npm run migrate`), determinísticas e
+   append-only — nenhuma migration histórica (001/002) foi alterada.
+6. **Transações e concorrência otimista real** foram implementadas e testadas contra um PostgreSQL de
+   teste isolado — conflito de concorrência responde HTTP 409, nunca sobrescreve silenciosamente.
+7. **Arquitetura de PONTE, não normalização relacional**: a store inteira continua como um único
+   documento JSONB (`app_store`). Nenhuma FK relacional real foi criada. A normalização progressiva por
+   entidade (`users`, `legalProcesses`, `legalDeadlines`, `audit`, nesta ordem, com FK real) é **H1B**,
+   deliberadamente **não iniciada** por esta decisão.
+8. **Esta decisão não fecha o Gate de Produção** (`docs/DECISIONS.md`, PROD-GATE-01) — apenas os
+   critérios PG-01/PG-02/PG-03 de `docs/PRODUCTION_GATE.md` são atualizados para "fechado". O gate como
+   um todo permanece **NO-GO PARA PRODUÇÃO**.
+
+Esta decisão não altera D1/D4/D2-CLOSE/PROD-GATE-01 já homologadas — apenas registra o avanço específico
+do H1A dentro do gate de produção já aberto.
+
+---
+
 ## 2. ADRs de Engenharia — Fase 0 (Sprint 1)
 
 Decisões técnicas locais e reversíveis, permitidas pela v1.3 (§27, linhas D8/D9: "Não bloqueia decisão
