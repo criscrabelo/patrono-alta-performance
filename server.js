@@ -13,6 +13,8 @@ const rateLimit = require('./auth/rate-limit');
 const { resolveClientIp } = require('./auth/client-ip');
 const logger = require('./observability/logger');
 const alert = require('./observability/alert');
+const { buildAuditContext } = require('./observability/audit-context');
+const legalHold = require('./retention/legal-hold');
 
 const ROOT = __dirname;
 const ENV_FILE = path.join(ROOT, '.env');
@@ -766,8 +768,21 @@ async function commitStore(res, store) {
     throw error;
   }
 }
-function audit(store, user, action, entity, entityId, before, after, reason = 'Operação solicitada pelo usuário') {
-  store.audit.push({ id: crypto.randomUUID(), action, entity, entityId, responsible: user.name, date: new Date().toISOString(), reason, before, after, correlationId: crypto.randomUUID() });
+// Sprint 2, Hardening H8 (docs/PRODUCTION_GATE.md, PG-18; docs/DECISIONS.md, PROD-H8-03): `context`
+// (opcional, por padrão vazio) carrega metadados operacionais ADITIVOS — nunca altera o comportamento
+// dos ~50 chamadores existentes, que continuam funcionando sem passar `context`. Retrofit completo de
+// requestId/sessão/IP/User-Agent em toda rota de negócio existente é um gap explicitamente documentado
+// (docs/SECURITY.md, docs/PRODUCTION_GATE.md seção H8) — esta rodada conecta o mecanismo e o aplica às
+// rotas novas (legal hold); nunca finge que toda rota antiga já foi retrofitada.
+function audit(store, user, action, entity, entityId, before, after, reason = 'Operação solicitada pelo usuário', context = {}) {
+  store.audit.push({
+    id: crypto.randomUUID(), action, entity, entityId, responsible: user.name, date: new Date().toISOString(), reason, before, after,
+    correlationId: crypto.randomUUID(),
+    requestId: context.requestId || null,
+    sessionId: context.sessionId || null,
+    ipHmac: context.ipHmac || null,
+    userAgentSummary: context.userAgentSummary || null
+  });
 }
 // P0 corrigido (rodada 7, item 2): separa AUDITORIA TÉCNICA (metadados: quem fez o quê, quando, por
 // quê — sempre necessários para a função técnica legítima de auditoria) de CONTEÚDO AUDITADO
@@ -777,7 +792,7 @@ function audit(store, user, action, entity, entityId, before, after, reason = 'O
 // auditoria e exige `allowed(user,'*')`) vê apenas os metadados técnicos, nunca o conteúdo do registro
 // auditado. Função única, reaproveitada onde eventos de auditoria são devolvidos ao cliente — evita
 // duplicar a lógica de redação em múltiplos pontos.
-const AUDIT_TECHNICAL_FIELDS = ['id', 'action', 'entity', 'entityId', 'responsible', 'date', 'reason', 'correlationId'];
+const AUDIT_TECHNICAL_FIELDS = ['id', 'action', 'entity', 'entityId', 'responsible', 'date', 'reason', 'correlationId', 'requestId', 'sessionId', 'ipHmac', 'userAgentSummary'];
 function sanitizeAuditEventForUser(user, event) {
   if (hasGlobalScope(user)) return event;
   return Object.fromEntries(AUDIT_TECHNICAL_FIELDS.filter(field => Object.hasOwn(event, field)).map(field => [field, event[field]]));
@@ -1754,6 +1769,45 @@ const created={id:newUserId,name:request.name,email:request.email,role:request.r
   // vendo tudo o que precisa para auditoria técnica (ação, entidade, responsável, data, motivo,
   // correlationId), só não o conteúdo do registro.
   if (req.method === 'GET' && url.pathname === '/api/audit') { if (!allowed(user,'*')) return json(res,403,{error:'Sem permissão'}); return json(res,200,store.audit.slice(-100).reverse().map(event=>sanitizeAuditEventForUser(user,event))); }
+  // Sprint 2, Hardening H8 (docs/PRODUCTION_GATE.md, PG-19; docs/DECISIONS.md, PROD-H8-02): legal hold é
+  // uma ação sensível — mesma alçada já usada por /api/backup (`allowed(user,'*','approve')`, hoje só
+  // diretoria/administrador). Fala diretamente com o pool Postgres (retention/legal-hold.js) — nunca
+  // exige `readStore()`/`writeStore()` cheio para uma ação que precisa de consistência real de linha.
+  if (url.pathname === '/api/legal-holds' || /^\/api\/legal-holds\/[^/]+\/release$/.test(url.pathname)) {
+    if (!allowed(user,'*','approve')) return json(res,403,{error:'Legal hold restrito'});
+    const pool = storage.getPool();
+    if (!pool) return json(res,501,{error:'LEGAL_HOLD_REQUIRES_POSTGRES',message:'Legal hold exige PostgreSQL como persistência ativa.'});
+    if (req.method === 'GET' && url.pathname === '/api/legal-holds') {
+      const holds = await legalHold.listLegalHolds(pool, {
+        status: url.searchParams.get('status') || undefined,
+        scopeType: url.searchParams.get('scopeType') || undefined,
+        scopeValue: url.searchParams.get('scopeValue') || undefined
+      });
+      return json(res,200,holds);
+    }
+    if (req.method === 'POST' && url.pathname === '/api/legal-holds') {
+      return body(req).then(async input => {
+        try {
+          const hold = await legalHold.createLegalHold(pool, { scopeType: input.scopeType, scopeValue: input.scopeValue, reason: input.reason, startedByUserId: user.id });
+          audit(store, user, 'LEGAL_HOLD_CREATED', 'legal_hold', hold.id, null, hold, `Legal hold criado (escopo: ${hold.scopeType}${hold.scopeValue ? '/'+hold.scopeValue : ''})`, buildAuditContext(req));
+          if (!(await commitStore(res,store))) return;
+          return json(res,201,hold);
+        } catch (error) { return json(res,422,{error:error.message}); }
+      });
+    }
+    const releaseMatch = url.pathname.match(/^\/api\/legal-holds\/([^/]+)\/release$/);
+    if (req.method === 'POST' && releaseMatch) {
+      return body(req).then(async input => {
+        try {
+          const hold = await legalHold.releaseLegalHold(pool, { id: releaseMatch[1], releasedByUserId: user.id, releaseReason: input.releaseReason });
+          audit(store, user, 'LEGAL_HOLD_RELEASED', 'legal_hold', hold.id, null, hold, `Legal hold liberado: ${input.releaseReason}`, buildAuditContext(req));
+          if (!(await commitStore(res,store))) return;
+          return json(res,200,hold);
+        } catch (error) { return json(res,422,{error:error.message}); }
+      });
+    }
+    return json(res,404,{error:'Rota não encontrada'});
+  }
   // P0 corrigido (rodada 3, item 5, depois rodada 7, item 1): GET e POST não tinham NENHUMA verificação
   // de permissão — qualquer usuário autenticado lia e criava entradas de compliance. Não existe módulo
   // `compliance` em ROLES (nem um dono de negócio definido para essa central de governança ainda — ver

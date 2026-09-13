@@ -187,7 +187,7 @@ revogar sessões; desabilitar conta; bloquear integração; parar scheduler (Mon
 modo de manutenção (**não criado nesta rodada** — fora de escopo, salvo mecanismo já existente); revogar
 segredo; isolar ambiente.
 
-## 13. LGPD e legal hold (gatilho, não implementação)
+## 13. LGPD e legal hold (gatilho + mecanismo real, H8)
 
 O runbook de qualquer incidente inclui a etapa: **"Avaliar se o incidente envolve dados pessoais"** e
 **"Avaliar necessidade de comunicação à ANPD/titulares conforme análise jurídica aplicável"** — sem
@@ -195,8 +195,16 @@ fixar um prazo legal específico nesta rodada (isso depende de avaliação jurí
 incidente; nenhum prazo regulatório é afirmado aqui).
 
 Se houver indício de fraude, vazamento, litígio, investigação ou obrigação regulatória, o registro do
-incidente marca `legalHoldReviewRequired = true` — **apenas um gatilho de revisão jurídica**, nunca uma
-política de retenção/legal hold em si (isso é H8, explicitamente fora de escopo desta rodada).
+incidente marca `legalHoldReviewRequired = true` — **apenas um gatilho de revisão jurídica**, este
+registro em si não abre nenhum hold automaticamente.
+
+Desde o Hardening H8 (`docs/LEGAL_HOLD.md`, `docs/PRODUCTION_GATE.md` seção 25), existe um mecanismo real
+a ser acionado manualmente por quem tem autorização (`diretoria`/`administrador`): `POST
+/api/legal-holds` com `scopeType: 'INCIDENT'` e `scopeValue` igual ao `incidentId`
+(`INC-YYYYMMDD-XXXXXXXX`) suspende o descarte automático de qualquer dado dentro desse escopo enquanto o
+hold estiver `active`. Abrir o hold continua sendo uma decisão humana explícita — `legalHoldReviewRequired`
+nunca abre o hold sozinho, e nenhum runbook deve tratar essa marcação como equivalente a um hold já
+ativo.
 
 ## 14. Escalation matrix
 

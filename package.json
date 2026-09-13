@@ -11,7 +11,8 @@
     "migrate:data": "node scripts/import-data.js",
     "migrate:h1b:data": "node scripts/migrate-h1b-data.js",
     "backup:postgres": "node scripts/backup-postgres.js",
-    "restore:postgres": "node scripts/restore-postgres.js"
+    "restore:postgres": "node scripts/restore-postgres.js",
+    "retention:run": "node scripts/run-retention.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1131.0",

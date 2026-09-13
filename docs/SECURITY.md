@@ -575,3 +575,29 @@ validação jurídica real). **PG-20 permanece explicitamente ABERTO**: o proces
 testado, mas nenhum canal de comunicação real (`INCIDENT_PRIMARY_CHANNEL`/`INCIDENT_SECONDARY_CHANNEL`/
 `INCIDENT_SECURITY_CONTACT`/`INCIDENT_PRIVACY_CONTACT`) nem nome individual real foi parametrizado nesta
 rodada — decisão operacional pré-produção, nunca inventada. Gate como um todo permanece NO-GO.
+
+**H8 (Retenção, Legal Hold e Auditoria) implementado PARCIALMENTE — PG-19 permanece aberto**
+(`docs/DECISIONS.md`, PROD-H8-01/02/03; `docs/PRODUCTION_GATE.md`, seção 25; `docs/DATA_RETENTION.md`;
+`docs/LEGAL_HOLD.md`): política de retenção centralizada (`retention/policy.js`) para 15 classes de dado,
+com defaults sempre rotulados como política interna proposta — nunca uma obrigação legal inventada ("a
+LGPD exige N dias" nunca aparece sem base jurídica concreta). Modelo formal de legal hold
+(`retention/legal-hold.js`, `migrations/009_h8_retention_legal_hold.sql`) com 5 escopos (GLOBAL/
+DATA_CLASS/ENTITY/INCIDENT/LEGAL_PROCESS), `reason`/`releaseReason` sempre obrigatórios, liberação nunca
+deleta a linha (histórico permanente), e `isUnderLegalHold()` como checagem central antes de qualquer
+purge. Runner de retenção (`retention/runner.js`, `scripts/run-retention.js`) dry-run por padrão, exige
+`--execute` explícito e, em produção, uma confirmação adicional (`RETENTION_EXECUTE_CONFIRMATION` — mesmo
+padrão de `RESTORE_CONFIRM_PRODUCTION` de H5), sempre transacional, sempre respeitando legal hold, sempre
+com evidência (`retention_runs` + eventos `RETENTION_DRY_RUN`/`RETENTION_EXECUTED`/
+`RETENTION_ITEM_SKIPPED_LEGAL_HOLD`/`RETENTION_FAILED` resumidos por classe/execução, nunca um evento por
+registro apagado). Auditoria (PG-18) ganhou metadados adicionais nas rotas novas de legal hold e nos
+eventos do runner: `requestId` (reaproveitado de H6), `ipHmac` (IP pseudonimizado via HMAC-SHA256 com
+`AUDIT_IP_HMAC_KEY`, fail-fast em produção se o recurso for exercitado sem chave — nunca hash sem segredo
+nem IP em texto puro) e `userAgentSummary` (família/plataforma minimizada, ex. `chrome/desktop` — nunca a
+string crua do `User-Agent`). Rotas de legal hold protegidas pela mesma gate de `/api/backup`
+(`allowed(user,'*','approve')`, só `diretoria`/`administrador`), sem vazamento cross-scope na listagem.
+**PG-19 permanece explicitamente ABERTO**: apenas 3 classes efêmeras (`AUTH_SESSION`/`AUTH_RESET_TOKEN`/
+`RATE_LIMIT`) têm purge de fato implementado nesta rodada — decisão deliberada de escopo, não lacuna
+técnica; a política GLOBAL cobrindo as classes sensíveis restantes (auditoria de negócio/segurança,
+processos jurídicos, incidentes, contas de usuário) ainda depende de homologação jurídica. **PG-18
+também permanece aberto**: o novo contexto de auditoria não foi retrofitado nos ~50 pontos de chamada de
+`audit()` pré-existentes, e `sessionId` permanece sempre `null`. Gate como um todo permanece NO-GO.
