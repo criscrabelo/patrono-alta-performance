@@ -82,8 +82,8 @@ e um checklist mínimo de LGPD. Não cobre: desenho de novas funcionalidades de 
 | PG-09 | Sessão/Auth | ~~Nenhuma política de senha~~ **FECHADO por H2** — comprimento mínimo (10), rejeita trivial/repetida/sequencial, nunca texto puro, sem rotação obrigatória sem causa (só em troca/reset/comprometimento/decisão administrativa) | N/A hoje (não há senha por usuário); vira obrigatório ao resolver PG-07 | ~~**P1**~~ **FECHADO** | ~~SIM~~ NÃO (fechado) | Definir política mínima de senha ao implementar PG-07 | Política documentada e validada no cadastro/redefinição | PG-07 |
 | PG-10 | Sessão/Auth | ~~Sem proteção a força bruta GLOBAL (por IP) em `/api/auth/login`/`/api/auth/mfa/verify`~~ **FECHADO por H3** (ver seção 20) — rate limiting distribuído por IP/identidade/combinado (PostgreSQL, sobrevive a restart/múltiplas instâncias), complementar ao bloqueio POR CONTA já fechado por H2 | Enumeração de credenciais/código por tentativa exaustiva distribuída entre contas/IPs | ~~**P0**~~ **FECHADO** | ~~SIM~~ NÃO (fechado) | Rate limiting + bloqueio progressivo por IP | N tentativas falhas em janela de tempo bloqueiam/atrasam novas tentativas por IP, além do bloqueio por conta já implementado | H3 |
 | PG-11 | Rate limiting | ~~Nenhuma rota tem rate limiting (login, API geral, integrações)~~ **FECHADO por H3** — login, MFA verify, forgot/reset-password, reset-token administrativo, enroll/confirm/disable de MFA, change-password, logout-all e aprovação de cadastro protegidos; API geral (fora das rotas de autenticação sensíveis) permanece sem rate limiting, fora do escopo mínimo desta rodada | Abuso, DoS de aplicação, força bruta | ~~**P0**~~ **FECHADO** (para as rotas sensíveis de autenticação — ver seção 20) | NÃO (fechado para o escopo mínimo) | Rate limiting global + reforçado em rotas sensíveis (login/MFA) | Rajada acima do limite recebe 429, sem afetar outros usuários | H3 |
-| PG-12 | HTTP hardening | Ausência de CSP/HSTS/X-Frame-Options/Referrer-Policy/Permissions-Policy | Clickjacking, XSS com maior impacto, downgrade de protocolo | **P1** | SIM | Adicionar headers de hardening padrão (helmet-like, sem framework novo se possível) | Headers presentes e validados em resposta HTTP real | H4 |
-| PG-13 | HTTP hardening | CORS não configurado explicitamente (same-origin implícito) | Comportamento não documentado; risco se um domínio de app separado for introduzido | **P2** | NÃO (aceitável enquanto for same-origin) | Documentar e, se necessário, configurar allowlist explícita | Política de CORS documentada e testada | H4 |
+| PG-12 | HTTP hardening | ~~Ausência de CSP/HSTS/X-Frame-Options/Referrer-Policy/Permissions-Policy~~ **FECHADO por H4** (ver seção 21) — CSP real (auditada a partir do frontend), HSTS em produção, X-Frame-Options DENY + frame-ancestors 'none', Referrer-Policy, Permissions-Policy negando recursos não usados | Clickjacking, XSS com maior impacto, downgrade de protocolo | ~~**P1**~~ **FECHADO** | ~~SIM~~ NÃO (fechado) | Adicionar headers de hardening padrão (helmet-like, sem framework novo se possível) | Headers presentes e validados em resposta HTTP real | H4 |
+| PG-13 | HTTP hardening | ~~CORS não configurado explicitamente (same-origin implícito)~~ **FECHADO por H4** — allowlist explícita (`CORS_ALLOWED_ORIGINS`), same-origin continua sendo o padrão sem configuração adicional | Comportamento não documentado; risco se um domínio de app separado for introduzido | ~~**P2**~~ **FECHADO** | ~~NÃO~~ NÃO (fechado) | Documentar e, se necessário, configurar allowlist explícita | Política de CORS documentada e testada | H4 |
 | PG-14 | HTTP hardening | Sem CSRF explícito (mitigado estruturalmente por Bearer token sem cookie) | Baixo hoje; se sessão migrar para cookie (PG-04), CSRF volta a ser relevante | **P2** | NÃO hoje / SIM se migrar para cookie | Reavaliar ao mudar modelo de sessão | Sem alteração enquanto o modelo for Bearer token puro | H2 (condicional) |
 | PG-15 | Dependências | `npm audit`: 2 altas (`image-size`/`pptxgenjs`, DoS por parser) | Negação de serviço na geração de apresentações PPTX | **P1** | SIM | Avaliar migração/downgrade controlado de `pptxgenjs` com validação de exportação PPTX/PDF | Vulnerabilidade tratada ou mitigação/waiver formal registrado | H9 |
 | PG-16 | Google Calendar | Sem OAuth real, sem token storage seguro | Bloqueia apenas a leitura real de Calendar (funcionalidade opcional) | **P2** | NÃO (feature opcional, adapter seguro por design) | Implementar OAuth mínimo + storage seguro de token quando priorizado | Fluxo de leitura real testado ponta a ponta sem expor token | H10 |
@@ -126,6 +126,15 @@ e um checklist mínimo de LGPD. Não cobre: desenho de novas funcionalidades de 
 - **P2 = 5** — inalterado.
 - **Fechados = 11** — PG-01, PG-02, PG-03, PG-04, PG-05, PG-06, PG-07, PG-08, PG-09, PG-10, PG-11.
 
+**Contagem após o Hardening H4 (ver seção 21) — PG-12/PG-13 fechados:**
+
+- **P0 aberto = 4** — inalterado (PG-19, PG-20, PG-21, PG-22).
+- **P1 aberto = 4** — PG-15, PG-17, PG-23, PG-24 (PG-12 fechado).
+- **P2 aberto = 4** — PG-14, PG-16, PG-18, PG-25 (PG-13 fechado). PG-14 permanece **explicitamente
+  não fechado** por H4 — continua P2, condicional a uma futura migração de Bearer token para cookie
+  (nenhuma migração desse tipo ocorreu nesta rodada).
+- **Fechados = 13** — PG-01 a PG-13.
+
 PG-01/PG-02 são exibidos como dois achados por clareza de causa raiz (persistência sem transação e sem
 lock são sintomas distintos do mesmo problema), mas compartilham a mesma correção (H1) — contados
 separadamente na tabela e nesta soma, não duplicados fora dela. PG-24 foi reclassificado de P2 para P1
@@ -142,8 +151,8 @@ própria classificação declarada.
 | Sessões | **FECHADO por H2** — persistida em `auth_sessions` (Postgres), sobrevive a restart/múltiplas instâncias, logout/logout-all revogam no servidor (ver seção 19) | NÃO (fechado) | ~~Sessão persistida + logout/revogação funcionais~~ atendido |
 | Autenticação (credenciais) | **FECHADO por H2** — senha individual (hash próprio) + MFA individual (TOTP, RFC 6238) por usuário, senha temporária força troca, reset por token de uso único (ver seção 19) | NÃO (fechado) | ~~Credencial e MFA por usuário~~ atendido |
 | Rate limiting | **FECHADO por H3** (para rotas sensíveis de autenticação) — rate limiting distribuído (PostgreSQL) por IP/identidade/combinado em login, MFA, forgot/reset-password, reset-token administrativo, enroll/confirm/disable de MFA, change-password, logout-all, aprovação de cadastro; bloqueio POR CONTA já fechado por H2 (`failed_login_count`/`locked_until`) permanece complementar (ver seção 20) | NÃO (fechado para o escopo mínimo) | ~~Rate limiting em rotas sensíveis~~ atendido; API geral fora de rotas de autenticação sensíveis fica para uma rodada futura, se priorizada |
-| Headers HTTP | Só `nosniff` | SIM | CSP/HSTS/X-Frame-Options/Referrer-Policy/Permissions-Policy presentes |
-| CSRF | Mitigado estruturalmente (Bearer, sem cookie) | NÃO (hoje) | Reavaliar se o modelo de sessão mudar |
+| Headers HTTP | **FECHADO por H4** — CSP/HSTS(produção)/X-Frame-Options/frame-ancestors/Referrer-Policy/Permissions-Policy/nosniff presentes; CORS same-origin por padrão com allowlist explícita (ver seção 21) | NÃO (fechado) | ~~CSP/HSTS/X-Frame-Options/Referrer-Policy/Permissions-Policy presentes~~ atendido |
+| CSRF | Mitigado estruturalmente (Bearer, sem cookie) — **PG-14 permanece não fechado por H4**, deliberadamente | NÃO (hoje) | Reavaliar se o modelo de sessão mudar |
 | Secrets | Server-side only, sem vazamento identificado | NÃO | Manter prática atual + revisão contínua |
 | Backup | Sob demanda, sem agendamento/offsite/RPO/RTO | SIM | Backup agendado + offsite + RPO/RTO definidos |
 | Restore | Endpoint existe, sem teste de restore evidenciado | SIM | Restore testado e documentado ao menos uma vez |
@@ -689,18 +698,98 @@ atribui corretamente o usuário autenticado em rotas autenticadas).
 **Por que "aguardando homologação" e não "concluído":** mesma razão do H1A/H1B/H2 — implementação
 testada e funcional, mas depende de revisão humana antes de qualquer autorização de uso.
 
+## 21. Status do Hardening H4 (IMPLEMENTADO — AGUARDANDO HOMOLOGAÇÃO)
+
+**Decisão relacionada:** `docs/DECISIONS.md`, PROD-H4-01.
+
+**Fecha:** PG-12 (headers de hardening HTTP) e PG-13 (CORS explícito). **Não fecha** PG-14 (CSRF,
+permanece P2 condicional a uma futura migração de Bearer token para cookie — nenhuma ocorreu), nem
+PG-15/PG-16/PG-17/PG-18/PG-19/PG-20/PG-21/PG-22/PG-23/PG-24/PG-25.
+
+**Arquitetura implementada (H4):** camada centralizada (`applySecurityHeaders()`/`handlePreflight()` em
+`server.js`), chamada uma única vez no topo de `handler()` — antes de qualquer roteamento estático,
+preflight ou `/api/*` — via `res.setHeader()` (que se mescla automaticamente com os headers passados a
+`res.writeHead()` por `json()`/`rateLimited()`/`staticFile()`); nenhuma rota relevante escapa dos
+headers, sem espalhar `res.setHeader(...)` manualmente rota por rota.
+
+- **CSP construída a partir de auditoria real do frontend** (não um wildcard genérico): `default-src
+  'self'`, `img-src 'self'`, `font-src 'self'`, `connect-src 'self'` (nenhum CDN de terceiros é
+  carregado pelo navegador; Google Calendar/Monday são chamados só server-side). `object-src 'none'`,
+  `base-uri 'self'`, `frame-ancestors 'none'`, `form-action 'self'`. `script-src`/`style-src` precisam
+  de `'unsafe-inline'` por dois motivos INDEPENDENTES e documentados: (1) `public/app.js` usa
+  manipuladores de evento inline (`onclick=`/`onchange=`/etc.) extensivamente, gerados dinamicamente —
+  eliminar exigiria migrar ~28 pontos de `innerHTML` para `addEventListener()`, um refactor estrutural
+  fora do escopo desta rodada; (2) 5 barras de progresso com largura calculada em tempo de render usam
+  `style="width:${x}%"`. Os demais usos de estilo/script inline ESTÁTICOS foram eliminados nesta mesma
+  rodada: `public/status.html` teve seu `<style>`/`<script>` inline extraídos para
+  `public/status.css`/`public/status.js`; 4 usos de `style="width:100%;margin-top:20px"` em
+  `public/app.js` viraram a classe `.btn-block` (`public/styles.css`).
+- **Defesa dupla contra clickjacking**: CSP `frame-ancestors 'none'` + `X-Frame-Options: DENY`.
+- **HSTS só em produção** (`NODE_ENV==='production'`, `max-age=31536000`) — nunca em dev/test HTTP
+  local; `includeSubDomains`/`preload` deliberadamente omitidos (sem decisão formal sobre topologia de
+  subdomínios — HSTS é cacheado agressivamente pelo navegador, ativar sem certeza seria de fato
+  irreversível na prática). Aplicado por AMBIENTE, nunca por inspeção do request/`X-Forwarded-Proto` —
+  não reabre nem reaproveita `TRUST_PROXY_HOPS` (H3) para isso.
+- **Referrer-Policy**: `strict-origin-when-cross-origin`. **Permissions-Policy**: nega explicitamente
+  câmera/microfone/geolocalização/pagamento/USB/bluetooth/sensores/fullscreen/clipboard (nenhum usado
+  pelo Patrono). `X-Content-Type-Options: nosniff` mantido globalmente. `Cross-Origin-Opener-Policy` e
+  `Cross-Origin-Resource-Policy: same-origin` adicionados (coerentes com a política same-origin).
+- **`Cache-Control: no-store`** em toda resposta JSON de API (`json()`/`rateLimited()`) — nunca cacheada,
+  inclusive respostas de autenticação/sessão; assets estáticos mantêm o comportamento de cache padrão
+  (`staticFile()` não foi alterado nesse aspecto).
+- **MIME types corrigidos**: mapa explícito (`STATIC_MIME_TYPES`) substitui a cadeia ternária anterior
+  sem ramos para `.json`/`.svg`/fontes — com `nosniff` global, um Content-Type incorreto ativamente
+  quebra a renderização em vez de só ser impreciso.
+- **CORS same-origin por padrão, allowlist explícita** (`CORS_ALLOWED_ORIGINS`, comma-separated, origens
+  EXATAS scheme+host+porta) — nunca wildcard, nunca reflete a Origin recebida automaticamente. Matching
+  sempre por igualdade exata via `URL` nativo (nunca substring/`endsWith` — `https://app.exemplo.com.
+  evil.test` nunca casa com `https://app.exemplo.com`). `Origin: null` sempre negada por padrão.
+  Preflight (`OPTIONS`) nunca alcança o roteador de negócio — sempre 204, com
+  `Access-Control-Allow-Methods`/`-Headers` só quando a Origin é permitida. CORS nunca substitui
+  autenticação: uma Origin permitida ainda exige Bearer token válido nas rotas autenticadas.
+- **Integração com H3 preservada**: resposta 429 continua com `Retry-After` e todos os headers de H4.
+- **Correção pós-implementação — normalização da allowlist CORS**: `CORS_ALLOWED_ORIGINS` passou a ser
+  normalizada pelo MESMO helper usado para a Origin recebida (`normalizeCorsOrigin()`), eliminando um
+  descompasso em que a configuração era guardada como string crua enquanto a comparação usava `URL`
+  nativo — configurações com barra final, host em caixa alta ou porta padrão explícita passam a casar
+  corretamente; uma entrada com path/query/hash é rejeitada por inteiro (fail-closed), nunca truncada
+  silenciosamente. Em produção, uma entrada malformada em `CORS_ALLOWED_ORIGINS` agora interrompe o
+  boot explicitamente (`validateAuthRuntimeConfig()`); fora de produção é apenas descartada. Ver
+  `docs/DECISIONS.md`, PROD-H4-01 (correção pós-implementação), para o detalhamento completo.
+
+**O que H4 NÃO fecha (deliberadamente fora desta rodada):** PG-14 (CSRF, continua condicional); refactor
+de `onclick=`/etc. para `addEventListener()`; cabeçalhos `X-RateLimit-*` completos (H3/H4); qualquer
+item de H5-H11. Gate como um todo permanece **NO-GO PARA PRODUÇÃO**.
+
+**Testes:** 418/418 com Postgres real (384 anteriores + 23 do H4 original + 11 da correção de
+normalização CORS, em `tests/h4-http-hardening.test.js` — CSP, HSTS, frame protection, Referrer-Policy,
+Permissions-Policy, ausência de header Server/X-Powered-By, CORS same-origin/permitida/negada/ataque-de-
+sufixo/Origin-null, preflight permitido/negado, auth+CORS, erros (401/404/403) com headers, healthcheck,
+MIME types, um teste dedicado confirmando que o 429 de H3 preserva Retry-After + headers H4, e os novos
+`[H4-CORS-NORM-*]` — unitários de `normalizeCorsOrigin()` e observáveis via servidor isolado para
+trailing slash/caixa alta/porta padrão/rejeição de path/fail-fast e tolerância de boot), 0 falhando,
+nenhum teste removido. O único teste deste arquivo que exige Postgres (429 de H3) é explicitamente
+pulado sem `TEST_DATABASE_URL`, nunca fingindo cobertura que não existe; os demais 33 rodam idênticos em
+ambos os backends (JSON fallback e Postgres), confirmando que os headers de segurança e a normalização
+CORS nunca dependem do backend de persistência.
+
+**Por que "aguardando homologação" e não "concluído":** mesma razão do H1A/H1B/H2/H3 — implementação
+testada e funcional, mas depende de revisão humana antes de qualquer autorização de uso.
+
 ## 16. Decisão final atual
 
 **NO-GO PARA PRODUÇÃO** — inalterado por esta rodada de hardening.
 
-Após o H1A/H1B/H2/H3: **4 P0 abertos** (ausência de retenção/legal hold — H8, ausência de incident
+Após o H1A/H1B/H2/H3/H4: **4 P0 abertos** (ausência de retenção/legal hold — H8, ausência de incident
 response — H7, backup/restore de produção não validado — H5, ausência de infraestrutura de deploy como
-código — H11), **5 P1 abertos**, **5 P2** — 14 achados abertos, **11 fechados** (PG-01 a PG-11, ver
-seções 17/18/19/20). Na matriz da seção 5, as linhas "Persistência", "Sessões", "Autenticação
-(credenciais)" e "Rate limiting" deixam de bloquear; os demais 7 gates bloqueantes permanecem. Nenhum
-waiver foi emitido.
+código — H11), **4 P1 abertos**, **4 P2 abertos** — 12 achados abertos, **13 fechados** (PG-01 a PG-13,
+ver seções 17/18/19/20/21). Na matriz da seção 5, as linhas "Persistência", "Sessões", "Autenticação
+(credenciais)", "Rate limiting" e "Headers HTTP" deixam de bloquear; os demais 7 gates bloqueantes
+(Backup, Restore, Logging/Monitoramento, Incident Response, Retenção/Legal Hold, Dependências, Deploy/
+Infra) permanecem, mais o LGPD (P1, não bloqueante técnico mas pendente de decisão de negócio/jurídico).
+Nenhum waiver foi emitido.
 O Sprint 2 permanece concluído no escopo homologado (`docs/DECISIONS.md`, D2-CLOSE) — este documento não
 o reabre nem contradiz; apenas formaliza que produção é um gate técnico/de negócio separado, ainda não
 atendido, e que
-o H1A/H1B/H2/H3 avançaram critérios específicos de persistência/sessão/autenticação/rate limiting sem
-declarar o gate inteiro atendido.
+o H1A/H1B/H2/H3/H4 avançaram critérios específicos de persistência/sessão/autenticação/rate limiting/
+headers HTTP sem declarar o gate inteiro atendido.

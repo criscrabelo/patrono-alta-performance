@@ -861,3 +861,94 @@ PROD-H3-01, 2º adendo; `docs/PRODUCTION_GATE.md`, seção 20).
     usuário autenticado — provando que a correção não afeta rotas onde o ator é genuinamente conhecido.
 - CI roda a mesma bateria (Node 20.x/22.x, Postgres real) sem nenhum teste pulado.
 - `npm audit`: inalterado (2 vulnerabilidades altas conhecidas — H9, não corrigidas nesta rodada).
+
+## QA — Hardening H4 (HTTP security headers e política explícita de CORS)
+
+- **407 testes totais** com `TEST_DATABASE_URL` (384 anteriores + 23 novos em
+  `tests/h4-http-hardening.test.js`), 0 falhando, nenhum teste removido. **288 testes** sem
+  `TEST_DATABASE_URL` (287 passam + 1 pulado explicitamente — o único cenário deste arquivo que
+  depende de Postgres, `[H4-429]`) — confirma que os headers de segurança nunca dependem do backend
+  de persistência (item 53 do escopo H4). *(Ver correção de normalização CORS ao final desta seção —
+  os totais passam a 418/418 com Postgres e 321 passam + 6 pulados sem Postgres.)*
+- `tests/h4-http-hardening.test.js` roda sobre o fallback JSON local (mesma técnica de
+  `tests/security-integration.test.js`, diretório de dados isolado), deliberadamente SEM depender de
+  Postgres — os headers são aplicados antes de qualquer lógica de persistência rodar.
+- **Cobertura por categoria**:
+  - **CSP (A-F)**: `GET /` retorna CSP; CSP nunca contém `default-src */script-src *`; `frame-ancestors
+    'none'` presente; `object-src 'none'`; `base-uri 'self'`; frontend real continua carregando —
+    `index.html`/`app.js`/`styles.css`/`status.html`/`status.js`/`status.css` respondem 200 com
+    Content-Type correto, e `status.html` não contém mais `<script>`/`<style>` inline (extraídos nesta
+    rodada).
+  - **HSTS (A-C)**: ausente em `NODE_ENV=test`; presente (`max-age=31536000`) simulando
+    `NODE_ENV=production`.
+  - **Frame**: `X-Frame-Options: DENY` e CSP `frame-ancestors 'none'` presentes tanto em HTML quanto
+    em resposta de API.
+  - **Referrer-Policy**: `strict-origin-when-cross-origin` confirmado.
+  - **Permissions-Policy**: presente; câmera/microfone/geolocalização/pagamento/USB/bluetooth
+    explicitamente negados.
+  - **Server header**: nenhuma resposta expõe `Server` nem `X-Powered-By`.
+  - **CORS (A-E)**: requisição sem Origin funciona normalmente sem exigir ACAO; Origin configurada em
+    `CORS_ALLOWED_ORIGINS` recebe `Access-Control-Allow-Origin` EXATO (nunca `*`) + `Vary: Origin`;
+    Origin não configurada nunca recebe ACAO (nunca reflete a Origin recebida); ataque de sufixo de
+    domínio (`https://app.exemplo.com.evil.test` contra allowlist `https://app.exemplo.com`) é negado;
+    `Origin: null` sempre negada.
+  - **Preflight (A-B)**: `OPTIONS` com Origin permitida devolve 204 com
+    `Access-Control-Allow-Methods`/`-Headers` corretos e corpo vazio; `OPTIONS` com Origin negada
+    devolve 204 sem nenhum ACAO permissivo.
+  - **Auth + CORS**: uma Origin permitida NÃO elimina autenticação — `GET /api/me` sem Bearer token
+    continua 401 mesmo com Origin explicitamente confiável, com os headers de CORS ainda presentes na
+    resposta 401.
+  - **Erros**: respostas 401/404 (e uma tentativa de exclusão de registro inexistente) continuam com
+    CSP/`nosniff`/`Cache-Control: no-store`.
+  - **Healthcheck**: recebe os mesmos headers básicos de segurança; sem Origin configurada, nenhum
+    ACAO é concedido nem no healthcheck.
+  - **MIME types**: `/`, `/app.js`, `/styles.css`, `/logo-coevo-light.png` recebem Content-Type
+    correto para cada extensão.
+  - **429 (integração H3, gated por Postgres)**: exaure o bucket combinado de login (8/10min) contra
+    uma conta real seedada num banco Postgres isolado; confirma que a resposta 429 mantém
+    `Retry-After` (H3) e todos os headers de H4 (`content-security-policy`, `x-content-type-options`,
+    `x-frame-options`, `cache-control: no-store`).
+- **Ajustes de frontend feitos para permitir uma CSP mais estrita, sem quebrar a aplicação**:
+  `public/status.html` teve seu `<style>`/`<script>` inline extraídos para `public/status.css`/
+  `public/status.js` (um `<div class="card">` com `style="margin-top:16px"` virou a classe
+  `.card-spaced`); os 4 usos ESTÁTICOS de `style="width:100%;margin-top:20px"` em `public/app.js`
+  (botões de submit das telas de login/MFA/cadastro/erro) viraram a classe `.btn-block`
+  (`public/styles.css`). As 5 barras de progresso com largura DINÂMICA (calculada em tempo de
+  render) permanecem inline — documentado como limitação técnica em `docs/DECISIONS.md` (PROD-H4-01,
+  item 3), junto com os manipuladores de evento inline (`onclick=`/etc.) de `public/app.js`, que são
+  o motivo real (e independente) de `script-src` precisar de `'unsafe-inline'`.
+- CI roda a mesma bateria (Node 20.x/22.x, Postgres real) sem nenhum teste pulado (exceto o único
+  cenário gated por Postgres quando `TEST_DATABASE_URL` não está definida, explicitamente reportado
+  como pulado, nunca fingindo cobertura que não existe).
+- `npm audit`: inalterado (2 vulnerabilidades altas conhecidas — H9, não corrigidas nesta rodada).
+
+## QA — Correção pós-H4 (normalização da allowlist CORS)
+
+Correção da mesma decisão PROD-H4-01 (`docs/DECISIONS.md`) — `CORS_ALLOWED_ORIGINS` passou a ser
+normalizada pelo mesmo helper (`normalizeCorsOrigin()`) usado para a Origin recebida, eliminando um
+descompasso em que a configuração era guardada como string crua enquanto a comparação já usava `URL`
+nativo.
+
+- **418 testes totais** com `TEST_DATABASE_URL` (407 anteriores + 11 novos em
+  `tests/h4-http-hardening.test.js`), 0 falhando, nenhum teste removido. **321 testes passam + 6
+  pulados** sem `TEST_DATABASE_URL` (mesmo padrão — todos os novos testes de normalização rodam
+  idênticos em ambos os backends, exceto o `[H4-429]` já gated).
+- **11 testes novos (`[H4-CORS-NORM-*]`)**:
+  - **unitários de `normalizeCorsOrigin()`**: barra final/host em caixa alta/porta padrão do esquema
+    são equivalentes à origem canônica; path/query/hash/esquemas não-HTTP (`file:`/`javascript:`/
+    `data:`)/vazio/`null`/string inválida são rejeitados (retornam `null`).
+  - **[H4-CORS-NORM-A/B/C]**: configuração com barra final, caixa alta ou porta padrão explícita
+    (`:443`) continua permitindo a Origin escrita da forma canônica (sem barra, minúscula, sem porta).
+  - **[H4-CORS-NORM-D]**: configuração com path (`https://app.exemplo.com/algum/caminho`) é
+    descartada por INTEIRO — nunca truncada silenciosamente para a origem (decisão fail-closed).
+  - **[H4-CORS-NORM-E]**: Origin recebida com esquema `file:`/`javascript:`/`data:` nunca recebe ACAO.
+  - **[H4-CORS-NORM-F/G]**: `Origin: null` e o ataque de sufixo de domínio continuam negados com a
+    allowlist normalizada (regressão dos comportamentos já cobertos por `[H4-CORS-E]`/`[H4-CORS-D]`).
+  - **[H4-CORS-NORM-failfast]**: `validateAuthRuntimeConfig()` lança em produção quando
+    `CORS_ALLOWED_ORIGINS` contém uma entrada malformada, com a mensagem `"CORS_ALLOWED_ORIGINS
+    inválida"` (sem revelar segredo).
+  - **[H4-CORS-NORM-tolerant]**: fora de produção, a mesma entrada malformada não interrompe o boot —
+    é apenas descartada.
+- Não altera PG-12/PG-13/PG-14, não reabre H3, não expande o escopo de H4.
+- CI roda a mesma bateria (Node 20.x/22.x, Postgres real) sem nenhum teste pulado.
+- `npm audit`: inalterado (2 vulnerabilidades altas conhecidas — H9, não corrigidas nesta rodada).

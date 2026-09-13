@@ -1248,6 +1248,123 @@ autoria descrita no item 19 acima.
     de um evento de auditoria já registrado pela decisão original. O gate como um todo permanece
     **NO-GO PARA PRODUÇÃO**. H4–H11 não foram alterados.
 
+## 1.9. Hardening H4 — Decisão PROD-H4-01
+
+### PROD-H4-01 — HTTP security headers e política explícita de CORS
+
+**Status: IMPLEMENTADO / AGUARDANDO HOMOLOGAÇÃO** (ver `docs/PRODUCTION_GATE.md`, seção 21, para o
+detalhamento técnico completo — esta decisão não o duplica, apenas registra o que foi decidido).
+
+**Conteúdo da decisão:**
+
+1. **Camada centralizada, nunca headers espalhados manualmente por rota.** `applySecurityHeaders(req,
+   res)` é chamada uma única vez, no topo de `handler()` (`server.js`), ANTES de qualquer roteamento
+   estático, preflight (`OPTIONS`) ou `/api/*` — via `res.setHeader()`, que se mescla automaticamente
+   com os headers passados a um `res.writeHead()` posterior (`json()`/`rateLimited()`/`staticFile()`).
+   Nenhuma dependência nova foi adicionada (sem Express/`helmet`/`cors`) — o projeto usa `node:http`
+   nativo, e a solução é um helper próprio e pequeno.
+2. **CSP construída a partir de uma auditoria REAL do frontend** (`public/index.html`, `public/app.js`,
+   `public/status.html`/`.js`/`.css`, CSS) — nunca `default-src */script-src *`. `default-src 'self'`,
+   `object-src 'none'`, `base-uri 'self'`, `frame-ancestors 'none'`, `form-action 'self'`,
+   `img-src`/`font-src`/`connect-src 'self'` (nenhum CDN de terceiros é carregado pelo navegador;
+   Google Calendar/Monday são chamados exclusivamente server-side).
+3. **`script-src`/`style-src` precisam de `'unsafe-inline'`, por dois motivos INDEPENDENTES e
+   documentados no código** (nunca usar um como desculpa para o outro):
+   - `public/app.js` usa manipuladores de evento inline (`onclick=`/`onchange=`/`oninput=`/
+     `onsubmit=`) extensivamente, gerados dinamicamente via `innerHTML` (~28 pontos de montagem de
+     DOM). CSP não tem como aplicar nonce/hash a um atributo cujo conteúdo muda a cada render sem
+     `'unsafe-hashes'` por hash individual (inviável aqui). Migrar para `addEventListener()`
+     eliminaria essa necessidade, mas é um refactor estrutural amplo, fora do escopo desta rodada —
+     documentado como limitação conhecida, recomendado para uma rodada futura de hardening de
+     frontend.
+   - 5 barras de progresso (`public/app.js`, `public/dashboard-widgets.js`) usam
+     `style="width:${x}%"` com largura calculada em tempo de render — mesma limitação técnica
+     (valor dinâmico, hash inviável).
+   - Todos os usos ESTÁTICOS de estilo/script inline foram eliminados NESTA MESMA rodada, antes de
+     decidir manter `'unsafe-inline'` só onde é genuinamente necessário: o `<style>`/`<script>`
+     inline que existia em `public/status.html` foi extraído para `public/status.css`/
+     `public/status.js`; os 4 usos de `style="width:100%;margin-top:20px"` (estáticos) em
+     `public/app.js` viraram a classe `.btn-block` (`public/styles.css`).
+4. **Defesa dupla contra clickjacking**: CSP `frame-ancestors 'none'` (moderno) + `X-Frame-Options:
+   DENY` (compatibilidade).
+5. **HSTS só em produção** (`NODE_ENV==='production'`, `max-age=31536000`) — nunca em dev/test HTTP
+   local. `includeSubDomains`/`preload` deliberadamente OMITIDOS nesta rodada — sem decisão formal
+   sobre a topologia de subdomínios, ativá-los seria na prática irreversível (navegadores cacheiam
+   HSTS agressivamente). Aplicado por AMBIENTE, nunca por inspeção do request/`X-Forwarded-Proto` —
+   não reabre nem reaproveita `TRUST_PROXY_HOPS` (H3) para isso, propositalmente, para não acoplar
+   duas políticas independentes.
+6. **Referrer-Policy**: `strict-origin-when-cross-origin`. **Permissions-Policy**: nega
+   explicitamente câmera/microfone/geolocalização/pagamento/USB/bluetooth/acelerômetro/giroscópio/
+   magnetômetro/fullscreen/clipboard — nenhum usado pelo Patrono (confirmado na auditoria de
+   frontend). `X-Content-Type-Options: nosniff` mantido globalmente (já existia, centralizado).
+   `Cross-Origin-Opener-Policy`/`Cross-Origin-Resource-Policy: same-origin` adicionados — coerentes
+   com a política same-origin já vigente.
+7. **`Cache-Control: no-store` em toda resposta JSON de API** (`json()`/`rateLimited()`) — nunca
+   cacheada, inclusive respostas de autenticação/sessão. Assets estáticos (`staticFile()`) mantêm o
+   comportamento de cache padrão do navegador, deliberadamente não alterado.
+8. **MIME types corrigidos**: mapa explícito (`STATIC_MIME_TYPES`) substitui a cadeia ternária
+   anterior, que não tinha ramos para `.json`/`.svg`/fontes (cairia em `application/octet-stream`).
+   Com `nosniff` global, um Content-Type incorreto ativamente quebra a renderização — por isso vale
+   listar explicitamente mesmo extensões ainda não usadas hoje em `public/`.
+9. **CORS same-origin por padrão, allowlist explícita** (`CORS_ALLOWED_ORIGINS`, nova variável de
+   ambiente — lista separada por vírgulas de origens EXATAS scheme+host+porta). Vazia/ausente
+   (padrão) = nenhuma origem cross-origin adicional confiada; same-origin continua funcionando
+   normalmente (navegadores nunca exigem CORS para requisições same-origin). Nunca wildcard
+   (`Access-Control-Allow-Origin: *`), nunca reflete automaticamente qualquer Origin recebida.
+10. **Matching de Origin sempre por igualdade EXATA** (scheme+host+porta, via `URL` nativo) — nunca
+    substring/`endsWith` (`https://app.exemplo.com.evil.test` nunca casa com `https://app.exemplo.com`
+    configurada). `Origin: null` (iframes sandboxed, alguns redirects) sempre negada por padrão.
+11. **Preflight (`OPTIONS`) nunca alcança o roteador de negócio** — sempre 204, nunca dado de negócio.
+    Para uma Origin permitida, inclui `Access-Control-Allow-Methods`/`-Headers`/`-Max-Age`; para
+    qualquer outra, nenhum header de permissão CORS adicional é concedido (os headers de segurança
+    base continuam presentes de qualquer forma, via `applySecurityHeaders()`).
+12. **CORS nunca substitui autenticação.** Uma Origin permitida ainda exige Bearer token válido nas
+    rotas autenticadas — testado explicitamente (`tests/h4-http-hardening.test.js`, `[H4-auth-cors]`).
+13. **PG-14 (CSRF) permanece EXPLICITAMENTE não fechado por esta decisão** — continua P2, condicional
+    a uma futura migração do modelo de sessão de Bearer token para cookie (nenhuma migração desse
+    tipo ocorreu nesta rodada). Nenhum token CSRF foi implementado.
+14. **Integração com H3 preservada**: resposta 429 (rate limiting) continua com `Retry-After` e todos
+    os headers de H4 — testado explicitamente (`[H4-429]`, gated por `TEST_DATABASE_URL`, já que H3
+    fica inerte no fallback JSON).
+15. **Esta decisão não fecha o Gate de Produção nem declara H4 integralmente concluído** — apenas os
+    critérios PG-12 e PG-13 de `docs/PRODUCTION_GATE.md` são fechados (ver seção 21). PG-14 permanece
+    aberto, deliberadamente. O gate como um todo permanece **NO-GO PARA PRODUÇÃO**. H5–H11 não foram
+    alterados por esta decisão.
+
+**Correção pós-implementação (mesma decisão PROD-H4-01) — normalização da allowlist CORS.**
+A configuração `CORS_ALLOWED_ORIGINS` era armazenada como string crua (só `trim()`), enquanto a Origin
+recebida em cada requisição já passava por `new URL()` e era comparada por `protocol + '//' + host` —
+duas semânticas diferentes, o que fazia configurações semanticamente válidas mas escritas de forma
+diferente (barra final, host em caixa alta, porta padrão explícita) falharem silenciosamente no match.
+Corrigido com um único helper, `normalizeCorsOrigin(value)`, usado tanto para construir
+`CORS_ALLOWED_ORIGINS` quanto dentro de `isAllowedOrigin()` — nunca duas normalizações divergentes:
+- Aceita apenas os esquemas `http:`/`https:`; rejeita qualquer outro (`file:`, `javascript:`, `data:`,
+  etc.), vazio, e o literal `"null"`.
+- Usa `new URL(value).origin` — host tratado sem diferenciar maiúsculas/minúsculas e porta padrão do
+  esquema (`:443` para https, `:80` para http) omitida, exatamente como o navegador normaliza o header
+  `Origin` que envia.
+- Uma entrada com `pathname` (diferente de `/`), `query` ou `hash` é **rejeitada por inteiro**
+  (`null`) — decisão fail-closed: nunca trunca silenciosamente `"https://app.exemplo.com/algo"` para
+  `"https://app.exemplo.com"`, porque um operador que escreveu algo além de uma origem pura
+  provavelmente cometeu um erro, e mudar isso sem avisar é mais arriscado do que simplesmente não
+  confiar na entrada.
+- **Fail-fast de configuração**: em produção, `validateAuthRuntimeConfig()` agora também rejeita o
+  boot se qualquer entrada de `CORS_ALLOWED_ORIGINS` for malformada (mensagem
+  `"CORS_ALLOWED_ORIGINS inválida"`, sem revelar segredo) — uma allowlist mal escrita nunca deve ser
+  silenciosamente ignorada em produção. Fora de produção, uma entrada inválida é apenas descartada
+  (mais tolerante, para não travar desenvolvimento/teste por uma env var local malformada) —
+  documentado como assimetria deliberada.
+- Testes adicionados em `tests/h4-http-hardening.test.js` (`[H4-CORS-NORM-*]`): unitários do helper
+  (trailing slash, caixa alta, porta padrão, rejeição de path/query/hash/esquemas não-HTTP/vazio/
+  `null`), comportamento observável via servidor isolado (config com barra final/caixa alta/porta
+  padrão continua permitindo a Origin canônica; config com path é descartada por inteiro; ataque de
+  sufixo de domínio continua negado com a allowlist normalizada) e o fail-fast/tolerância de boot.
+- Esta correção não altera PG-12/PG-13/PG-14 (já registrados acima), não reabre H3, e não expande o
+  escopo de H4 — é uma correção de exatidão da mesma allowlist já decidida no item 9.
+
+Esta decisão não altera D1/D4/D2-CLOSE/PROD-GATE-01/PROD-H1-01/PROD-H1B-01/PROD-H2-01/PROD-H3-01 já
+homologadas — apenas registra o avanço específico do H4 dentro do gate de produção já aberto.
+
 ---
 
 ## 2. ADRs de Engenharia — Fase 0 (Sprint 1)
