@@ -27,6 +27,7 @@ const backupCrypto = require('../backup/crypto');
 const { sanitizeErrorMessage } = require('../backup/sanitize');
 const runsRepository = require('../backup/runs-repository');
 const { parsePostgresConnection, pgCliArgs, pgChildEnv } = require('../backup/pg-connection');
+const { RestoreEvidenceError } = require('../backup/errors');
 
 // Dados operacionais efêmeros (item 30-32 do escopo H5): após um disaster recovery, preferir REVOGAR
 // sessões/desafios/tokens/buckets de rate limit em vez de restaurá-los cegamente. Nenhum deles é dado de
@@ -116,6 +117,15 @@ async function runRestore(options = {}) {
   }
 
   backupCrypto.validateBackupEncryptionKeyIfPresent();
+
+  // `options.runsRepositoryOverride` é injetável (opcional) para permitir testar deliberadamente uma
+  // falha na GRAVAÇÃO de evidência (`restore_runs`) sem depender de restrição de privilégio real — ao
+  // contrário de `backup_runs` (tabela pré-existente, cujo dono é sempre o superusuário de migração),
+  // `restore_runs` é recriada pelo PRÓPRIO `pg_restore` (com `--no-owner`, o papel conectado se torna o
+  // dono da tabela restaurada) — um dono sempre tem privilégio pleno sobre seus próprios objetos, então
+  // não há como restringir via GRANT/REVOKE uma falha de INSERT realista para este caminho específico.
+  // Mesmo padrão de injeção de dependência já usado para `s3Client`/`tempDir` neste módulo.
+  const runsRepo = options.runsRepositoryOverride || runsRepository;
 
   const workDir = fs.mkdtempSync(path.join(options.tempDir || os.tmpdir(), 'patrono-restore-'));
   fs.chmodSync(workDir, 0o700);
@@ -211,30 +221,72 @@ async function runRestore(options = {}) {
 
     const completedAt = new Date().toISOString();
     const commit = applicationCommit();
-    await runsRepository.insertRestoreRun(targetClient, {
-      restoreId, backupId: manifest.backupId, targetEnvironment, result: 'success',
-      applicationCommit: commit, operatorIdentity: options.operatorIdentity || process.env.RESTORE_OPERATOR || null,
-      startedAt
-    }).catch(() => {});
-
-    return {
+    const report = {
       restoreId, backupId: manifest.backupId, startedAt, completedAt, targetEnvironment, result: 'success',
       durationMs: Date.parse(completedAt) - Date.parse(startedAt),
-      revokedEphemeralTables: revokedTables, smoke, manifest
+      revokedEphemeralTables: revokedTables, smoke, manifest, evidenceRecorded: false
     };
+
+    // Correção pós-H5 (revisão técnica independente): o `pg_restore` JÁ FOI EXECUTADO neste ponto — o
+    // restore em si é um sucesso independentemente do que acontecer aqui. Se `insertRestoreRun()`
+    // falhar, NUNCA tentamos reexecutar o restore (seria destrutivo/desnecessário) — lançamos um erro
+    // DEDICADO (`RestoreEvidenceError`) distinguindo claramente "resultado da execução" (sucesso) de
+    // "resultado do registro de evidência" (falhou), com o relatório completo anexado.
+    try {
+      await runsRepo.insertRestoreRun(targetClient, {
+        restoreId, backupId: manifest.backupId, targetEnvironment, result: 'success',
+        applicationCommit: commit, operatorIdentity: options.operatorIdentity || process.env.RESTORE_OPERATOR || null,
+        startedAt
+      });
+      report.evidenceRecorded = true;
+    } catch (evidenceError) {
+      throw new RestoreEvidenceError(
+        `Restore concluído com SUCESSO (restoreId=${restoreId}, backupId=${manifest.backupId}), mas o ` +
+        `registro de evidência (restore_runs) falhou: ${sanitizeErrorMessage(evidenceError.message)}. ` +
+        `NÃO reexecute o restore — ele já foi aplicado ao banco de destino. Reconcilie a evidência manualmente.`,
+        { restoreId, backupId: manifest.backupId, targetEnvironment, executionResult: 'success', report, cause: evidenceError }
+      );
+    }
+
+    return report;
   } catch (error) {
+    // `RestoreEvidenceError` já representa o estado final correto (execução bem-sucedida, evidência não
+    // registrada) — nunca reprocessar aqui embaixo (marcaria incorretamente como "failed" um restore que
+    // na verdade teve sucesso, ou tentaria gravar evidência duas vezes).
+    if (error instanceof RestoreEvidenceError) throw error;
+
     const sanitizedMessage = sanitizeErrorMessage(error.message);
     if (targetClient) {
-      await runsRepository.insertRestoreRun(targetClient, {
-        restoreId, backupId: options.backupId || process.env.BACKUP_ID || 'unknown', targetEnvironment: targetEnvironment || 'unknown',
-        result: 'failed', applicationCommit: applicationCommit(), operatorIdentity: options.operatorIdentity || process.env.RESTORE_OPERATOR || null,
-        errorMessage: sanitizedMessage, startedAt
-      }).catch(() => {});
+      // Um banco de destino JÁ foi tocado (conexão estabelecida) quando este erro ocorreu — tentamos
+      // registrar a falha em `restore_runs`. Se ESSA gravação também falhar, nunca escondemos nenhum dos
+      // dois problemas: o erro original do restore E a falha de evidência são preservados juntos.
+      try {
+        await runsRepo.insertRestoreRun(targetClient, {
+          restoreId, backupId: options.backupId || process.env.BACKUP_ID || 'unknown', targetEnvironment: targetEnvironment || 'unknown',
+          result: 'failed', applicationCommit: applicationCommit(), operatorIdentity: options.operatorIdentity || process.env.RESTORE_OPERATOR || null,
+          errorMessage: sanitizedMessage, startedAt
+        });
+      } catch (evidenceError) {
+        const wrapped = new RestoreEvidenceError(
+          `Restore FALHOU (${sanitizedMessage}) e o registro dessa falha em restore_runs também falhou: ` +
+          `${sanitizeErrorMessage(evidenceError.message)}. Nenhuma tentativa adicional de restore foi feita.`,
+          { restoreId, targetEnvironment, executionResult: 'failed', cause: evidenceError }
+        );
+        wrapped.originalErrorMessage = sanitizedMessage;
+        throw wrapped;
+      }
     }
+    // Se `targetClient` é null, a falha ocorreu ANTES de qualquer conexão com o alvo (ex.: hash
+    // inválido, manifesto inválido, confirmação de produção ausente) — não há registro em `restore_runs`
+    // porque nenhum banco de destino foi tocado; isso é o comportamento esperado, nunca uma evidência
+    // "inventada" ou uma falha de rastreamento.
     const wrapped = new Error(sanitizedMessage);
     wrapped.restoreId = restoreId;
     throw wrapped;
   } finally {
+    // Silencioso intencionalmente: encerrar a conexão é limpeza de recurso, não uma operação cujo
+    // resultado afete a evidência operacional (já tratada explicitamente acima, nos dois ramos success/
+    // failure) — uma falha aqui não teria mais nada de útil para reportar além do que já foi.
     if (targetClient) await targetClient.end().catch(() => {});
     fs.rmSync(workDir, { recursive: true, force: true });
   }
@@ -247,6 +299,15 @@ if (require.main === module) {
       process.exitCode = 0;
     })
     .catch(error => {
+      if (error instanceof RestoreEvidenceError) {
+        // Código de saída DISTINTO (2) de uma falha real de restore (1). Quando executionResult é
+        // 'success', o restore JÁ FOI APLICADO — um scheduler/operador nunca deve reexecutar
+        // automaticamente a partir deste sinal.
+        console.error(`AVISO: ${sanitizeErrorMessage(error.message)}`);
+        console.error(`Resultado real da execução: ${error.executionResult || 'desconhecido'}. NÃO reexecutar automaticamente.`);
+        process.exitCode = 2;
+        return;
+      }
       console.error('Falha ao executar restore:', sanitizeErrorMessage(error.message));
       process.exitCode = 1;
     });

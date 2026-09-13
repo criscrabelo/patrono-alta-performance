@@ -1481,6 +1481,38 @@ corrigidos.** PG-21 continua ABERTO após esta correção.
 Nenhuma dessas correções altera H1-H4, autenticação, MFA, sessões, rate limiting, CORS/CSP, Monday,
 Calendar. `docs/MASTER_HANDOFF.md` permanece intocado.
 
+**Segunda correção técnica pós-implementação (mesma decisão PROD-H5-01) — evidência operacional
+fail-closed.** Uma revisão técnica adicional identificou que o rastreamento operacional
+(`backup_runs`/`restore_runs`) podia falhar silenciosamente sem impedir que um backup/restore fosse
+tratado como bem-sucedido — inaceitável para production-grade. Corrigido:
+
+1. **Backup em produção é fail-closed se `backup_runs` não puder ser iniciada** — aborta ANTES do
+   `pg_dump` rodar. Fora de produção, permanece tolerante, mas de forma explícita e documentada.
+2. **`backup/errors.js`** introduz dois erros dedicados que distinguem resultado da OPERAÇÃO de
+   resultado do REGISTRO DE EVIDÊNCIA: `BackupTrackingError` (`BACKUP_COMPLETED_BUT_TRACKING_FAILED`) —
+   lançado quando o artefato já foi enviado ao storage com sucesso mas `markBackupRunCompleted()`
+   falhou; o artefato nunca é apagado, o manifesto vai anexado ao erro para reconciliação manual.
+   `RestoreEvidenceError` (`RESTORE_COMPLETED_BUT_EVIDENCE_NOT_RECORDED`) — lançado quando `pg_restore`
+   já foi executado (com sucesso ou falha) mas `insertRestoreRun()` falhou; carrega
+   `executionResult: 'success'|'failed'` e o relatório/erro original, e a mensagem é explícita: nunca
+   reexecutar o restore a partir desse sinal.
+3. **CLI usa exit code distinto (2)** para esses dois cenários — diferente do exit code 1 de uma falha
+   real — para que um scheduler externo nunca trate "operação teve sucesso, evidência não registrada"
+   como "tente de novo".
+4. **Falha de evidência sobre falha de evidência nunca é escondida**: se o restore falha E a gravação
+   dessa falha em `restore_runs` também falha, ambos os erros (original + de evidência) são preservados
+   na mesma mensagem.
+5. **Nenhuma tentativa de evidência é feita quando nenhum banco de destino foi tocado** (falha antes de
+   qualquer conexão com o alvo) — nunca se inventa uma evidência que não existe.
+6. Testado com PostgreSQL real (nunca mock): fail-closed de produção via banco sem migration 008;
+   `BackupTrackingError` real via role com privilégio `INSERT`-only em `backup_runs` (tabela pré-existente,
+   dona é o superusuário de migração — restrição de privilégio genuína); `RestoreEvidenceError` via
+   injeção de `runsRepositoryOverride` (documentado por que `restore_runs`, recriada pelo próprio
+   `pg_restore` com `--no-owner`, não permite a mesma restrição de privilégio real que `backup_runs`).
+
+Não expande H6 (nenhum alerta/observabilidade implementado) — apenas garante a integridade do requisito
+já existente de H5 (evidência operacional durável). PG-21 continua aberto.
+
 Esta decisão não altera D1/D4/D2-CLOSE/PROD-GATE-01/PROD-H1-01/PROD-H1B-01/PROD-H2-01/PROD-H3-01/
 PROD-H4-01 já homologadas — apenas registra o avanço parcial do H5 dentro do gate de produção já aberto.
 

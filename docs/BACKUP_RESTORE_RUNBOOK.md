@@ -219,6 +219,47 @@ Uma falha nunca apaga um backup anterior válido nem marca a execução como `co
 qualquer segredo). H6 (logging/monitoramento estruturado, alerta automático) ainda não existe — até lá,
 verificar `backup_runs` periodicamente (ou script de status externo) é o mecanismo disponível.
 
+### 11.1. Correção pós-H5 (revisão técnica independente): evidência operacional é fail-closed, nunca perdida silenciosamente
+
+O mecanismo original permitia que o rastreamento operacional (`backup_runs`/`restore_runs`) falhasse
+silenciosamente sem interromper o backup/restore em si — corrigido para distinguir sempre **o resultado
+da operação** (backup/restore em si) de **o resultado do registro de evidência** (a linha em
+`backup_runs`/`restore_runs`):
+
+- **Em produção, se `backup_runs` nem puder ser iniciada** (ex.: migration 008 ausente, banco
+  inalcançável para o rastreamento), `scripts/backup-postgres.js` aborta o backup **ANTES do `pg_dump`
+  rodar** — produção nunca gera um backup sem evidência operacional durável. Fora de produção, o
+  comportamento é tolerante (permite testar sem a migration 008 aplicada), mas essa tolerância é
+  explícita e documentada, nunca uma degradação silenciosa.
+- **Se o artefato já foi enviado ao storage com sucesso mas `markBackupRunCompleted()` falhar**
+  (ex.: privilégio de `UPDATE` insuficiente na role usada), o script lança um `BackupTrackingError`
+  (`code: 'BACKUP_COMPLETED_BUT_TRACKING_FAILED'`, exit code **2** no CLI — distinto do exit code 1 de
+  uma falha real) com o manifesto completo anexado (`error.manifest`). **O artefato NUNCA é apagado** e
+  o backup **NUNCA deve ser reexecutado automaticamente** a partir desse sinal — a linha em `backup_runs`
+  permanece `status='started'`, esperando reconciliação manual (atualizar a linha manualmente para
+  `completed` com os dados do manifesto anexado ao erro, ou aceitar a lacuna de evidência).
+- **Se `pg_restore` já foi executado com sucesso mas `insertRestoreRun()` falhar**, `scripts/restore-postgres.js`
+  lança um `RestoreEvidenceError` (`code: 'RESTORE_COMPLETED_BUT_EVIDENCE_NOT_RECORDED'`, exit code **2**)
+  com `executionResult: 'success'` e o relatório completo do restore anexado (`error.report`). **O
+  restore NUNCA deve ser reexecutado** — ele já foi aplicado ao banco de destino; reexecutar `pg_restore`
+  sobre um banco já restaurado é desnecessário na melhor hipótese e potencialmente destrutivo se
+  combinado com `RESTORE_REPLACE` por engano.
+- **Se o restore falhar E a tentativa de registrar essa falha em `restore_runs` também falhar**, ambos
+  os erros são preservados na mesma mensagem (`RestoreEvidenceError` com `executionResult: 'failed'`,
+  `error.originalErrorMessage` com o erro original do restore) — nenhum dos dois é escondido.
+- **Se a falha do restore ocorrer ANTES de qualquer conexão com o banco de destino** (hash inválido,
+  manifesto inválido, confirmação de produção ausente), não há tentativa de gravar `restore_runs` —
+  nenhum banco foi tocado, então não há evidência a registrar nem a inventar.
+- Uma falha adicional ao registrar `backup_runs` como `status='failed'` (quando o backup já havia
+  falhado por outro motivo) nunca fica silenciosa — é sinalizada em `stderr`, mesmo que o erro principal
+  já propagado seja o que importa para quem chama o script.
+
+**Como agir ao ver exit code 2** (`BackupTrackingError`/`RestoreEvidenceError`): a operação em si (backup
+ou restore) TEVE SUCESSO — leia a mensagem/objeto de erro para localizar o `backupId`/`restoreId` e o
+manifesto/relatório anexado, e reconcilie a linha correspondente em `backup_runs`/`restore_runs`
+manualmente (ou aceite a lacuna de evidência, documentando por quê). Nunca reexecute a operação
+automaticamente só porque viu exit code 2.
+
 ## 12. Como rotacionar credenciais/chaves
 
 - **`BACKUP_ENCRYPTION_KEY`**: gerar uma chave nova, defini-la no ambiente; o próximo backup passa a

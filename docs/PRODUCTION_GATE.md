@@ -895,16 +895,38 @@ exercitado contra storage real; sem multipart upload; sem exclusão automática 
 Object Lock/immutability configurado; sem agendamento de produção real (cron/scheduler — isso é H11);
 RTO ainda não validado em volume representativo de produção.
 
+### Terceira correção técnica pós-implementação: evidência operacional fail-closed
+
+Uma revisão técnica adicional identificou que `backup_runs`/`restore_runs` podiam ser perdidos
+silenciosamente (tracking fail-open) — um backup/restore de produção podia ser tratado como bem-sucedido
+sem nenhuma linha de evidência durável. Corrigido (ver `docs/DECISIONS.md`, PROD-H5-01, segunda
+correção, para o detalhamento completo):
+
+- Backup em produção é **fail-closed** se `backup_runs` não puder nem ser iniciada — aborta ANTES do
+  `pg_dump`.
+- Dois erros dedicados (`backup/errors.js`) distinguem resultado da OPERAÇÃO de resultado da EVIDÊNCIA:
+  `BackupTrackingError` (artefato já válido no storage, só o registro `completed` falhou — artefato
+  nunca apagado) e `RestoreEvidenceError` (`pg_restore` já executado, só `insertRestoreRun()` falhou —
+  `executionResult: 'success'|'failed'` explícito, nunca sugere reexecução).
+- CLI usa exit code **2** para esses dois cenários (distinto do exit code 1 de falha real) — um
+  scheduler externo nunca deve tratar "sucesso com evidência pendente" como "tente de novo".
+- Falha de evidência sobre falha original nunca é escondida (ambas preservadas na mesma mensagem).
+- Testado com PostgreSQL real: fail-closed em produção via banco sem migration 008; `BackupTrackingError`
+  real via role com privilégio `INSERT`-only em `backup_runs`; `RestoreEvidenceError` via injeção de
+  `runsRepositoryOverride` (mesmo padrão de injeção já usado para `s3Client`/`tempDir`).
+- Não expande H6 — nenhum alerta/observabilidade implementado, apenas integridade do requisito já
+  existente de evidência operacional durável.
+
 ### Testes
 
-**478/478 passando** com Postgres real (458 anteriores + 13 novos unitários em
-`tests/h5-backup-restore.test.js` — credencial nunca em argv, senha com caracteres especiais,
-criptografia/streaming, checagem HTTPS de `BACKUP_ENDPOINT` em produção — + 7 novos de ponta a ponta
-real em `tests/h5-backup-restore-postgres.test.js`, incluindo `[H5-real-U/V/W]`: produção com chave de
-criptografia válida e artefato realmente cifrado, round-trip completo de backup cifrado real → restore
-decifra corretamente, e backup/restore real com senha do PostgreSQL contendo caracteres especiais), 0
-falhando, nenhum teste removido. Sem `TEST_DATABASE_URL`: 358 passam + 7 pulados. `npm audit`:
-inalterado (2 vulnerabilidades altas conhecidas — H9).
+**485/485 passando** com Postgres real (478 anteriores + 7 novos em
+`tests/h5-backup-restore-postgres.test.js` — `[H5-real-X/Y/Z/AA/AB/AC/AD]`: fail-closed de produção sem
+`backup_runs`, tolerância explícita fora de produção, `BackupTrackingError` real via privilégio
+restrito, `RestoreEvidenceError` para sucesso/falha via injeção de dependência, ausência de evidência
+inventada quando nenhum banco é tocado, e verificação estática de que nenhum `catch(() => {})` de código
+permanece sem justificativa), 0 falhando, nenhum teste removido. Sem `TEST_DATABASE_URL`: 358 passam +
+7 pulados (inalterado — os novos testes são todos gated por Postgres real). `npm audit`: inalterado (2
+vulnerabilidades altas conhecidas — H9).
 
 **Por que "implementado parcialmente" e não "aguardando homologação" como H1A-H4:** as rodadas
 anteriores completavam integralmente o critério de fechamento do(s) PG correspondente(s); H5 tem uma

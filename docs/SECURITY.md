@@ -525,3 +525,12 @@ antes de log/persistência — `pg_dump`/`pg_restore` podem incluir a connection
 **PG-21 permanece explicitamente ABERTO**: a arquitetura e o restore real estão comprovados, mas o
 adapter `s3` nunca foi exercitado contra um bucket real (só testado com cliente S3 injetado) — sem
 infraestrutura provisionada nesta rodada. Gate como um todo permanece NO-GO.
+
+**Correção pós-H5 — evidência operacional fail-closed** (`docs/DECISIONS.md`, PROD-H5-01): backup em
+produção aborta ANTES do `pg_dump` se `backup_runs` não puder ser iniciada. `BackupTrackingError`/
+`RestoreEvidenceError` (`backup/errors.js`) distinguem resultado da operação de resultado do registro de
+evidência — um artefato de backup válido nunca é apagado por falha de tracking, um restore já aplicado
+nunca sugere reexecução automática (exit code 2, distinto de falha real). Testado com PostgreSQL real
+(role com privilégio restrito para o cenário de backup; injeção de dependência para o de restore, cuja
+tabela é recriada pelo próprio `pg_restore` e por isso não é restringível por GRANT/REVOKE real). Não
+expande H6.

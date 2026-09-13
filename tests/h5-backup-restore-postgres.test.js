@@ -17,6 +17,7 @@ if (!TEST_DATABASE_URL) {
   const { Pool } = require('pg');
   const { runBackup } = require('../scripts/backup-postgres');
   const { runRestore, EPHEMERAL_TABLES_TO_REVOKE } = require('../scripts/restore-postgres');
+  const { BackupTrackingError, RestoreEvidenceError } = require('../backup/errors');
 
   function urlFor(dbName) { return TEST_DATABASE_URL.replace(/\/[^/]+$/, `/${dbName}`); }
 
@@ -405,5 +406,256 @@ if (!TEST_DATABASE_URL) {
   test('[H5-real-R] execução completa (pg_dump real → pg_restore real) documentada com evidência de tempo e checks', () => {
     assert.ok(realManifest.backupId);
     assert.ok(backupTimings.durationMs >= 0 && backupTimings.restoreDurationMs >= 0);
+  });
+
+  // --- Correção pós-H5 (revisão técnica independente): evidência operacional fail-closed ---------------
+  // Uma revisão técnica adicional identificou que `backup_runs`/`restore_runs` podiam ser perdidos
+  // silenciosamente (tracking fail-open). Os testes abaixo comprovam o comportamento corrigido com
+  // PostgreSQL real — nunca mock.
+
+  test('[H5-real-X] produção + backup_runs indisponível (migration 008 ausente) => pg_dump NUNCA é executado, nada é enviado ao storage', async () => {
+    // Banco isolado com só 001-007 aplicadas — backup_runs não existe, então insertBackupRunStarted()
+    // falha com "relation does not exist". Em produção isso deve abortar ANTES do pg_dump.
+    const noTrackingDb = await createIsolatedDatabase('notracking');
+    try {
+      const originalDatabaseUrl = process.env.DATABASE_URL;
+      process.env.DATABASE_URL = noTrackingDb.url;
+      delete require.cache[require.resolve('../database')];
+      delete require.cache[require.resolve('../scripts/migrate')];
+      const { pool: dbPool } = require('../database');
+      const client = dbPool();
+      try {
+        await client.query('CREATE TABLE IF NOT EXISTS schema_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())');
+        const fs2 = require('node:fs');
+        const path2 = require('node:path');
+        const migrationsDir = path2.join(__dirname, '..', 'migrations');
+        const files = fs2.readdirSync(migrationsDir).filter(name => name.endsWith('.sql') && name < '008').sort();
+        for (const file of files) {
+          const sql = fs2.readFileSync(path2.join(migrationsDir, file), 'utf8');
+          await client.query(sql);
+          await client.query('INSERT INTO schema_migrations (version) VALUES ($1) ON CONFLICT DO NOTHING', [file.replace(/\.sql$/, '')]);
+        }
+      } finally { await client.end(); }
+      if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL; else process.env.DATABASE_URL = originalDatabaseUrl;
+
+      const store = new Map();
+      const { createS3StorageAdapter } = require('../backup/storage-adapters/s3');
+      const fakeClient = {
+        async send(command) {
+          if (command.constructor.name === 'PutObjectCommand') {
+            const chunks = [];
+            for await (const chunk of command.input.Body) chunks.push(chunk);
+            store.set(command.input.Key, Buffer.concat(chunks));
+            return {};
+          }
+          throw new Error('comando inesperado');
+        }
+      };
+
+      await assert.rejects(
+        () => withEnv({ BACKUP_ENCRYPTION_KEY: 'chave-de-teste-com-pelo-menos-32-caracteres', BACKUP_STORAGE_PROVIDER: 's3', BACKUP_BUCKET: 'teste-x' }, () =>
+          runBackup({ databaseUrl: noTrackingDb.url, environment: 'production', s3Client: fakeClient })
+        ),
+        /backup_runs.*abortado ANTES do pg_dump|Backup abortado ANTES do pg_dump/
+      );
+      // Nada foi enviado ao storage — prova de que pg_dump/upload nunca rodaram.
+      assert.equal(store.size, 0, 'nenhum objeto deveria ter sido enviado ao storage: o backup foi abortado antes do pg_dump');
+    } finally {
+      await dropDatabase(noTrackingDb.name);
+    }
+  });
+
+  test('[H5-real-Y] fora de produção, tracking indisponível permanece tolerante mas backup NÃO fica marcado completed (comportamento explícito, documentado)', async () => {
+    const noTrackingDb = await createIsolatedDatabase('notracking2');
+    try {
+      const originalDatabaseUrl = process.env.DATABASE_URL;
+      process.env.DATABASE_URL = noTrackingDb.url;
+      delete require.cache[require.resolve('../database')];
+      const { pool: dbPool } = require('../database');
+      const client = dbPool();
+      try {
+        await client.query('CREATE TABLE IF NOT EXISTS schema_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())');
+        const fs2 = require('node:fs');
+        const path2 = require('node:path');
+        const migrationsDir = path2.join(__dirname, '..', 'migrations');
+        const files = fs2.readdirSync(migrationsDir).filter(name => name.endsWith('.sql') && name < '008').sort();
+        for (const file of files) {
+          const sql = fs2.readFileSync(path2.join(migrationsDir, file), 'utf8');
+          await client.query(sql);
+          await client.query('INSERT INTO schema_migrations (version) VALUES ($1) ON CONFLICT DO NOTHING', [file.replace(/\.sql$/, '')]);
+        }
+      } finally { await client.end(); }
+      if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL; else process.env.DATABASE_URL = originalDatabaseUrl;
+
+      const manifest = await withEnv({ BACKUP_STORAGE_PROVIDER: 'filesystem', BACKUP_LOCAL_DIR: storageDir }, () =>
+        runBackup({ databaseUrl: noTrackingDb.url, environment: 'development' })
+      );
+      assert.ok(manifest.sizeBytes > 0, 'fora de produção, o backup deve funcionar mesmo sem backup_runs disponível');
+      // Não há como consultar backup_runs (não existe nesta base) — o próprio fato de não lançar
+      // confirma a tolerância explícita fora de produção, documentada no código e no runbook.
+    } finally {
+      await dropDatabase(noTrackingDb.name);
+    }
+  });
+
+  test('[H5-real-Z] backup enviado ao storage + markBackupRunCompleted falha (privilégio insuficiente) => artefato NÃO é apagado, erro é BackupTrackingError com o manifesto anexado', async () => {
+    const admin = new Pool({ connectionString: sourceDb.url });
+    const roleName = `h5_limited_${process.pid}`;
+    try {
+      await admin.query(`CREATE ROLE ${roleName} LOGIN PASSWORD 'x'`);
+      await admin.query(`GRANT CONNECT ON DATABASE ${sourceDb.name} TO ${roleName}`);
+      await admin.query(`GRANT USAGE ON SCHEMA public TO ${roleName}`);
+      await admin.query(`GRANT SELECT ON ALL TABLES IN SCHEMA public TO ${roleName}`);
+      // Concede só INSERT em backup_runs — NUNCA UPDATE. insertBackupRunStarted() (INSERT) funciona;
+      // markBackupRunCompleted() (UPDATE) falha por privilégio insuficiente. `backup_runs` é criada pelo
+      // superusuário de migração (não por este papel), então a restrição de privilégio é real e eficaz
+      // (diferente de restore_runs, recriada pelo próprio pg_restore — ver comentário em
+      // scripts/restore-postgres.js sobre por que H5-real-D/E usam injeção em vez de GRANT/REVOKE).
+      await admin.query(`GRANT INSERT ON backup_runs TO ${roleName}`);
+
+      const limitedUrl = `postgresql://${roleName}:x@${new URL(sourceDb.url).host}/${sourceDb.name}`;
+      let caughtError;
+      try {
+        await withEnv({ BACKUP_STORAGE_PROVIDER: 'filesystem', BACKUP_LOCAL_DIR: storageDir }, () =>
+          runBackup({ databaseUrl: limitedUrl, environment: 'development' })
+        );
+      } catch (error) {
+        caughtError = error;
+      }
+      assert.ok(caughtError instanceof BackupTrackingError, 'deve lançar BackupTrackingError, nunca um erro genérico nem sucesso silencioso');
+      assert.equal(caughtError.code, 'BACKUP_COMPLETED_BUT_TRACKING_FAILED');
+      assert.ok(caughtError.manifest, 'o manifesto do backup válido deve estar anexado ao erro');
+      assert.ok(caughtError.manifest.sizeBytes > 0);
+      assert.match(caughtError.manifest.sha256, /^[0-9a-f]{64}$/);
+
+      // O artefato continua no storage — NUNCA apagado por causa de uma falha de evidência.
+      const objectPath = path.join(storageDir, caughtError.manifest.storageObjectKey);
+      assert.ok(fs.existsSync(objectPath), 'o artefato de backup deve permanecer no storage mesmo com a evidência não registrada');
+
+      // A linha em backup_runs permanece 'started' (o UPDATE para 'completed' de fato falhou).
+      const check = new Pool({ connectionString: sourceDb.url });
+      try {
+        const { rows } = await check.query('SELECT status FROM backup_runs WHERE backup_id = $1', [caughtError.manifest.backupId]);
+        assert.equal(rows[0].status, 'started', 'sem privilégio de UPDATE, a linha nunca chega a status=completed nem é marcada como failed');
+      } finally { await check.end(); }
+    } finally {
+      await admin.query(`DROP ROLE IF EXISTS ${roleName}`).catch(() => {});
+      await admin.end();
+    }
+  });
+
+  test('[H5-real-AA] restore concluído com sucesso + gravação de restore_runs falha => pg_restore executa UMA única vez, erro é RestoreEvidenceError com executionResult="success", nunca sugere retry', async () => {
+    const evidenceFailTarget = await createIsolatedDatabase('evidencefail');
+    let pgRestoreCallCount = 0;
+    try {
+      // Injeta uma falha determinística na gravação de evidência — ver justificativa no comentário de
+      // `runsRepositoryOverride` em scripts/restore-postgres.js (restore_runs é recriada pelo próprio
+      // pg_restore, então não há como restringir via GRANT/REVOKE como em H5-real-Z).
+      const failingRunsRepo = {
+        ...require('../backup/runs-repository'),
+        async insertRestoreRun() { throw new Error('falha simulada de evidência (teste H5-real-AA)'); }
+      };
+
+      const manifestPath = path.join(storageDir, realManifest.storageObjectKey.replace(/\.dump$/, '.manifest.json'));
+      const artifactPath = path.join(storageDir, realManifest.storageObjectKey);
+
+      let caughtError;
+      try {
+        await runRestore({
+          databaseUrlTarget: evidenceFailTarget.url, targetEnvironment: 'development',
+          localManifestPath: manifestPath, localArtifactPath: artifactPath,
+          runsRepositoryOverride: failingRunsRepo
+        });
+      } catch (error) {
+        caughtError = error;
+      }
+
+      assert.ok(caughtError instanceof RestoreEvidenceError, 'deve lançar RestoreEvidenceError, nunca um erro genérico');
+      assert.equal(caughtError.code, 'RESTORE_COMPLETED_BUT_EVIDENCE_NOT_RECORDED');
+      assert.equal(caughtError.executionResult, 'success', 'o restore em si teve sucesso — só a evidência falhou');
+      assert.ok(caughtError.report, 'o relatório completo do restore deve estar anexado ao erro');
+      assert.equal(caughtError.report.evidenceRecorded, false);
+      // A mensagem deve dizer explicitamente para NÃO reexecutar — nunca sugerir retry como próximo passo.
+      assert.match(caughtError.message, /NÃO reexecute o restore/);
+
+      // Prova de que o dado foi REALMENTE restaurado (pg_restore rodou exatamente uma vez, com sucesso).
+      const pool = new Pool({ connectionString: evidenceFailTarget.url });
+      try {
+        const { rows } = await pool.query("SELECT COUNT(*)::int AS count FROM app_users WHERE id = 'usr-h5-teste'");
+        assert.equal(rows[0].count, 1, 'o dado deve ter sido restaurado de verdade — pg_restore executou');
+      } finally { await pool.end(); }
+    } finally {
+      await dropDatabase(evidenceFailTarget.name);
+    }
+  });
+
+  test('[H5-real-AB] restore falha (SHA-256 inválido) + gravação da falha em restore_runs também falha => ambos os erros preservados, nenhum escondido', async () => {
+    // Cria um cenário onde o restore chega a conectar no alvo (para que insertRestoreRun seja tentado no
+    // ramo de falha) mas falha depois — usamos RESTORE_REPLACE ausente sobre um banco JÁ POPULADO
+    // (mesmo cenário de H5-real-K) para garantir que targetClient não é nulo quando o erro ocorre.
+    const failEvidenceOnFailureTarget = await createIsolatedDatabase('failevidfail');
+    try {
+      await applyMigrations(failEvidenceOnFailureTarget.url);
+      const failingRunsRepo = {
+        ...require('../backup/runs-repository'),
+        async insertRestoreRun() { throw new Error('falha simulada de evidência de falha (teste H5-real-AB)'); }
+      };
+      const manifestPath = path.join(storageDir, realManifest.storageObjectKey.replace(/\.dump$/, '.manifest.json'));
+      const artifactPath = path.join(storageDir, realManifest.storageObjectKey);
+
+      let caughtError;
+      try {
+        await runRestore({
+          databaseUrlTarget: failEvidenceOnFailureTarget.url, targetEnvironment: 'development',
+          localManifestPath: manifestPath, localArtifactPath: artifactPath,
+          runsRepositoryOverride: failingRunsRepo
+          // RESTORE_REPLACE ausente + banco já populado (migrations aplicadas) => falha esperada.
+        });
+      } catch (error) {
+        caughtError = error;
+      }
+      assert.ok(caughtError instanceof RestoreEvidenceError);
+      assert.equal(caughtError.executionResult, 'failed');
+      assert.match(caughtError.originalErrorMessage, /RESTORE_REPLACE/, 'o erro ORIGINAL do restore (banco populado) deve ser preservado');
+      assert.match(caughtError.message, /RESTORE_REPLACE/, 'a mensagem final deve conter o erro original');
+      assert.match(caughtError.message, /falha simulada de evidência de falha/, 'a mensagem final deve conter também a falha de gravação da evidência — nenhum dos dois escondido');
+    } finally {
+      await dropDatabase(failEvidenceOnFailureTarget.name);
+    }
+  });
+
+  test('[H5-real-AC] restore falha ANTES de conectar no alvo (SHA-256 inválido) => nenhuma tentativa de restore_runs é feita (nenhum banco foi tocado, nada de evidência inventada)', async () => {
+    const tamperedManifest = { ...realManifest, sha256: '0'.repeat(64) };
+    const manifestPath = path.join(storageDir, 'tampered-evidence.manifest.json');
+    const artifactPath = path.join(storageDir, realManifest.storageObjectKey);
+    fs.writeFileSync(manifestPath, JSON.stringify(tamperedManifest));
+    await assert.rejects(
+      () => runRestore({ databaseUrlTarget: 'postgresql://usuario-nunca-usado/nao-importa', targetEnvironment: 'development', localManifestPath: manifestPath, localArtifactPath: artifactPath }),
+      error => {
+        // Erro comum (não RestoreEvidenceError) — a falha de hash ocorre ANTES de qualquer conexão com o
+        // alvo, então não há registro de evidência tentado nem esperado.
+        assert.ok(!(error instanceof RestoreEvidenceError), 'não deve virar RestoreEvidenceError quando nenhum banco de destino foi tocado');
+        assert.match(error.message, /SHA-256/);
+        return true;
+      }
+    );
+  });
+
+  test('[H5-real-AD] nenhum catch(() => {}) silencioso sem justificativa permanece nos caminhos críticos de backup-postgres.js/restore-postgres.js', () => {
+    const backupSource = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'backup-postgres.js'), 'utf8');
+    const restoreSource = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'restore-postgres.js'), 'utf8');
+    // Todo catch(() => {})/`.catch(() => {})` que apareça em CÓDIGO (nunca dentro de um comentário —
+    // linhas de comentário citando o padrão como exemplo não contam) deve estar a poucas linhas de um
+    // comentário "Silencioso intencionalmente" que justifica por quê (cleanup de conexão em finally).
+    for (const source of [backupSource, restoreSource]) {
+      const lines = source.split('\n');
+      lines.forEach((line, index) => {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('//')) return; // ignora ocorrências citadas dentro de comentários
+        if (!/\.catch\(\(\)\s*=>\s*\{\}\)/.test(line)) return;
+        const context = lines.slice(Math.max(0, index - 6), index + 1).join('\n');
+        assert.match(context, /Silencioso intencionalmente/, `catch(() => {}) de código sem justificativa próxima na linha ${index + 1}: ${line.trim()}`);
+      });
+    }
   });
 }

@@ -1069,3 +1069,38 @@ nativo.
 - **PG-21 continua ABERTO** — as correções endureceram o mecanismo existente, não adicionaram a
   validação de storage offsite real que falta para fechar o gate (ver `docs/PRODUCTION_GATE.md`, seção
   22, para a lista completa de motivos, agora incluindo o RTO como meta não comprovada em escala).
+
+## QA — Correção técnica pós-H5 #2 (evidência operacional fail-closed — 7 testes reais adicionados)
+
+`docs/PRODUCTION_GATE.md`, seção 22; `docs/DECISIONS.md`, PROD-H5-01 (segunda correção). PG-21 continua
+ABERTO. Não expande H6 — apenas garante a integridade do requisito de evidência operacional já existente.
+
+- **485 testes totais** com `TEST_DATABASE_URL` (478 anteriores + 7 novos em
+  `tests/h5-backup-restore-postgres.test.js`), 0 falhando, nenhum teste removido. **358 passam + 7
+  pulados** sem `TEST_DATABASE_URL` (inalterado — os 7 novos são todos gated por Postgres real, nenhum
+  finge cobertura com mock).
+- **`[H5-real-X]`**: em produção, um banco isolado só com migrations 001-007 (sem `backup_runs`) faz
+  `runBackup()` abortar ANTES do `pg_dump` — comprovado indiretamente (nenhum objeto chega ao storage
+  fake injetado).
+- **`[H5-real-Y]`**: fora de produção, o mesmo cenário permanece tolerante — o backup funciona mesmo sem
+  `backup_runs` disponível (comportamento explícito, documentado).
+- **`[H5-real-Z]`**: uma role real do PostgreSQL com `GRANT INSERT` (mas nunca `UPDATE`) em `backup_runs`
+  — tabela pré-existente, dona é o superusuário de migração — faz `markBackupRunCompleted()` falhar de
+  verdade; o backup lança `BackupTrackingError` com o manifesto completo anexado; o artefato permanece
+  no storage; a linha em `backup_runs` permanece `status='started'`.
+- **`[H5-real-AA]`**: injeção de `runsRepositoryOverride` (mesmo padrão de `s3Client`/`tempDir`) faz
+  `insertRestoreRun()` falhar após um `pg_restore` real e bem-sucedido; o erro é `RestoreEvidenceError`
+  com `executionResult: 'success'`, relatório completo anexado, e a mensagem confirma explicitamente
+  "NÃO reexecute o restore" — o dado é verificado como realmente restaurado (`pg_restore` rodou uma
+  única vez).
+- **`[H5-real-AB]`**: restore falha por motivo real (`RESTORE_REPLACE` ausente sobre banco populado) E a
+  gravação dessa falha em `restore_runs` também falha (via a mesma injeção) — ambos os erros (original +
+  de evidência) aparecem preservados na mensagem final, nenhum escondido.
+- **`[H5-real-AC]`**: uma falha de SHA-256 (que ocorre ANTES de qualquer conexão com o alvo) nunca produz
+  um `RestoreEvidenceError` — não há banco tocado, então não há evidência a registrar nem a inventar.
+- **`[H5-real-AD]`**: verificação estática de código-fonte — nenhum `.catch(() => {})` que apareça fora
+  de um comentário (citações de exemplo em comentários são ignoradas) em `backup-postgres.js`/
+  `restore-postgres.js` sem um comentário "Silencioso intencionalmente" próximo justificando por quê.
+- `npm audit`: inalterado (2 vulnerabilidades altas conhecidas — H9).
+- **PG-21 continua ABERTO** — inalterado por esta correção (não relacionado à validação de storage
+  offsite real que falta para fechar o gate).

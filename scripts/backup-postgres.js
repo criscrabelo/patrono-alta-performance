@@ -22,6 +22,7 @@ const backupCrypto = require('../backup/crypto');
 const { sanitizeErrorMessage } = require('../backup/sanitize');
 const runsRepository = require('../backup/runs-repository');
 const { parsePostgresConnection, pgCliArgs, pgChildEnv } = require('../backup/pg-connection');
+const { BackupTrackingError } = require('../backup/errors');
 
 function generateBackupId() {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -93,18 +94,31 @@ async function runBackup({ databaseUrl, environment, tempDir, s3Client } = {}) {
   const client = new Client({ connectionString: resolvedDatabaseUrl });
   let trackingAvailable = true;
 
-  try {
-    // Uma falha de conexão aqui (DATABASE_URL inalcançável) já é sinal de que o pg_dump abaixo também
-    // falhará com a mesma causa — não tenta mascarar isso, só desliga o rastreamento operacional (que
-    // depende da mesma conexão) e deixa o pg_dump real produzir o erro definitivo e sanitizado.
-    await client.connect();
-    await runsRepository.insertBackupRunStarted(client, { backupId, environment: resolvedEnvironment, storageProvider: storageAdapter.provider });
-  } catch (error) {
-    trackingAvailable = false;
-  }
-
   const dumpPath = path.join(workDir, `${backupId}.dump`);
   try {
+    // Correção pós-H5 (revisão técnica independente): iniciar o rastreamento operacional
+    // (`backup_runs`) faz parte do MESMO bloco try/finally do resto do backup — nunca um try/catch
+    // isolado ANTES dele, que deixaria essa falha escapar da limpeza de recursos (workDir/conexão) e,
+    // em produção, escapar do fail-closed abaixo.
+    try {
+      await client.connect();
+      await runsRepository.insertBackupRunStarted(client, { backupId, environment: resolvedEnvironment, storageProvider: storageAdapter.provider });
+    } catch (trackingStartError) {
+      // Em produção, um backup NUNCA pode ser gerado sem evidência operacional durável — se
+      // `backup_runs` não pôde nem ser iniciada, o backup é abortado ANTES do `pg_dump` rodar
+      // (fail-closed). Fora de produção, permanece tolerante (permite testar/rodar sem a migration 008
+      // aplicada), mas isso é uma degradação EXPLÍCITA, nunca silenciosa — documentada aqui e no
+      // runbook, nunca inferida implicitamente por quem lê o código.
+      if (isProductionEnvironment(resolvedEnvironment)) {
+        throw new Error(
+          `Não foi possível iniciar o rastreamento operacional do backup (backup_runs) em produção: ` +
+          `${sanitizeErrorMessage(trackingStartError.message)}. Backup abortado ANTES do pg_dump — ` +
+          `produção nunca gera um backup sem evidência operacional durável.`
+        );
+      }
+      trackingAvailable = false;
+    }
+
     // -Fc (custom format): permite pg_restore seletivo, é o formato binário padrão recomendado pelo
     // próprio PostgreSQL para backups lógicos (item 5 do escopo H5). --no-owner/--no-privileges evitam
     // que um restore em ambiente diferente falhe por papéis/owners que não existem no destino. Nunca
@@ -157,22 +171,52 @@ async function runBackup({ databaseUrl, environment, tempDir, s3Client } = {}) {
     await storageAdapter.putObject(`${resolvedEnvironment}/${backupId}.manifest.json`, manifestPath);
 
     if (trackingAvailable) {
-      await runsRepository.markBackupRunCompleted(client, {
-        backupId, storageObjectKey: objectKey, format: 'custom', sizeBytes, sha256, encrypted, encryptionKeyId,
-        postgresVersion, migrationVersion, applicationCommit: commit
-      });
+      // Correção pós-H5 (revisão técnica independente): o artefato JÁ está confirmado no storage neste
+      // ponto (upload do `.dump`/`.dump.enc` e do manifesto ambos concluídos acima) — o backup em si é
+      // válido independentemente do que acontecer aqui. Se `markBackupRunCompleted()` falhar, NUNCA
+      // tratamos isso como falha do backup (nunca chamamos `markBackupRunFailed`, que mentiria sobre o
+      // resultado real) — lançamos um erro DEDICADO (`BackupTrackingError`) que carrega o manifesto
+      // completo, para que quem chamar saiba exatamente o que reconciliar manualmente.
+      try {
+        await runsRepository.markBackupRunCompleted(client, {
+          backupId, storageObjectKey: objectKey, format: 'custom', sizeBytes, sha256, encrypted, encryptionKeyId,
+          postgresVersion, migrationVersion, applicationCommit: commit
+        });
+      } catch (trackingCompleteError) {
+        throw new BackupTrackingError(
+          `Backup concluído e enviado ao storage com sucesso (backupId=${backupId}, objectKey=${objectKey}), ` +
+          `mas o registro de evidência operacional (backup_runs) não pôde ser atualizado para "completed": ` +
+          `${sanitizeErrorMessage(trackingCompleteError.message)}. O artefato É VÁLIDO — não repita o backup ` +
+          `automaticamente; reconcilie a linha de backup_runs manualmente (ela permanece "started").`,
+          { manifest, cause: trackingCompleteError }
+        );
+      }
     }
 
     return manifest;
   } catch (error) {
+    // `BackupTrackingError` significa que o backup TEVE SUCESSO — nunca marcar como failed (mentiria
+    // sobre o resultado real) nem apagar o artefato já confirmado no storage. Propaga como está,
+    // preservando `.manifest` para quem chamar decidir a reconciliação.
+    if (error instanceof BackupTrackingError) throw error;
+
     const sanitizedMessage = sanitizeErrorMessage(error.message);
     if (trackingAvailable) {
-      await runsRepository.markBackupRunFailed(client, { backupId, errorMessage: sanitizedMessage }).catch(() => {});
+      // Correção pós-H5 (revisão técnica independente): mesmo aqui — onde o backup JÁ falhou por outro
+      // motivo — uma falha adicional ao registrar `status='failed'` nunca fica silenciosa. Não lançamos
+      // um segundo erro (o erro original do backup é o que importa e já será propagado abaixo), mas
+      // sinalizamos explicitamente em stderr — nunca um `.catch(() => {})` vazio sem nenhum sinal.
+      await runsRepository.markBackupRunFailed(client, { backupId, errorMessage: sanitizedMessage }).catch(trackingFailError => {
+        console.error(`Aviso: falha adicional ao registrar backup_runs como "failed" (backupId=${backupId}): ${sanitizeErrorMessage(trackingFailError.message)}`);
+      });
     }
     const wrapped = new Error(sanitizedMessage);
     wrapped.backupId = backupId;
     throw wrapped;
   } finally {
+    // Silencioso intencionalmente: encerrar a conexão de rastreamento é limpeza de recurso, não uma
+    // operação cujo resultado afete a evidência operacional (já registrada/tentada acima) — uma falha
+    // aqui não teria mais nada de útil para reportar além do que já foi.
     await client.end().catch(() => {});
     fs.rmSync(workDir, { recursive: true, force: true });
   }
@@ -185,6 +229,15 @@ if (require.main === module) {
       process.exitCode = 0;
     })
     .catch(error => {
+      if (error instanceof BackupTrackingError) {
+        // Código de saída DISTINTO (2) de uma falha real de backup (1) — o backup em si teve sucesso;
+        // só a evidência operacional não foi registrada. Nunca reexecutar automaticamente a partir
+        // deste sinal (um scheduler externo não deve tratar exit code 2 como "tente de novo").
+        console.error(`AVISO: ${sanitizeErrorMessage(error.message)}`);
+        if (error.manifest) console.error(`Manifesto do backup válido: ${JSON.stringify(error.manifest)}`);
+        process.exitCode = 2;
+        return;
+      }
       console.error('Falha ao executar backup:', sanitizeErrorMessage(error.message));
       process.exitCode = 1;
     });
