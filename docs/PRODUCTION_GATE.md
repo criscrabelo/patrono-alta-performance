@@ -87,7 +87,7 @@ e um checklist mínimo de LGPD. Não cobre: desenho de novas funcionalidades de 
 | PG-14 | HTTP hardening | Sem CSRF explícito (mitigado estruturalmente por Bearer token sem cookie) | Baixo hoje; se sessão migrar para cookie (PG-04), CSRF volta a ser relevante | **P2** | NÃO hoje / SIM se migrar para cookie | Reavaliar ao mudar modelo de sessão | Sem alteração enquanto o modelo for Bearer token puro | H2 (condicional) |
 | PG-15 | Dependências | `npm audit`: 2 altas (`image-size`/`pptxgenjs`, DoS por parser) | Negação de serviço na geração de apresentações PPTX | **P1** | SIM | Avaliar migração/downgrade controlado de `pptxgenjs` com validação de exportação PPTX/PDF | Vulnerabilidade tratada ou mitigação/waiver formal registrado | H9 |
 | PG-16 | Google Calendar | Sem OAuth real, sem token storage seguro | Bloqueia apenas a leitura real de Calendar (funcionalidade opcional) | **P2** | NÃO (feature opcional, adapter seguro por design) | Implementar OAuth mínimo + storage seguro de token quando priorizado | Fluxo de leitura real testado ponta a ponta sem expor token | H10 |
-| PG-17 | Logging/Monitoramento | Nenhum logging estruturado, alerta ou monitoramento de produção | Incidente pode passar despercebido; sem visibilidade operacional | **P1** | SIM | Logging estruturado (sem PII/segredo) + alerta básico de erro/disponibilidade | Log de erro em produção é buscável e não contém segredo/PII | H6 |
+| PG-17 | Logging/Monitoramento | **H6 IMPLEMENTADO PARCIALMENTE (ver seção 23) — PERMANECE ABERTO.** Logger estruturado JSON provider-neutro, redaction defensiva (segredo nunca aparece por nome de campo nem por padrão em texto livre), requestId/correlação por requisição, access log HTTP normalizado, serializador seguro de erro, eventos de boot/shutdown/Monday/backup-restore, health liveness/readiness, alerta via webhook HTTPS com HMAC/cooldown/anti-recursão — tudo implementado e testado (`tests/h6-observability.test.js`, 33/33). Falta apenas: agregação/busca real de produção (nenhum coletor/agregador real foi configurado ou exercitado) e/ou destino de alerta real (nenhum `ALERT_WEBHOOK_URL` de produção foi validado contra infraestrutura real) — ambos dependentes de H11 | Incidente pode passar despercebido; sem visibilidade operacional | **P1** | SIM | Logging estruturado (sem PII/segredo) + alerta básico de erro/disponibilidade | Log de erro em produção é buscável e não contém segredo/PII — **atendido do lado da aplicação (JSON estruturado, correlação, redaction); falta a busca real num agregador de produção** | H6 (parcial), H11 |
 | PG-18 | Auditoria | Eventos de auditoria não capturam IP/sessão/user-agent; sem rotação/retenção | Rastreabilidade incompleta para investigação; crescimento não controlado do arquivo | **P2** | NÃO (MVP aceitável) | Adicionar metadados de origem e política de retenção ao evoluir para produção | Auditoria permite reconstruir "quem, quando, de onde, o quê" | H8 |
 | PG-19 | Retenção/Legal Hold | Nenhuma política de retenção/exclusão/legal hold definida para nenhuma entidade | Impossível responder a obrigação legal de retenção ou a um pedido de exclusão (LGPD) | **P0** | SIM | Definir política por tipo de dado (audit, Legal Deadline, documentos, backups) | Política documentada e aplicável tecnicamente (mesmo que manual no início) | H8 |
 | PG-20 | Incident Response | Nenhum processo de resposta a incidente definido | Sem detecção/contenção/comunicação formal em caso de violação | **P0** | SIM | Checklist mínimo de IR (ver seção 8) | Checklist existe, tem responsável nomeado e canal de comunicação definido | H7 |
@@ -146,6 +146,18 @@ e um checklist mínimo de LGPD. Não cobre: desenho de novas funcionalidades de 
 - **P1/P2 inalterados** — H5 não altera nenhum outro achado.
 - **Fechados = 13** — inalterado (PG-01 a PG-13).
 
+**Após o Hardening H6 (ver seção 23) — nenhum fechamento de contagem:**
+
+- **P0 aberto = 4** — inalterado (PG-19, PG-20, PG-21, PG-22).
+- **P1 aberto = 4** — inalterado (PG-15, PG-17, PG-23, PG-24). PG-17 permanece aberto DELIBERADAMENTE:
+  o lado da aplicação (logger estruturado, redaction, requestId/correlação, health, alerta) está
+  implementado e testado com evidência real, mas nenhum agregador/coletor de logs de produção nem
+  destino de alerta real foram configurados ou exercitados nesta rodada (sem infraestrutura provisionada
+  — depende de H11). Fechar PG-17 sem essa evidência seria fechar por intenção, não por comprovação —
+  mesma disciplina de PG-21/H5.
+- **P2 inalterado** — H6 não altera nenhum outro achado.
+- **Fechados = 13** — inalterado (PG-01 a PG-13).
+
 PG-01/PG-02 são exibidos como dois achados por clareza de causa raiz (persistência sem transação e sem
 lock são sintomas distintos do mesmo problema), mas compartilham a mesma correção (H1) — contados
 separadamente na tabela e nesta soma, não duplicados fora dela. PG-24 foi reclassificado de P2 para P1
@@ -167,7 +179,7 @@ própria classificação declarada.
 | Secrets | Server-side only, sem vazamento identificado | NÃO | Manter prática atual + revisão contínua |
 | Backup | **H5 (parcial, ver seção 22)** — `pg_dump` real, RPO=6h definido, manifesto/integridade/criptografia opcional implementados; falta storage offsite real exercitado (só `s3` testado com cliente injetado) | SIM (até offsite real ser validado) | Backup agendado + offsite real + RPO/RTO definidos |
 | Restore | **H5 (parcial)** — `pg_restore` real testado ponta a ponta com evidência (seção 22/`BACKUP_RESTORE_RUNBOOK.md`), RTO=4h comprovado; falta restaurar a partir de um backup que tenha passado por storage offsite real | SIM (até offsite real ser validado) | Restore testado e documentado ao menos uma vez — mecanismo atendido, falta o offsite real |
-| Logging/Monitoramento | Mínimo, sem estrutura/alerta | SIM | Logging estruturado + alerta básico de erro/disponibilidade |
+| Logging/Monitoramento | **H6 (parcial, ver seção 23)** — logger JSON estruturado, redaction, requestId/correlação, access log, health liveness/readiness, alerta via webhook (HMAC/cooldown/anti-recursão) implementados e testados; falta agregador/busca real de produção e destino de alerta real exercitado | SIM (até agregação/alerta real serem exercitados) | Logging estruturado + alerta básico de erro/disponibilidade — mecanismo atendido, falta o destino real de produção |
 | Auditoria | Existe, sem IP/sessão/retenção | NÃO (MVP aceitável) | Evoluir metadados/retenção antes de escala maior |
 | Incident Response | Inexistente | SIM | Checklist mínimo formalizado com responsável nomeado |
 | Retenção/Legal Hold | Inexistente | SIM | Política definida por tipo de dado |
@@ -934,23 +946,115 @@ dependência externa (storage offsite real) que este projeto não está autoriza
 rodada — a diferença é registrada explicitamente, nunca escondida atrás de uma "homologação pendente"
 que sugeriria que só falta revisão humana.
 
+## 23. Status do Hardening H6 (IMPLEMENTADO PARCIALMENTE — PG-17 PERMANECE ABERTO)
+
+### Matriz H6 — Observabilidade (auditoria pré-implementação)
+
+| Superfície | Estado atual (antes de H6) | Evento necessário | Severidade | Dados permitidos | Dados proibidos | Monitoramento/alerta |
+|---|---|---|---|---|---|---|
+| Roteamento HTTP (`server.js: handler()`) | Sem log de acesso algum | `http_request_completed` | INFO (5xx: ERROR) | requestId, method, rota normalizada, statusCode, durationMs | body, query string, Authorization/Cookie | `repeated_http_5xx` |
+| `/api/health` | JSON simples, sem log de chamada | (nenhum novo; ruído de sucesso vira DEBUG) | DEBUG (sucesso) / WARN-ERROR (falha) | mode, reachable, schemaReady | DATABASE_URL, stack | — |
+| Boot (`require.main === module`) | `console.log`/`console.error` livres | `app_started` / `app_start_failed` | INFO / FATAL | service, environment, nodeVersion, port, persistence | segredo de configuração | `app_start_failed` |
+| Shutdown | Inexistente | `app_shutdown_started` / `app_shutdown_completed` | INFO | signal | — | — |
+| Processo (exceção/rejeição não tratada) | Nenhum handler — processo podia morrer silenciosamente sob supervisor | `uncaught_exception` / `unhandled_rejection` | FATAL | nome/mensagem sanitizada do erro | segredo, payload | Encaminhado via log FATAL |
+| Scheduler Monday | `console.error('Monday scheduler:', ...)` | `monday_sync_started`/`completed`/`failed` | INFO / WARN | módulo lógico, contagens | token, payload de board | `monday_sync_failed` |
+| Backup (`scripts/backup-postgres.js`) | `console.log`/`console.error` (H5) | `backup_started`/`completed`/`failed`/`tracking_failed` | INFO / ERROR | backupId, sizeBytes | connection string, chave | Encaminhado via log ERROR |
+| Restore (`scripts/restore-postgres.js`) | `console.log`/`console.error` (H5) | `restore_started`/`completed`/`failed`/`evidence_failed` | INFO / ERROR | restoreId, backupId, durationMs | connection string, chave | Encaminhado via log ERROR |
+| Auth (H2/H3) | Sem log operacional dedicado (só `audit_log` de negócio) | (fora do escopo mínimo desta rodada — ver limitações) | — | — | — | — |
+| Persistência (`storage/*`) | `console.error` genérico no catch-all de `server.js` | `http_persistence_error` | ERROR | requestId, route, errorCode | valor de linha/SQL | — |
+
+### O que foi implementado
+
+- **`observability/redaction.js`** — sanitizador genérico (por nome de campo E por padrão em texto
+  livre), reaproveitado por `backup/sanitize.js` (H5) sem alterar sua assinatura pública.
+- **`observability/logger.js`** — logger centralizado, uma linha JSON por evento, 5 níveis
+  (DEBUG/INFO/WARN/ERROR/FATAL), `LOG_LEVEL` com fallback seguro (INFO) em produção, redaction aplicada
+  a todos os campos, serializador seguro de erro (nunca `JSON.stringify(error)` cru, stack nunca em
+  produção).
+- **`observability/alert.js`** — webhook HTTPS genérico (provider-neutro), assinatura HMAC-SHA256
+  opcional (`X-Patrono-Signature`), HTTPS obrigatório em produção, retry limitado (3 tentativas),
+  cooldown/dedup em memória por instância, e nunca gera um segundo alerta a partir da própria falha de
+  entrega (testado explicitamente).
+- **`server.js`** — `requestId` (`crypto.randomUUID()`) gerado no servidor para toda requisição,
+  exposto em `X-Request-Id`; access log HTTP com rota normalizada (`normalizeRouteForLogging()`);
+  `/api/health/live` e `/api/health/ready` (liveness nunca toca storage; readiness reaproveita
+  `storage.healthcheck()`, nunca chama Monday/Calendar/S3); `/api/health` legado mantido; boot/shutdown/
+  scheduler Monday convertidos para eventos estruturados; `process.on('uncaughtException'/
+  'unhandledRejection')` com log FATAL + término controlado.
+- **H5 (backup/restore)** — eventos estruturados adicionados em paralelo ao comportamento já aprovado;
+  `BackupTrackingError`/`RestoreEvidenceError` e seus exit codes (2) permanecem exatamente como estavam.
+- **`docs/OBSERVABILITY.md`** — esquema completo, catálogo de eventos, política de redaction/PII,
+  configuração e limitações.
+
+### Por que PG-17 permanece ABERTO (não fechado por intenção)
+
+O lado da APLICAÇÃO está implementado e testado com evidência real: logs estruturados, correlação por
+`requestId`, redaction defensiva, health liveness/readiness, e um mecanismo de alerta funcional (testado
+com um servidor HTTP local real, nunca a internet). Isso NÃO equivale a "logs de produção buscáveis" —
+o critério de aceite de PG-17 exige que um log de erro em produção seja **buscável**, o que depende de
+um agregador/coletor real (ex.: um serviço de logs, um `stdout` coletado por uma plataforma de
+deploy) — nenhuma infraestrutura desse tipo foi provisionada ou exercitada nesta rodada (item do escopo
+H6 proibiu contratar serviço ou provisionar infraestrutura real; fica para H11). Da mesma forma, nenhum
+`ALERT_WEBHOOK_URL` real de produção foi configurado/validado contra um destino de monitoramento real.
+Fechar PG-17 sem essa evidência seria fechar por intenção, não por comprovação — mesma disciplina já
+aplicada a PG-21/H5.
+
+### Limitações explicitamente documentadas
+
+- Cooldown/dedup do alerta é em memória, por instância — nunca uma garantia de deduplicação global
+  entre múltiplas instâncias (H11 tratará agregação real).
+- Nenhum endpoint `/metrics` foi criado nesta rodada (eventos estruturados cobrem a necessidade mínima).
+- Eventos de auth (`auth_login_failed`, etc.) e `RATE_LIMIT_TRIGGERED` operacional ficaram fora do
+  escopo mínimo desta rodada — o `audit_log` de negócio (H2/H3) já cobre a trilha exigida hoje; H8
+  poderá avaliar se vale a pena espelhar algum desses eventos também como log operacional.
+- `scripts/health-probe.js` provider-neutro não foi criado nesta rodada — não havia um destino real
+  (cron/uptime monitor) para conectá-lo; documentado como pendência de H11, não implementado
+  especulativamente.
+
+### Testes
+
+**518/518 passando** com Postgres real (485 anteriores + 33 novos em `tests/h6-observability.test.js` —
+redaction (7), logger (7), alerta com servidor HTTP local (10), HTTP real (`requestId`/access log/
+normalização de rota/401-404 não classificados como erro/500 real via injeção de falha), health
+liveness/readiness, headers H4 preservados), 0 falhando, nenhum teste removido. `npm audit`: inalterado
+(2 vulnerabilidades altas conhecidas, `image-size`/`pptxgenjs` — H9); nenhuma dependência nova foi
+adicionada nesta rodada.
+
+**Por que "implementado parcialmente" e não "aguardando homologação":** mesma disciplina de H5 — o
+mecanismo está completo e testado, mas depende de uma peça de infraestrutura de produção (agregador de
+logs e/ou destino de alerta real) fora do escopo autorizado desta rodada (H11).
+
+### Correção técnica final (PR #17, revisão técnica independente)
+
+Antes da revisão final, 6 problemas técnicos foram identificados e corrigidos sem expandir escopo (ver
+`docs/DECISIONS.md`, adendo à PROD-H6-01, e `docs/QA.md` para o detalhamento completo dos testes):
+campos reservados do logger e do payload de alerta nunca mais podem ser sobrescritos pelo chamador;
+redaction de `Bearer` ampliada para cobrir o alfabeto base64/base64url/JWT por inteiro; threshold real
+de HTTP 5xx repetido (`HTTP_5XX_ALERT_THRESHOLD`/`HTTP_5XX_ALERT_WINDOW_MS`) substituindo o disparo no
+primeiro 5xx isolado; estado em memória do alerta explicitamente limitado (`MAX_TRACKED_KEYS`); cooldown
+do alerta passa a ser marcado somente após entrega bem-sucedida. **527/527 testes passando** (485
+anteriores + 42 em `tests/h6-observability.test.js`). `npm audit` inalterado. PG-17 permanece ABERTO,
+sem alteração da pendência específica já registrada acima.
+
 ## 16. Decisão final atual
 
 **NO-GO PARA PRODUÇÃO** — inalterado por esta rodada de hardening.
 
-Após o H1A/H1B/H2/H3/H4/H5(parcial): **4 P0 abertos** (ausência de retenção/legal hold — H8, ausência de
-incident response — H7, backup/restore de produção com offsite real ainda não validado — H5/PG-21,
-ausência de infraestrutura de deploy como código — H11), **4 P1 abertos**, **4 P2 abertos** — 12 achados
-abertos, **13 fechados** (PG-01 a PG-13, ver seções 17/18/19/20/21). Na matriz da seção 5, as linhas
-"Persistência", "Sessões", "Autenticação (credenciais)", "Rate limiting" e "Headers HTTP" deixam de
-bloquear; "Backup"/"Restore" avançaram substancialmente (mecanismo real, RPO/RTO comprovados) mas
-continuam bloqueando até o storage offsite real ser exercitado; os demais 5 gates bloqueantes
-(Logging/Monitoramento, Incident Response, Retenção/Legal Hold, Dependências, Deploy/Infra) permanecem
-inalterados, mais o LGPD (P1, não bloqueante técnico mas pendente de decisão de negócio/jurídico).
-Nenhum waiver foi emitido.
+Após o H1A/H1B/H2/H3/H4/H5(parcial)/H6(parcial): **4 P0 abertos** (ausência de retenção/legal hold — H8,
+ausência de incident response — H7, backup/restore de produção com offsite real ainda não validado —
+H5/PG-21, ausência de infraestrutura de deploy como código — H11), **4 P1 abertos** (dependências — H9,
+logging/monitoramento com agregação/alerta real ainda não validados — H6/PG-17, LGPD ×2), **4 P2
+abertos** — 12 achados abertos, **13 fechados** (PG-01 a PG-13, ver seções 17/18/19/20/21). Na matriz da
+seção 5, as linhas "Persistência", "Sessões", "Autenticação (credenciais)", "Rate limiting" e "Headers
+HTTP" deixam de bloquear; "Backup"/"Restore" e "Logging/Monitoramento" avançaram substancialmente
+(mecanismo real implementado e testado) mas continuam bloqueando até, respectivamente, o storage offsite
+real e o agregador/destino de alerta real serem exercitados; os demais gates bloqueantes (Incident
+Response, Retenção/Legal Hold, Dependências, Deploy/Infra) permanecem inalterados, mais o LGPD (P1, não
+bloqueante técnico mas pendente de decisão de negócio/jurídico). Nenhum waiver foi emitido.
 O Sprint 2 permanece concluído no escopo homologado (`docs/DECISIONS.md`, D2-CLOSE) — este documento não
 o reabre nem contradiz; apenas formaliza que produção é um gate técnico/de negócio separado, ainda não
 atendido, e que
 o H1A/H1B/H2/H3/H4 avançaram critérios específicos de persistência/sessão/autenticação/rate limiting/
-headers HTTP sem declarar o gate inteiro atendido, e H5 avançou substancialmente o mecanismo de
-backup/restore sem ainda fechar PG-21 (pendência específica e documentada: storage offsite real).
+headers HTTP sem declarar o gate inteiro atendido, e H5/H6 avançaram substancialmente os mecanismos de
+backup/restore e observabilidade sem ainda fechar PG-21/PG-17 (pendências específicas e documentadas:
+storage offsite real; agregação/busca real de produção e destino de alerta real).

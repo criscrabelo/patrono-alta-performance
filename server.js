@@ -11,6 +11,8 @@ const { StoreConflictError } = require('./storage/errors');
 const authCrypto = require('./auth/crypto');
 const rateLimit = require('./auth/rate-limit');
 const { resolveClientIp } = require('./auth/client-ip');
+const logger = require('./observability/logger');
+const alert = require('./observability/alert');
 
 const ROOT = __dirname;
 const ENV_FILE = path.join(ROOT, '.env');
@@ -1118,7 +1120,29 @@ async function runMondaySync(store, requestedBy='Agendador COEVO') {
   run.status=failed?'partial':'completed';run.finishedAt=new Date().toISOString();return run;
 }
 function scheduleDueNow(now=new Date()){const local=now.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'America/Sao_Paulo'});return MONDAY_SYNC_TIMES.includes(local)?local:null;}
-async function scheduledMondayTick(){if(!process.env.MONDAY_TOKEN)return;const store=await readStore();const due=scheduleDueNow();if(!due)return;const date=new Date().toLocaleDateString('en-CA',{timeZone:'America/Sao_Paulo'});if((store.mondayRuns||[]).some(r=>r.trigger==='scheduled'&&r.scheduleTime===due&&String(r.startedAt).startsWith(date)))return;const run=await runMondaySync(store,'Agendador COEVO');run.trigger='scheduled';run.scheduleTime=due;audit(store,{name:'Agendador COEVO'},'SYNC_SCHEDULED','monday',run.id,null,run,'Sincronização automática programada');await writeStore(store);}
+// Sprint 2, Hardening H6 (docs/OBSERVABILITY.md): substitui o `console.error('Monday scheduler:', ...)`
+// por eventos estruturados — nunca token, payload completo ou conteúdo de board, só o nome lógico do
+// módulo, contagens e mensagem de erro sanitizada.
+async function scheduledMondayTick(){
+  if(!process.env.MONDAY_TOKEN)return;
+  const store=await readStore();
+  const due=scheduleDueNow();
+  if(!due)return;
+  const date=new Date().toLocaleDateString('en-CA',{timeZone:'America/Sao_Paulo'});
+  if((store.mondayRuns||[]).some(r=>r.trigger==='scheduled'&&r.scheduleTime===due&&String(r.startedAt).startsWith(date)))return;
+  logger.info('monday_sync_started', { component: 'monday', trigger: 'scheduled', scheduleTime: due });
+  const run=await runMondaySync(store,'Agendador COEVO');
+  run.trigger='scheduled';run.scheduleTime=due;
+  audit(store,{name:'Agendador COEVO'},'SYNC_SCHEDULED','monday',run.id,null,run,'Sincronização automática programada');
+  await writeStore(store);
+  const failedModules = (run.modules||[]).filter(m=>m.status==='error');
+  if (failedModules.length) {
+    logger.warn('monday_sync_failed', { component: 'monday', trigger: 'scheduled', modules: failedModules.map(m=>({module:m.module,error:logger.serializeError(new Error(m.error||'erro desconhecido')).message})) });
+    alert.notify({ level: 'warn', event: 'monday_sync_failed', message: `Sincronização Monday com falha em ${failedModules.length} módulo(s)`, dedupKey: 'monday_sync_failed', fields: { modulesFailed: failedModules.length } });
+  } else {
+    logger.info('monday_sync_completed', { component: 'monday', trigger: 'scheduled', modulesRead: (run.modules||[]).length });
+  }
+}
 
 // Sprint 2, Hardening H4 (item 35 do escopo): mapa explícito de MIME types — antes era uma cadeia
 // ternária sem ramos para `.json`/`.svg`/fontes, que caía silenciosamente em `application/octet-stream`
@@ -1148,15 +1172,67 @@ function staticFile(res, file) {
   res.writeHead(200, { 'content-type': type });
   return fs.createReadStream(file).pipe(res);
 }
+// Sprint 2, Hardening H6 (docs/PRODUCTION_GATE.md, PG-17; docs/DECISIONS.md, PROD-H6-01): normaliza um
+// pathname para fins de log/monitoramento — segmentos que parecem UUID ou id numérico viram `:id`, para
+// que a cardinalidade de rotas registradas permaneça finita (ex.: `/api/legal/processes/:id`), nunca uma
+// entrada nova por requisição.
+const UUID_SEGMENT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function normalizeRouteForLogging(pathname) {
+  return String(pathname)
+    .split('/')
+    .map((segment) => {
+      if (!segment) return segment;
+      if (UUID_SEGMENT.test(segment)) return ':id';
+      if (/^\d+$/.test(segment)) return ':id';
+      return segment;
+    })
+    .join('/');
+}
+// Requisições de sucesso a /api/health são deliberadamente omitidas do access log em INFO (viram DEBUG)
+// — decisão documentada em docs/OBSERVABILITY.md para não afogar o log operacional com ruído de
+// healthcheck periódico; falhas de health continuam visíveis em WARN/ERROR normalmente.
+function logHttpAccess(req, res, requestId, route, durationMs) {
+  const statusCode = res.statusCode;
+  const fields = {
+    component: 'http',
+    requestId,
+    method: req.method,
+    route,
+    statusCode,
+    durationMs: Math.round(durationMs * 100) / 100
+  };
+  const isHealthOk = (route === '/api/health' || route === '/api/health/live' || route === '/api/health/ready') && statusCode < 400;
+  if (isHealthOk) return logger.debug('http_request_completed', fields);
+  if (statusCode >= 500) {
+    logger.error('http_request_completed', fields);
+    // Item 4 (correção pós-H6, PR #17): um 500 isolado nunca alerta — só ao atingir o threshold real
+    // (HTTP_5XX_ALERT_THRESHOLD ocorrências na janela HTTP_5XX_ALERT_WINDOW_MS) o alerta é emitido.
+    alert.recordHttp5xxAndMaybeNotify({ key: route, route, statusCode, requestId });
+    return;
+  }
+  return logger.info('http_request_completed', fields);
+}
 function handler(req, res) {
+  // Sprint 2, Hardening H6: requestId gerado no servidor para TODA requisição (nunca confia cegamente
+  // num identificador externo) — permite correlacionar auth → processamento → integração → resposta/erro
+  // nos logs desta mesma requisição sem carregar payload sensível.
+  const requestId = crypto.randomUUID();
+  req.requestId = requestId;
+  res.setHeader('X-Request-Id', requestId);
+  const startedAtNs = process.hrtime.bigint();
+  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  if (url.pathname.startsWith('/api/v1/')) url.pathname = url.pathname.replace('/api/v1/', '/api/');
+  const routeForLog = normalizeRouteForLogging(url.pathname);
+  res.on('finish', () => {
+    const durationMs = Number(process.hrtime.bigint() - startedAtNs) / 1e6;
+    logHttpAccess(req, res, requestId, routeForLog, durationMs);
+  });
   // Sprint 2, Hardening H4: aplicado ANTES de qualquer roteamento — estático, preflight ou `/api/*` —
   // para que nenhuma resposta relevante escape dos headers de segurança/CORS (item 5 do escopo).
   applySecurityHeaders(req, res);
   // Item 25 do escopo: preflight OPTIONS nunca alcança o roteador de negócio, para NENHUM path — nunca
   // retorna dado de negócio, sempre 204.
   if (req.method === 'OPTIONS') return handlePreflight(req, res);
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-  if (url.pathname.startsWith('/api/v1/')) url.pathname = url.pathname.replace('/api/v1/', '/api/');
   if (req.method === 'GET' && url.pathname === '/') return staticFile(res, path.join(ROOT, 'public', 'index.html'));
   if (req.method === 'GET' && url.pathname === '/status') return staticFile(res, path.join(ROOT, 'public', 'status.html'));
   if (req.method === 'GET' && ['/app.js','/dashboard-widgets.js','/styles.css','/sidebar.css','/dashboard.css','/dashboard-widgets.css','/processes.css','/projects.css','/status.js','/status.css'].includes(url.pathname)) return staticFile(res, path.join(ROOT, 'public', path.basename(url.pathname)));
@@ -1364,6 +1440,22 @@ function handler(req, res) {
   // Sprint 2, Hardening H1A (docs/PRODUCTION_GATE.md, seção 22): nunca expõe host/usuário/senha/connection
   // string nem stack trace — só o estado observável da persistência (modo ativo, alcançável, schema pronto).
   if (req.method === 'GET' && url.pathname === '/api/health') { const persistenceHealth = await storage.healthcheck(); return json(res,200,{status:'ok',persistence:persistenceHealth.mode,databaseConfigured:Boolean(process.env.DATABASE_URL),databaseReachable:persistenceHealth.reachable,schemaReady:persistenceHealth.schemaReady,environment:process.env.NODE_ENV||'development'}); }
+  // Sprint 2, Hardening H6 (docs/OBSERVABILITY.md): liveness/readiness separados, sem duplicar a rota
+  // legada acima (mantida por compatibilidade). Liveness nunca toca storage/rede — só confirma que o
+  // processo está respondendo. Readiness reaproveita EXATAMENTE storage.healthcheck() (nunca chama
+  // Monday/Calendar/S3 — integrações opcionais nunca tornam o núcleo jurídico "indisponível") e nunca
+  // expõe DATABASE_URL, host interno, bucket ou stack — apenas os booleanos mínimos necessários.
+  if (req.method === 'GET' && url.pathname === '/api/health/live') { return json(res,200,{status:'ok'}); }
+  if (req.method === 'GET' && url.pathname === '/api/health/ready') {
+    try {
+      const persistenceHealth = await storage.healthcheck();
+      const ready = Boolean(persistenceHealth.reachable && persistenceHealth.schemaReady);
+      return json(res, ready ? 200 : 503, { status: ready ? 'ok' : 'unavailable', persistence: persistenceHealth.mode, databaseReachable: persistenceHealth.reachable, schemaReady: persistenceHealth.schemaReady });
+    } catch (error) {
+      logger.error('readiness_check_failed', { component: 'health', requestId: req.requestId, errorCode: 'READINESS_CHECK_FAILED', error: logger.serializeError(error) });
+      return json(res, 503, { status: 'unavailable' });
+    }
+  }
   const user = await getUser(req, store); if (!user) return json(res,401,{error:'Sessão inválida'});
   // Sprint 2, Hardening H2 (item 6 do escopo + bootstrapping de MFA obrigatório): enquanto a conta exige
   // configuração (senha temporária ainda não trocada, ou papel exige MFA e ele ainda não foi confirmado),
@@ -1895,7 +1987,7 @@ const created={id:newUserId,name:request.name,email:request.email,role:request.r
   return json(res,404,{error:'Rota não encontrada'});
   } catch (error) {
     if (error instanceof StoreConflictError) return json(res,409,{error:error.message,code:error.code});
-    console.error('Erro de persistência não tratado:', error.message);
+    logger.error('http_persistence_error', { component: 'storage', requestId: req.requestId, route: normalizeRouteForLogging(url.pathname), method: req.method, errorCode: 'PERSISTENCE_UNAVAILABLE', error: logger.serializeError(error) });
     return json(res,503,{error:'Persistência indisponível. Tente novamente.'});
   }
   })();
@@ -1935,12 +2027,66 @@ function validateAuthRuntimeConfig() {
 // DATABASE_URL, `storage.configure()` (acima) já lançou FailFastError antes de chegarmos aqui; se o
 // Postgres estiver configurado mas inalcançável/schema incompatível, `init()` lança e o processo
 // termina com código de saída ≠ 0 — nunca cai silenciosamente em modo arquivo.
-if (require.main === module) {
-  validateAuthRuntimeConfig();
-  storage.init().then(() => {
-    http.createServer((req,res)=>handler(req,res)).listen(PORT,()=>console.log(`COEVO Alta Performance disponível em http://localhost:${PORT}`));
-    setInterval(()=>scheduledMondayTick().catch(error=>console.error('Monday scheduler:',error.message)),60000);
-  }).catch(error => { console.error('Falha ao inicializar a persistência — processo não iniciado:', error.message); process.exit(1); });
+// Sprint 2, Hardening H6 (docs/OBSERVABILITY.md): eventos estruturados de boot/shutdown/erro de
+// processo. A lógica de validação/inicialização em si (validateAuthRuntimeConfig(), storage.init()) NÃO
+// muda — apenas o que envolvia console.log/console.error vira logger.*, e passa a existir desligamento
+// gracioso mínimo (SIGTERM/SIGINT) e captura de exceção/rejeição não tratada no nível de processo.
+async function main() {
+  // Registrados só aqui (processo real, `require.main === module`) — nunca ao importar server.js como
+  // módulo em teste, para nunca derrubar o processo principal do test runner.
+  process.on('uncaughtException', (error) => {
+    logger.fatal('uncaught_exception', { component: 'process', errorCode: 'UNCAUGHT_EXCEPTION', error: logger.serializeError(error) });
+    process.exit(1);
+  });
+  process.on('unhandledRejection', (reason) => {
+    const error = reason instanceof Error ? reason : new Error(String(reason));
+    logger.fatal('unhandled_rejection', { component: 'process', errorCode: 'UNHANDLED_REJECTION', error: logger.serializeError(error) });
+    process.exit(1);
+  });
+
+  try {
+    validateAuthRuntimeConfig();
+  } catch (error) {
+    logger.fatal('app_start_failed', { component: 'boot', errorCode: 'CONFIG_VALIDATION_FAILED', error: logger.serializeError(error) });
+    process.exit(1);
+    return;
+  }
+
+  try {
+    await storage.init();
+  } catch (error) {
+    logger.fatal('app_start_failed', { component: 'boot', errorCode: 'STORAGE_INIT_FAILED', error: logger.serializeError(error) });
+    process.exit(1);
+    return;
+  }
+
+  const httpServer = http.createServer((req, res) => handler(req, res));
+  httpServer.listen(PORT, () => {
+    logger.info('app_started', { component: 'boot', nodeVersion: process.version, port: PORT, persistence: storage.mode() });
+  });
+  const mondayInterval = setInterval(() => {
+    scheduledMondayTick().catch((error) => {
+      logger.error('monday_sync_failed', { component: 'monday', trigger: 'scheduled', errorCode: 'MONDAY_TICK_EXCEPTION', error: logger.serializeError(error) });
+      alert.notify({ level: 'error', event: 'monday_sync_failed', message: 'Sincronização Monday agendada lançou exceção', dedupKey: 'monday_sync_failed_exception' });
+    });
+  }, 60000);
+
+  let shuttingDown = false;
+  function gracefulShutdown(signal) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logger.info('app_shutdown_started', { component: 'boot', signal });
+    clearInterval(mondayInterval);
+    httpServer.close(() => {
+      logger.info('app_shutdown_completed', { component: 'boot', signal });
+      process.exit(0);
+    });
+  }
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 }
-module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, ORIGIN_TYPE_LABELS, STATUS_LABELS, CATEGORY_LABELS, legalDeadlineLabels, legalDeadlineConfirmationLabel, LEGAL_DEADLINE_TEXTUAL_RESPONSIBLE_FIELDS, filterCalendarEventsByWindow, canBeResponsibleForLegalDeadline, storage, migrateLegacyStore, validateAuthRuntimeConfig, resolveLoginIdentity, issuePasswordResetToken, auditRateLimitAndBlock, isAllowedOrigin, normalizeCorsOrigin, CONTENT_SECURITY_POLICY, PERMISSIONS_POLICY };
+if (require.main === module) {
+  main();
+}
+module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, ORIGIN_TYPE_LABELS, STATUS_LABELS, CATEGORY_LABELS, legalDeadlineLabels, legalDeadlineConfirmationLabel, LEGAL_DEADLINE_TEXTUAL_RESPONSIBLE_FIELDS, filterCalendarEventsByWindow, canBeResponsibleForLegalDeadline, storage, migrateLegacyStore, validateAuthRuntimeConfig, resolveLoginIdentity, issuePasswordResetToken, auditRateLimitAndBlock, isAllowedOrigin, normalizeCorsOrigin, CONTENT_SECURITY_POLICY, PERMISSIONS_POLICY, normalizeRouteForLogging };
 

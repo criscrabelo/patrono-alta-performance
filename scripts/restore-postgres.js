@@ -28,6 +28,7 @@ const { sanitizeErrorMessage } = require('../backup/sanitize');
 const runsRepository = require('../backup/runs-repository');
 const { parsePostgresConnection, pgCliArgs, pgChildEnv } = require('../backup/pg-connection');
 const { RestoreEvidenceError } = require('../backup/errors');
+const logger = require('../observability/logger');
 
 // Dados operacionais efêmeros (item 30-32 do escopo H5): após um disaster recovery, preferir REVOGAR
 // sessões/desafios/tokens/buckets de rate limit em vez de restaurá-los cegamente. Nenhum deles é dado de
@@ -108,6 +109,7 @@ async function smokeValidateTargetData(client) {
 async function runRestore(options = {}) {
   const startedAt = new Date().toISOString();
   const restoreId = generateRestoreId();
+  logger.info('restore_started', { component: 'restore', restoreId });
   const databaseUrlTarget = options.databaseUrlTarget || process.env.DATABASE_URL_TARGET;
   if (!databaseUrlTarget) throw new Error('DATABASE_URL_TARGET é obrigatória — restore nunca assume um banco "atual" implicitamente.');
 
@@ -240,6 +242,7 @@ async function runRestore(options = {}) {
       });
       report.evidenceRecorded = true;
     } catch (evidenceError) {
+      logger.error('restore_evidence_failed', { component: 'restore', restoreId, backupId: manifest.backupId, errorCode: 'RESTORE_EVIDENCE_FAILED', error: logger.serializeError(evidenceError) });
       throw new RestoreEvidenceError(
         `Restore concluído com SUCESSO (restoreId=${restoreId}, backupId=${manifest.backupId}), mas o ` +
         `registro de evidência (restore_runs) falhou: ${sanitizeErrorMessage(evidenceError.message)}. ` +
@@ -248,6 +251,7 @@ async function runRestore(options = {}) {
       );
     }
 
+    logger.info('restore_completed', { component: 'restore', restoreId, backupId: manifest.backupId, durationMs: report.durationMs });
     return report;
   } catch (error) {
     // `RestoreEvidenceError` já representa o estado final correto (execução bem-sucedida, evidência não
@@ -256,6 +260,7 @@ async function runRestore(options = {}) {
     if (error instanceof RestoreEvidenceError) throw error;
 
     const sanitizedMessage = sanitizeErrorMessage(error.message);
+    logger.error('restore_failed', { component: 'restore', restoreId, errorCode: 'RESTORE_FAILED', error: logger.serializeError(error) });
     if (targetClient) {
       // Um banco de destino JÁ foi tocado (conexão estabelecida) quando este erro ocorreu — tentamos
       // registrar a falha em `restore_runs`. Se ESSA gravação também falhar, nunca escondemos nenhum dos
@@ -267,6 +272,7 @@ async function runRestore(options = {}) {
           errorMessage: sanitizedMessage, startedAt
         });
       } catch (evidenceError) {
+        logger.error('restore_evidence_failed', { component: 'restore', restoreId, errorCode: 'RESTORE_FAILURE_EVIDENCE_FAILED', error: logger.serializeError(evidenceError) });
         const wrapped = new RestoreEvidenceError(
           `Restore FALHOU (${sanitizedMessage}) e o registro dessa falha em restore_runs também falhou: ` +
           `${sanitizeErrorMessage(evidenceError.message)}. Nenhuma tentativa adicional de restore foi feita.`,
