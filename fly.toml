@@ -1,0 +1,36 @@
+# DEMO/STAGING apenas — ver docs/DEMO_DEPLOY.md. Não declara nem substitui uma decisão de infraestrutura
+# de produção (H11, docs/PRODUCTION_GATE.md, PG-22, continua aberto). Troque "app" pelo nome real da sua
+# aplicação Fly antes do primeiro deploy (`fly apps create <nome>` ou `fly launch --no-deploy`).
+app = "patrono-legal-demo"
+primary_region = "gru"
+
+[build]
+
+[env]
+  PORT = "3007"
+  # NODE_ENV é definido via `fly secrets set` (nunca aqui, para nunca acidentalmente versionar um valor
+  # de produção) — ver docs/DEMO_DEPLOY.md.
+
+[http_service]
+  internal_port = 3007
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[http_service.checks]]
+  interval = "15s"
+  timeout = "5s"
+  grace_period = "10s"
+  method = "GET"
+  path = "/api/health/live"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+# Roda a migration de schema (idempotente, scripts/migrate.js) a cada deploy — nunca a migração de dados
+# (scripts/migrate-h1b-data.js), que é um cutover único e deliberado, feito manualmente uma vez (ver
+# docs/DEMO_DEPLOY.md).
+[deploy]
+  release_command = "node scripts/migrate.js"
