@@ -21,6 +21,16 @@ function financeRows(store) {
 }
 
 function latestSync(store) { return (store.mondayRuns || []).filter(run => run.finishedAt).sort((a, b) => String(b.finishedAt).localeCompare(String(a.finishedAt)))[0]?.finishedAt || null; }
+// P0 (branch demo — "Abrir" sem ação real): resolve um destino de navegação para um compromisso de
+// agenda que REPRESENTE um Comitê (reaproveita a tela de Comitês já existente, público.app.js `comites`
+// + `state.committeeDepartment`) — nunca hardcoda o título específico de um evento (ex.: "Comitê
+// Executivo mensal"), só o padrão semântico "é um comitê deste departamento". Eventos sem esse padrão
+// ficam sem `target`; dashboard-widgets.js (list()) já trata a ausência de target corretamente, sem
+// mostrar um "Abrir" enganoso.
+function agendaEventTarget(event) {
+  if (event?.department && /comit[êe]/i.test(String(event.title || ''))) return `comite:${event.department}`;
+  return undefined;
+}
 function processStatus(row) { const value = String(row.columnsByTitle?.["'MEU TRABALHO'"] || row.columnsByTitle?.['STATUS (para comitê)'] || row.columnsByTitle?.STATUS || ''); return /finaliz|encerr|baix|extint|arquiv/i.test(value) ? 'Finalizado' : /acordo/i.test(value) ? 'Acordo' : /acompanha/i.test(value) ? 'Em acompanhamento' : /andamento|suspenso/i.test(value) ? 'Em andamento' : 'A classificar'; }
 function activeProcesses(store) { return recordList(store, 'processos').filter(row => processStatus(row) !== 'Finalizado'); }
 // P1 corrigido (revisão do PR #5): contagens do dashboard 'legal' (processos ativos, "A classificar",
@@ -56,10 +66,16 @@ function dashboardPayload(store, id, query = {}, user = null, deps = {}) {
   const putBudget = (widgetId, row) => { widgets[widgetId] = row ? ready(widgetId, row, memory(row.source, competence, 1, 'Orçamento, planejado, comprometido e realizado consolidados por departamento.', updated)) : empty(widgetId, 'Cadastro financeiro', competence, 'Não há orçamento cadastrado para este departamento.'); };
 
   if (id === 'executive') {
-    const processes = activeProcesses(store), upcoming = store.agenda || [];
+    // P0 (branch demo — compromisso já vencido aparecendo como "próximo"): `upcoming` passa a ser a
+    // agenda filtrada por data civil e ordenada crescente (deps.upcomingAgendaItems(), server.js —
+    // mesma convenção de fuso America/Sao_Paulo já usada em Legal Deadline; nunca uma segunda regra de
+    // data). `target` (agendaEventTarget(), acima) só existe quando o compromisso é reconhecidamente um
+    // Comitê — os demais ficam sem CTA "Abrir" (dashboard-widgets.js já trata isso corretamente).
+    const processes = activeProcesses(store);
+    const upcoming = (deps.upcomingAgendaItems ? deps.upcomingAgendaItems(store.agenda) : store.agenda || []).map(event => ({ ...event, target: agendaEventTarget(event) }));
     widgets['department-summary'] = ready('department-summary', finance.map(row => ({ ...row, activeProcesses: row.departmentId === 'dep-juridico' ? processes.length : null, commitments: upcoming.filter(event => event.department === row.departmentName || (row.departmentName === 'TI' && event.department === 'Tecnologia')).length })), memory('Financeiro departamental + Monday + Agenda', competence, finance.length, 'Um resumo por departamento permitido ao perfil.', updated));
     widgets['budget-comparison'] = ready('budget-comparison', finance, memory('Financeiro departamental', competence, finance.length, 'Comparação entre planejado, orçamento e realizado por departamento.', updated));
-    widgets['upcoming-deadlines'] = upcoming.length ? ready('upcoming-deadlines', upcoming.slice(0, 8), memory('Agenda', competence, upcoming.length, 'Compromissos futuros ordenados por data.', updated)) : empty('upcoming-deadlines', 'Agenda', competence, 'Nenhum compromisso cadastrado.');
+    widgets['upcoming-deadlines'] = upcoming.length ? ready('upcoming-deadlines', upcoming.slice(0, 8), memory('Agenda', competence, upcoming.length, 'Compromissos futuros ordenados por data.', updated)) : empty('upcoming-deadlines', 'Agenda', competence, 'Nenhum compromisso futuro cadastrado.');
     widgets['attention-list'] = ready('attention-list', [{ label: 'Processos ativos', value: processes.length, target: 'legal' }, { label: 'Registros sem classificação', value: processes.filter(row => processStatus(row) === 'A classificar').length, target: 'legal' }], memory('Monday', competence, processes.length, 'Contagem da carteira ativa e de cadastros a classificar.', updated));
     widgets['decision-list'] = (store.committees || []).length ? ready('decision-list', store.committees.slice(-6).reverse(), memory('Comitês', competence, store.committees.length, 'Últimas decisões registradas em comitê.', updated)) : empty('decision-list', 'Comitês', competence, 'Nenhuma decisão registrada.');
   } else if (id === 'legal') {

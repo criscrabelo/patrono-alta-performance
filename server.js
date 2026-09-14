@@ -321,6 +321,17 @@ function isLegalDeadlineOverdue(deadline, today = todayCivilDate()) {
 // "vencido" nas views — mesmo padrão de fuso de todayCivilDate(), não uma segunda regra de atraso
 // (isLegalDeadlineOverdue() continua sendo a única fonte da condição "vencido").
 function civilDateAfterDays(days) { return new Date(Date.now() + days * 86400000).toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' }); }
+// P0 (branch demo — compromisso já vencido aparecendo como "próximo"): mesma convenção de data civil
+// (America/Sao_Paulo) já usada por isLegalDeadlineOverdue()/civilWeekWindow() acima — nunca uma segunda
+// regra de fuso horário. `date === today` NÃO é passado (mesmo critério do resto do projeto). Um
+// compromisso sem `date` não tem base para ser classificado como vencido, então permanece incluído.
+// Nunca muta o array de origem (`store.agenda`/`scopedStore.agenda`) — só filtra/ordena a VISÃO de
+// "próximos compromissos"; o histórico continua intacto na store.
+function upcomingAgendaItems(agenda, today = todayCivilDate()) {
+  return (agenda || [])
+    .filter(event => !event.date || event.date >= today)
+    .sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+}
 // Sprint 2, Fase 4B (D4.15 homologada): cumprido/cancelado/suspenso não aparecem por padrão na Agenda
 // operacional — só ativo e vencido (derivado). Nunca remove o registro nem muda seu status; os mesmos
 // itens continuam acessíveis via detalhe/histórico/filtro explícito de Legal Deadline.
@@ -1851,7 +1862,7 @@ function handler(req, res) {
     // para que o widget 'legal' aplique a MESMA autorização por registro usada no resto da plataforma
     // (defesa em profundidade sobre Legal Deadline + processo relacionado), em vez de confiar apenas no
     // gate de dashboardAuthorized() (que só autoriza o dashboard como um todo, não cada registro nele).
-    return json(res,200,dashboardPayload(store,id,Object.fromEntries(url.searchParams),user,{scoped,isLegalDeadlineOverdue,civilDateAfterDays}));
+    return json(res,200,dashboardPayload(store,id,Object.fromEntries(url.searchParams),user,{scoped,isLegalDeadlineOverdue,civilDateAfterDays,upcomingAgendaItems}));
   }
   // P0 corrigido (rodada 5, item 5): GET/PUT de preferências não validavam autorização alguma antes —
   // um usuário sem acesso a um dashboard ainda conseguia ler/gravar a própria preferência dele.
@@ -1914,7 +1925,11 @@ const created={id:newUserId,name:request.name,email:request.email,role:request.r
   // alçada global (diretoria/administrador) continua vendo o consolidado; os demais só o próprio
   // departamento. Não cria módulo financeiro novo — apenas aplica o mesmo escopo departamental já
   // usado em toda a plataforma.
-  if (req.method === 'GET' && url.pathname === '/api/dashboard') { if (!allowed(user,'central')) return json(res,403,{error:'Sem permissão'}); const departments=visibleDepartments(store,user); const agenda=(store.agenda||[]).filter(item=>scoped(user,item)); const scopedStore={...store,departments,agenda}; return json(res,200,{metrics:metrics(scopedStore), departments, finance:departmentFinancials(scopedStore), upcoming:agenda}); }
+  // P0 (branch demo — compromisso já vencido aparecendo como "próximo"): `upcoming` passa a ser a agenda
+  // filtrada por escopo E por data civil (upcomingAgendaItems(), acima) — `metrics`/`finance` continuam
+  // recebendo a agenda completa (scopedStore.agenda), sem filtrar por data, pois medem o cadastro em si,
+  // não "o que vem a seguir".
+  if (req.method === 'GET' && url.pathname === '/api/dashboard') { if (!allowed(user,'central')) return json(res,403,{error:'Sem permissão'}); const departments=visibleDepartments(store,user); const agenda=(store.agenda||[]).filter(item=>scoped(user,item)); const scopedStore={...store,departments,agenda}; return json(res,200,{metrics:metrics(scopedStore), departments, finance:departmentFinancials(scopedStore), upcoming:upcomingAgendaItems(agenda)}); }
   // P0 corrigido (rodada 7, item 2): `administrador` (modules:['*']/actions:['*']) passava em
   // `allowed(user,'*')` e recebia o evento de auditoria INTEIRO, incluindo `before`/`after` — que podem
   // conter o snapshot completo de um registro jurídico/financeiro. Isso reabria, por um atalho indireto,
@@ -2259,5 +2274,5 @@ async function main() {
 if (require.main === module) {
   main();
 }
-module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, ORIGIN_TYPE_LABELS, STATUS_LABELS, CATEGORY_LABELS, legalDeadlineLabels, legalDeadlineConfirmationLabel, LEGAL_DEADLINE_TEXTUAL_RESPONSIBLE_FIELDS, filterCalendarEventsByWindow, canBeResponsibleForLegalDeadline, storage, migrateLegacyStore, validateAuthRuntimeConfig, resolveLoginIdentity, issuePasswordResetToken, auditRateLimitAndBlock, isAllowedOrigin, normalizeCorsOrigin, CONTENT_SECURITY_POLICY, PERMISSIONS_POLICY, normalizeRouteForLogging, runMondaySync, MONDAY_BOARDS, audit, upsertMondayItems, reconcileMondayBoardAfterConflict, collection };
+module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, ORIGIN_TYPE_LABELS, STATUS_LABELS, CATEGORY_LABELS, legalDeadlineLabels, legalDeadlineConfirmationLabel, LEGAL_DEADLINE_TEXTUAL_RESPONSIBLE_FIELDS, filterCalendarEventsByWindow, canBeResponsibleForLegalDeadline, storage, migrateLegacyStore, validateAuthRuntimeConfig, resolveLoginIdentity, issuePasswordResetToken, auditRateLimitAndBlock, isAllowedOrigin, normalizeCorsOrigin, CONTENT_SECURITY_POLICY, PERMISSIONS_POLICY, normalizeRouteForLogging, runMondaySync, MONDAY_BOARDS, audit, upsertMondayItems, reconcileMondayBoardAfterConflict, collection, upcomingAgendaItems };
 
