@@ -234,4 +234,27 @@ function getPool() { return isRelationalBridgeActive() ? backend.getPool() : nul
 // apontando para um DATABASE_URL de teste isolado).
 function reset() { backend = null; }
 
-module.exports = { configure, init, readStore, writeStore, healthcheck, close, mode, reset, getPool };
+// P0 (branch demo — reconciliação de conflito de CAS após erro ambíguo de conexão no sync Monday):
+// primitivo estreito e explícito, não um "auto-reconcile geral" — usado só pelo caminho de recuperação
+// de runMondaySync() (server.js) quando uma persistência de board conflita (StoreConflictError) logo
+// depois de um erro de conexão transitório, cenário em que a escrita anterior pode ter sido efetivada no
+// Postgres sem o client receber a confirmação (commit "fantasma"). Copia o CONTEÚDO de `source` (um
+// store obtido de um `readStore()` fresco, já reconciliado com o board corrente reaplicado
+// idempotentemente) para dentro de `target` (o objeto `store` que o restante da rotina de sincronização
+// e o chamador HTTP/CLI/agendador continuam referenciando) — preservando a IDENTIDADE do objeto
+// `target` (nunca troca a referência que o chamador guarda) — e, quando o backend é PostgreSQL, também
+// transplanta o marcador de versão (CAS) de `source` para `target`, para que a PRÓXIMA
+// `writeStore(target)` use a versão correta em vez de conflitar de novo ou (pior) virar uma escrita
+// incondicional sem CAS. Nunca remove/enfraquece o CAS: no fallback JSON local (sem VERSION exposta),
+// apenas o conteúdo é copiado — mesma semântica de "objeto sem versão anexada" já usada por scripts como
+// o restore de backup, documentada em storage/json-store.js.
+function rebaseOnto(target, source) {
+  for (const key of Object.keys(target)) delete target[key];
+  Object.assign(target, source);
+  if (backend && backend.mode === 'postgres' && backend.VERSION && source[backend.VERSION] !== undefined) {
+    Object.defineProperty(target, backend.VERSION, { value: source[backend.VERSION], enumerable: false, configurable: true });
+  }
+  return target;
+}
+
+module.exports = { configure, init, readStore, writeStore, healthcheck, close, mode, reset, getPool, rebaseOnto };

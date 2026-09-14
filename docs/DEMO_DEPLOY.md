@@ -196,9 +196,14 @@ nativa/compilação) sobre uma aplicação já testada — risco baixo, mas rode
   real).
 - Sem agregador de log externo (mesma limitação já documentada em PG-17/H6 — logs ficam só em
   `fly logs`).
-- Sem HA/múltiplas réplicas — `min_machines_running = 0` no `fly.toml` significa que a máquina pode
-  dormir entre acessos (economiza custo); o primeiro acesso do dia pode demorar alguns segundos a mais
-  para "acordar" a instância.
+- Sem HA/múltiplas réplicas. **Atenção (P0 corrigido):** `fly.toml` estava com `min_machines_running = 0`
+  (a máquina dormia entre acessos, economizando custo) — o Fly chegou a autostopar a máquina no meio de
+  uma sincronização real via SSH ("App has excess capacity, autostopping machine" -> SIGINT), porque
+  autostop mede tráfego HTTP, não sessões SSH/scripts em execução. Corrigido para
+  `auto_stop_machines = false` / `min_machines_running = 1` — a máquina fica sempre ativa durante o
+  período de sincronização/apresentação (custo maior, aceito deliberadamente só para este ambiente
+  temporário). Se quiser voltar a economizar custo depois do Comitê, reverta para
+  `auto_stop_machines = "stop"` / `min_machines_running = 0` antes de destruir o ambiente (seção 8).
 - Google Calendar (Minha Semana) continua não configurado, a menos que você defina
   `GOOGLE_CALENDAR_CLIENT_ID`/`GOOGLE_CALENDAR_CLIENT_SECRET` — sem isso, a tela mostra honestamente "não
   configurado", nunca um evento fictício.

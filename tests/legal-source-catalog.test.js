@@ -310,3 +310,88 @@ test('[P0] withTransaction(): client emite erro de conexão DURANTE a transaçã
 
   await store.close();
 });
+
+// --- P0 (branch demo, 3ª rodada): conflito de CAS após erro AMBÍGUO de conexão (a escrita anterior pode
+// ter sido efetivada no Postgres antes de a conexão cair, sem o client receber a confirmação) ---
+
+test('[P0] reconcileMondayBoardAfterConflict(): relê o canônico, reaplica só o board corrente sem duplicar, preserva outros boards e a auditoria (nunca overwrite cego)', async (t) => {
+  const serverModule = require('../server');
+  const { reconcileMondayBoardAfterConflict, storage, seed } = serverModule;
+
+  // Estado "canônico" simulado no banco: o board 'pesquisas' já contém um item que a escrita anterior
+  // (ambígua) pode ter persistido de verdade, mesmo externalId que a rodada atual também tenta upsertar;
+  // 'acessos' representa outro board já persistido por uma escrita anterior BEM-SUCEDIDA, que não pode
+  // ser perdido nem sobrescrito.
+  const canonical = structuredClone(seed);
+  canonical.records = {
+    pesquisas: [{ id: 'existing-1', source: 'monday', externalId: '1', module: 'pesquisas', boardId: '9535379620', boardName: 'Pesquisas', title: 'Item 1', group: 'G1', columns: {}, columnsByTitle: {}, version: 1 }],
+    acessos: [{ id: 'other-board-1', source: 'monday', externalId: '9', module: 'acessos', title: 'Preexistente', columns: {}, columnsByTitle: {}, version: 1 }]
+  };
+  canonical.audit = [{ id: 'audit-preexistente', action: 'SYNC' }];
+
+  const originalReadStore = storage.readStore;
+  const originalWriteStore = storage.writeStore;
+  const writes = [];
+  storage.readStore = async () => structuredClone(canonical);
+  storage.writeStore = async (s) => { writes.push(structuredClone(s)); return s; };
+  t.after(() => { storage.readStore = originalReadStore; storage.writeStore = originalWriteStore; });
+
+  // `store` em memória, com uma versão desatualizada (a que causou o StoreConflictError) — vazio de
+  // propósito, para provar que a reconciliação vem do banco, nunca de um estado local presumido.
+  const store = { records: {} };
+  const board = { id: '9535379620', name: 'Pesquisas' };
+  // Mesmo item que o canônico já tem (id Monday '1') — simula exatamente o item cuja escrita anterior
+  // pode ter sido efetivada de forma ambígua.
+  const items = [{ id: '1', name: 'Item 1', created_at: '2026-01-01', group: { title: 'G1' }, column_values: [] }];
+
+  const counts = await reconcileMondayBoardAfterConflict(store, 'pesquisas', board, items);
+
+  assert.equal(counts.created, 0, 'item já persistido pela escrita ambígua deve ser reconhecido por externalId, nunca duplicado');
+  assert.equal(counts.unchanged, 1);
+  assert.equal(store.records.pesquisas.length, 1, 'nenhuma duplicação no board reconciliado');
+  assert.equal(store.records.acessos.length, 1, 'outro board já persistido no canônico é preservado — nunca um overwrite cego');
+  assert.deepEqual(store.audit, canonical.audit, 'auditoria preexistente é preservada, nunca descartada pela reconciliação');
+
+  const lastWrite = writes.at(-1);
+  assert.equal(lastWrite.records.pesquisas.length, 1, 'a gravação final reflete o estado reconciliado, sem duplicar');
+  assert.equal(lastWrite.records.acessos.length, 1, 'a gravação final preserva o outro board intacto');
+});
+
+test('[P0] runMondaySync(): persistBoard rejeitando com StoreConflictError aciona a reconciliação — o board conflitante é recuperado (status "ok", reconciled:true) e os demais boards seguem normalmente', async (t) => {
+  const { runMondaySync } = require('../server');
+  process.env.MONDAY_TOKEN = 'token-de-teste';
+  t.after(() => { delete process.env.MONDAY_TOKEN; });
+
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: true, json: async () => mondayItemsPage([{ id: 'x', name: 'Item', created_at: '2026-01-01', group: { title: 'G' }, column_values: [] }], null) });
+  t.after(() => { global.fetch = originalFetch; });
+
+  const { StoreConflictError } = require('../storage/errors');
+  const { storage, seed } = require('../server');
+  // A reconciliação real (já coberta isoladamente pelo teste acima) chama readStore()/writeStore() —
+  // mockados aqui para não escrever no arquivo local real (data/store.json) durante o teste.
+  const canonical = structuredClone(seed);
+  canonical.records = { pesquisas: [] };
+  const originalReadStore = storage.readStore;
+  const originalWriteStore = storage.writeStore;
+  storage.readStore = async () => structuredClone(canonical);
+  storage.writeStore = async (s) => s;
+  t.after(() => { storage.readStore = originalReadStore; storage.writeStore = originalWriteStore; });
+
+  const store = { records: {} };
+  const persisted = [];
+  const run = await runMondaySync(store, 'Teste', ['pesquisas', 'acessos'], {
+    persistBoard: async ({ moduleName }) => {
+      if (moduleName === 'pesquisas') throw new StoreConflictError();
+      persisted.push(moduleName);
+    }
+  });
+
+  const pesquisas = run.modules.find(m => m.module === 'pesquisas');
+  const acessos = run.modules.find(m => m.module === 'acessos');
+  assert.equal(pesquisas.status, 'ok', 'após reconciliação bem-sucedida, o board deixa de ser reportado como falho');
+  assert.equal(pesquisas.reconciled, true);
+  assert.equal(acessos.status, 'ok', 'boards sem conflito continuam funcionando normalmente');
+  assert.deepEqual(persisted, ['acessos']);
+  assert.equal(run.status, 'completed', 'um conflito reconciliado com sucesso não deve marcar a execução como parcial/falha');
+});

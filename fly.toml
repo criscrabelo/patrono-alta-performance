@@ -14,9 +14,16 @@ primary_region = "gru"
 [http_service]
   internal_port = 3007
   force_https = true
-  auto_stop_machines = "stop"
+  # P0 (branch demo): o Fly autostop derrubou a máquina no meio de uma sincronização real via SSH
+  # ("App has excess capacity, autostopping machine" -> SIGINT), porque autostop mede tráfego HTTP, não
+  # sessões SSH/scripts em execução. Para o período de sincronização/apresentação, mantemos sempre pelo
+  # menos 1 máquina ativa e desligamos o autostop — custo maior que o "dorme entre acessos" original
+  # (seção 7 de docs/DEMO_DEPLOY.md), aceito deliberadamente só para este ambiente temporário. Reverter
+  # para auto_stop_machines = "stop" / min_machines_running = 0 depois da apresentação, se quiser
+  # economizar custo (ver seção 8, "Encerrar o ambiente depois do Comitê").
+  auto_stop_machines = false
   auto_start_machines = true
-  min_machines_running = 0
+  min_machines_running = 1
 
 [[http_service.checks]]
   interval = "15s"

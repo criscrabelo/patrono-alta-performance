@@ -1104,6 +1104,46 @@ function normalizeMondayItem(item,module,board){const columns=Object.fromEntries
 // mutação em memória deste board permanece no `store` e é levada "de carona" na próxima persistência
 // bem-sucedida, então nada é perdido, só adiado. `persistBoard` ausente (uso legado/testes) preserva o
 // comportamento anterior de só persistir no final, por conta do chamador.
+// Upsert idempotente por `externalId` — extraído para ser reaproveitado tanto no laço principal quanto
+// na reconciliação de conflito de CAS (reconcileMondayBoardAfterConflict, abaixo): aplicar a MESMA lógica
+// duas vezes sobre o mesmo conjunto de itens nunca duplica (um item já presente com o mesmo conteúdo é
+// reconhecido como `unchanged`), condição necessária para a reconciliação ser seguramente idempotente.
+function upsertMondayItems(list, items, moduleName, board) {
+  let created = 0, updated = 0, unchanged = 0;
+  for (const raw of items) {
+    const normalized = normalizeMondayItem(raw, moduleName, board);
+    const existing = list.find(x => x.source === 'monday' && x.externalId === normalized.externalId);
+    if (existing) {
+      const relevantFieldsChanged = existing.title !== normalized.title || existing.group !== normalized.group || JSON.stringify(existing.columns) !== JSON.stringify(normalized.columns);
+      if (relevantFieldsChanged) { Object.assign(existing, normalized, { id: existing.id, version: (existing.version || 1) + 1 }); updated++; }
+      else { existing.syncedAt = normalized.syncedAt; unchanged++; }
+    } else {
+      list.push({ ...normalized, version: 1 }); created++;
+    }
+  }
+  return { created, updated, unchanged };
+}
+// P0 (branch demo — conflito de CAS após erro AMBÍGUO de conexão: "Connection terminated unexpectedly"
+// seguido de StoreConflictError na tentativa seguinte). Cenário: a escrita anterior pode ter sido
+// efetivada no PostgreSQL antes de a conexão cair, sem o client chegar a receber a confirmação — o
+// `store` em memória fica com uma versão desatualizada, e a próxima tentativa de persistência com essa
+// mesma versão é corretamente rejeitada pelo CAS (isto NUNCA é um bug do CAS em si, e o CAS não é
+// removido/enfraquecido aqui). Em vez de tratar isso como falha definitiva do board, relê o estado
+// CANÔNICO do banco e reaplica SÓ o board corrente de forma idempotente (mesma `upsertMondayItems()` por
+// externalId — um item já persistido pela escrita "fantasma" é reconhecido como já existente, nunca
+// duplicado) antes de gravar de novo. Nunca um overwrite cego: o restante do store lido do banco é
+// preservado tal como está; só a coleção deste board é alterada em memória antes de regravar.
+// `storage.rebaseOnto()` adota esse estado canônico (e a versão de CAS correta) de volta no MESMO objeto
+// `store` que o restante da rotina e o chamador (rota HTTP/agendador/CLI) continuam referenciando —
+// nenhuma troca de referência, nenhum CAS contornado.
+async function reconcileMondayBoardAfterConflict(store, moduleName, board, items) {
+  const fresh = await readStore();
+  const list = collection(fresh, moduleName);
+  const counts = upsertMondayItems(list, items, moduleName, board);
+  await writeStore(fresh);
+  storage.rebaseOnto(store, fresh);
+  return counts;
+}
 async function runMondaySync(store, requestedByName, requestedModules, { persistBoard } = {}) {
   const modules = requestedModules?.length ? requestedModules : Object.keys(MONDAY_BOARDS);
   store.mondayRuns = store.mondayRuns || [];
@@ -1115,23 +1155,13 @@ async function runMondaySync(store, requestedByName, requestedModules, { persist
     if (!board) continue;
     logger.info('monday_sync_board_started', { component: 'monday', board: moduleName, boardId: board.id });
     let entry;
+    let items = [];
     try {
-      const items = await fetchMondayBoard(board.id);
+      items = await fetchMondayBoard(board.id);
       const list = collection(store, moduleName);
-      let created = 0, updated = 0, unchanged = 0;
-      for (const raw of items) {
-        const normalized = normalizeMondayItem(raw, moduleName, board);
-        const existing = list.find(x => x.source === 'monday' && x.externalId === normalized.externalId);
-        if (existing) {
-          const relevantFieldsChanged = existing.title !== normalized.title || existing.group !== normalized.group || JSON.stringify(existing.columns) !== JSON.stringify(normalized.columns);
-          if (relevantFieldsChanged) { Object.assign(existing, normalized, { id: existing.id, version: (existing.version || 1) + 1 }); updated++; }
-          else { existing.syncedAt = normalized.syncedAt; unchanged++; }
-        } else {
-          list.push({ ...normalized, version: 1 }); created++;
-        }
-      }
-      entry = { module: moduleName, board: board.name, read: items.length, created, updated, unchanged, status: 'ok' };
-      logger.info('monday_sync_board_fetched', { component: 'monday', board: moduleName, read: items.length, created, updated, unchanged });
+      const counts = upsertMondayItems(list, items, moduleName, board);
+      entry = { module: moduleName, board: board.name, read: items.length, ...counts, status: 'ok' };
+      logger.info('monday_sync_board_fetched', { component: 'monday', board: moduleName, read: items.length, ...counts });
     } catch (error) {
       failed++;
       entry = { module: moduleName, board: board.name, status: 'error', stage: 'fetch', error: error.message };
@@ -1146,11 +1176,26 @@ async function runMondaySync(store, requestedByName, requestedModules, { persist
           onRetry: ({ attempt, delayMs, error }) => logger.warn('monday_sync_persist_retry', { component: 'monday', board: moduleName, stage: 'persist', attempt, delayMs, error: logger.serializeError(error) })
         });
       } catch (error) {
-        if (entry.status === 'ok') failed++;
-        entry.status = 'error';
-        entry.stage = 'persist';
-        entry.error = `Falha ao persistir: ${error.message}`;
-        logger.error('monday_sync_board_failed', { component: 'monday', board: moduleName, stage: 'persist', errorCode: error instanceof StoreConflictError ? 'MONDAY_PERSIST_CONFLICT' : 'MONDAY_PERSIST_ERROR', error: logger.serializeError(error) });
+        if (error instanceof StoreConflictError) {
+          try {
+            const counts = await reconcileMondayBoardAfterConflict(store, moduleName, board, items);
+            if (entry.status !== 'ok') { entry.status = 'ok'; delete entry.stage; delete entry.error; entry.read = items.length; }
+            Object.assign(entry, counts, { reconciled: true });
+            logger.warn('monday_sync_board_reconciled', { component: 'monday', board: moduleName, stage: 'persist-reconcile', ...counts });
+          } catch (reconcileError) {
+            if (entry.status === 'ok') failed++;
+            entry.status = 'error';
+            entry.stage = 'persist-reconcile';
+            entry.error = `Falha ao reconciliar após conflito: ${reconcileError.message}`;
+            logger.error('monday_sync_board_failed', { component: 'monday', board: moduleName, stage: 'persist-reconcile', errorCode: 'MONDAY_PERSIST_RECONCILE_FAILED', error: logger.serializeError(reconcileError) });
+          }
+        } else {
+          if (entry.status === 'ok') failed++;
+          entry.status = 'error';
+          entry.stage = 'persist';
+          entry.error = `Falha ao persistir: ${error.message}`;
+          logger.error('monday_sync_board_failed', { component: 'monday', board: moduleName, stage: 'persist', errorCode: 'MONDAY_PERSIST_ERROR', error: logger.serializeError(error) });
+        }
       }
     }
   }
@@ -2214,5 +2259,5 @@ async function main() {
 if (require.main === module) {
   main();
 }
-module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, ORIGIN_TYPE_LABELS, STATUS_LABELS, CATEGORY_LABELS, legalDeadlineLabels, legalDeadlineConfirmationLabel, LEGAL_DEADLINE_TEXTUAL_RESPONSIBLE_FIELDS, filterCalendarEventsByWindow, canBeResponsibleForLegalDeadline, storage, migrateLegacyStore, validateAuthRuntimeConfig, resolveLoginIdentity, issuePasswordResetToken, auditRateLimitAndBlock, isAllowedOrigin, normalizeCorsOrigin, CONTENT_SECURITY_POLICY, PERMISSIONS_POLICY, normalizeRouteForLogging, runMondaySync, MONDAY_BOARDS, audit };
+module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, ORIGIN_TYPE_LABELS, STATUS_LABELS, CATEGORY_LABELS, legalDeadlineLabels, legalDeadlineConfirmationLabel, LEGAL_DEADLINE_TEXTUAL_RESPONSIBLE_FIELDS, filterCalendarEventsByWindow, canBeResponsibleForLegalDeadline, storage, migrateLegacyStore, validateAuthRuntimeConfig, resolveLoginIdentity, issuePasswordResetToken, auditRateLimitAndBlock, isAllowedOrigin, normalizeCorsOrigin, CONTENT_SECURITY_POLICY, PERMISSIONS_POLICY, normalizeRouteForLogging, runMondaySync, MONDAY_BOARDS, audit, upsertMondayItems, reconcileMondayBoardAfterConflict, collection };
 
