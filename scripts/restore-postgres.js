@@ -200,6 +200,7 @@ async function runRestore(options = {}) {
     await execFileAsync('pg_restore', ['--list', restorableArtifactPath]);
 
     targetClient = new Client({ connectionString: databaseUrlTarget });
+    targetClient.on('error', (error) => { console.error(`[restore-postgres] erro de conexão (não fatal): ${error.message}`); });
     await targetClient.connect();
 
     const hasExistingData = await targetHasExistingData(targetClient);

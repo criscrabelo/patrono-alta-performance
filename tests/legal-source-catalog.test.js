@@ -232,3 +232,81 @@ test('[P0] runMondaySync(): persistBoard com falha TRANSITÓRIA tenta de novo e 
   assert.equal(run.modules[0].status, 'ok');
   assert.equal(store.records.pesquisas.length, 1, 'retry de persistência nunca duplica o item já upsertado em memória');
 });
+
+// --- P0 (branch demo, 2ª rodada): client CHECKED OUT via pool.connect() emitindo 'error' durante a
+// transação (o crash real reportado: "Emitted 'error' event on Client instance", pg/lib/client.js) ---
+
+// Duplica o comportamento real do driver `pg`: quando a conexão de um client cai DURANTE uma query em
+// andamento, o erro chega em DOIS lugares — (1) a própria promise da query rejeita, e (2) o client emite
+// 'error' nele mesmo, de forma ASSÍNCRONA (um tick à parte, não dentro do mesmo call stack síncrono da
+// query). É esse (2) que crasha o processo se não houver listener — por isso o `setImmediate` abaixo, em
+// vez de um throw síncrono dentro de `query()` (que qualquer try/catch já pegaria, sem provar nada sobre
+// o bug real).
+function makeFakeClient({ shouldFail }) {
+  const { EventEmitter } = require('node:events');
+  const client = new EventEmitter();
+  client.released = undefined;
+  client.query = (sql) => {
+    // BEGIN/COMMIT/ROLLBACK sempre têm sucesso — só a query "de trabalho" dentro da transação falha,
+    // reproduzindo uma queda de conexão NO MEIO da transação (depois do BEGIN), não na abertura dela.
+    if (!['BEGIN', 'COMMIT', 'ROLLBACK'].includes(sql) && shouldFail()) {
+      const error = new Error('Connection terminated unexpectedly');
+      return new Promise((resolve, reject) => {
+        setImmediate(() => { client.emit('error', error); reject(error); });
+      });
+    }
+    return Promise.resolve({ rows: [] });
+  };
+  client.release = (arg) => { client.released = arg; };
+  return client;
+}
+
+test('[P0] withTransaction(): client emite erro de conexão DURANTE a transação — não derruba o processo, descarta o client quebrado, e o retry usa uma transação/conexão nova sem duplicar efeito', async () => {
+  const { createPostgresStore } = require('../storage/postgres-store');
+  const { withTransientRetry } = require('../storage/retry');
+
+  const store = createPostgresStore({ databaseUrl: 'postgres://usuario:senha@host-inexistente:5432/db', seed: {} });
+  const clients = [];
+  let connectCalls = 0;
+  // Substitui só o método connect() do pool real por um fake — nunca abre conexão de rede de verdade,
+  // então o teste roda sem depender de um PostgreSQL disponível neste ambiente. A 1ª conexão obtida
+  // sempre falha (simulando a queda real); a 2ª (nova conexão do retry) sempre funciona.
+  store.getPool().connect = async () => {
+    connectCalls++;
+    const isFirstConnection = connectCalls === 1;
+    const client = makeFakeClient({ shouldFail: () => isFirstConnection });
+    clients.push(client);
+    return client;
+  };
+
+  let attempt = 0;
+  const insertedIds = [];
+  // Confirma que NENHUMA uncaughtException escapa para o processo (rede de segurança só para o teste em
+  // si — se o fix estiver correto, este handler nunca deveria disparar, porque withTransaction() já
+  // registra seu próprio listener no client antes de qualquer 'error' ser emitido).
+  let uncaught = null;
+  const onUncaught = (error) => { uncaught = error; };
+  process.on('uncaughtException', onUncaught);
+
+  try {
+    const result = await withTransientRetry(() => store.withTransaction(async (client) => {
+      attempt++;
+      await client.query('QUERY'); // na 1ª tentativa, rejeita (client da 1ª conexão); na 2ª, resolve
+      insertedIds.push('registro-1');
+      return 'ok';
+    }), { maxAttempts: 3, baseDelayMs: 1 });
+
+    assert.equal(result, 'ok');
+  } finally {
+    process.removeListener('uncaughtException', onUncaught);
+  }
+
+  assert.equal(uncaught, null, 'emitir "error" no client durante a transação nunca pode virar uncaughtException/derrubar o processo');
+  assert.equal(attempt, 2, 'a transação inteira deve ser tentada de novo (não só a query que falhou)');
+  assert.equal(clients.length, 2, 'o retry deve pegar uma conexão NOVA do pool, nunca reaproveitar o client quebrado');
+  assert.equal(clients[0].released, true, 'o client quebrado precisa ser descartado do pool ao liberar (release(true)), nunca devolvido saudável');
+  assert.notEqual(clients[1].released, true, 'o client da tentativa bem-sucedida deve voltar normalmente ao pool');
+  assert.deepEqual(insertedIds, ['registro-1'], 'o efeito da tentativa que falhou nunca é aplicado — só a tentativa bem-sucedida grava, sem duplicar');
+
+  await store.close();
+});

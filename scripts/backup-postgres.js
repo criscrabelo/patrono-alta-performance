@@ -49,6 +49,10 @@ function applicationCommit() {
 
 async function fetchDatabaseMetadata(databaseUrl) {
   const client = new Client({ connectionString: databaseUrl });
+  // P0 (branch demo — mesma classe de crash corrigida em storage/postgres-store.js): um `pg.Client` sem
+  // listener de 'error' derruba o processo inteiro (uncaughtException) se a conexão cair. Log e segue —
+  // o erro real de conexão continua sendo reportado pela rejeição da própria query/`.connect()`.
+  client.on('error', (error) => { console.error(`[backup-postgres] erro de conexão (não fatal): ${error.message}`); });
   await client.connect();
   try {
     const versionResult = await client.query('SHOW server_version');
@@ -94,6 +98,7 @@ async function runBackup({ databaseUrl, environment, tempDir, s3Client } = {}) {
   const workDir = fs.mkdtempSync(path.join(tempDir || os.tmpdir(), 'patrono-backup-'));
   fs.chmodSync(workDir, 0o700);
   const client = new Client({ connectionString: resolvedDatabaseUrl });
+  client.on('error', (error) => { console.error(`[backup-postgres] erro de conexão (não fatal): ${error.message}`); });
   let trackingAvailable = true;
 
   const dumpPath = path.join(workDir, `${backupId}.dump`);

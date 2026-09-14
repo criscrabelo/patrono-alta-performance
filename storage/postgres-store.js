@@ -192,18 +192,39 @@ function createPostgresStore({ databaseUrl, ssl = false, seed }) {
   // legal_processes/legal_deadlines/audit_log) QUANTO a atualização do restante do blob app_store —
   // "criar Legal Deadline + audit" (e qualquer outra mutação combinada) é atômico de ponta a ponta.
   function getPool() { return pool; }
+  // P0 (branch demo — correção de crash observado no sync Monday/Postgres, 2ª rodada): o `pool.on('error')`
+  // acima só cobre clients OCIOSOS dentro do pool. Um client CHECKED OUT via `pool.connect()` (como este,
+  // durante uma transação em andamento) é responsabilidade exclusiva de quem o pegou emprestado — se ele
+  // perder a conexão, o próprio `pg.Client` emite 'error' NELE MESMO (além de rejeitar a query pendente),
+  // e sem um listener nesse client específico, o Node trata como uncaughtException e derruba o processo
+  // (stack real observado: "Emitted 'error' event on Client instance", em pg/lib/client.js). Corrigido com
+  // `client.on('error', ...)` logo após obter o client, e uma flag para: (1) nunca tentar ROLLBACK numa
+  // conexão já morta; (2) descartar o client quebrado ao liberar (`client.release(true)`), nunca devolvê-lo
+  // ao pool para ser reaproveitado quebrado; (3) sempre repropagar o erro para quem chamou (nunca engolido)
+  // — o retry com backoff em runMondaySync()/scripts/sync-monday.js decide se tenta de novo, sempre com uma
+  // TRANSAÇÃO NOVA (novo `pool.connect()`), nunca reaproveitando este mesmo client.
   async function withTransaction(fn) {
     const client = await pool.connect();
+    let connectionBroken = false;
+    let connectionError = null;
+    const onClientError = (error) => {
+      connectionBroken = true;
+      connectionError = error;
+      logger.error('postgres_client_error', { component: 'storage', errorCode: 'PG_CLIENT_ERROR', error: logger.serializeError(error) });
+    };
+    client.on('error', onClientError);
     try {
       await client.query('BEGIN');
       const result = await fn(client);
+      if (connectionBroken) throw connectionError;
       await client.query('COMMIT');
       return result;
     } catch (error) {
-      await client.query('ROLLBACK').catch(() => {});
-      throw error;
+      if (!connectionBroken) await client.query('ROLLBACK').catch(() => {});
+      throw connectionError || error;
     } finally {
-      client.release();
+      client.removeListener('error', onClientError);
+      client.release(connectionBroken || undefined);
     }
   }
   // Mesma lógica de CAS de `write()`, mas usando um client já em transação (fornecido pela ponte
