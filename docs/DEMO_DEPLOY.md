@@ -66,6 +66,48 @@ fly secrets set \
 - **`MONDAY_TOKEN`** (opcional — só se quiser dados reais do Monday no demo): mesmo token read-only já
   usado hoje, `fly secrets set MONDAY_TOKEN="<token>"`. Sem ele, os módulos de Monday aparecem vazios
   (nunca com dado fictício).
+
+### 3.1. Catálogo completo de boards do Monday (workspace Jurídico)
+
+`legal-source-catalog.js` é a fonte única de verdade dos boards do Monday integrados ao Patrono —
+`MONDAY_BOARDS` (server.js), o menu Jurídico (public/app.js) e os widgets do Dashboard
+(dashboard-service.js) são todos derivados dele, nenhum lugar mantém uma lista paralela. Nesta rodada, os
+35 boards habilitados do workspace "Jurídico" (Monday, workspace id `1678965`) cobrem as 7 categorias do
+inventário fornecido: Apoio Administrativo, Entrega de Chaves, Clientes, Contratos e Empresas, Processos,
+Projetos/Melhorias e Sócios. Uma única duplicata (`entregaChavesCarpeDienDuplicata`, board
+`18428261720`) permanece explicitamente desabilitada — sem conteúdo exclusivo identificado que a
+justifique como fonte separada do board principal de Entrega de Chaves Carpe Diem.
+
+**Garantias de leitura, preservadas em todo o caminho de sincronização:**
+- Monday é usado **somente como fonte read-only** — `mondayQuery()` só envia operações GraphQL `query`,
+  nunca `mutation`; nenhum item/coluna/board/automação/responsável do Monday é criado, editado ou
+  apagado por este código em nenhuma circunstância.
+- Um `LegalDeadline` **nunca** é criado automaticamente a partir de uma data do Monday — continua sendo
+  uma entidade canônica própria (Postgres), preenchida manualmente. Datas do Monday (ex.: "PRAZO FINAL"
+  de Notificações Clientes) aparecem como contexto operacional, nunca como prazo judicial confirmado.
+- `MONDAY_TOKEN` permanece exclusivamente no backend — nunca é exposto ao frontend.
+- Subitens ("Subelementos de...") não viram módulos separados nesta rodada — ver limitações (seção 7).
+
+### 3.2. Executando a sincronização (duas formas, mesma rotina)
+
+Ambas chamam exatamente a mesma função (`runMondaySync()`, server.js) — nenhuma implementação paralela:
+
+**a) Via script administrativo no servidor (preferível no DEMO — sem copiar token de navegador):**
+```bash
+fly ssh console -a <um-nome-unico-para-seu-app> -C "node scripts/sync-monday.js"
+# ou, para sincronizar só alguns boards:
+fly ssh console -a <um-nome-unico-para-seu-app> -C "node scripts/sync-monday.js --modules=processos,notificacoes"
+```
+Imprime uma tabela BOARD | ID | LIDOS | CRIADOS | ATUALIZADOS | INALTERADOS | FALHAS | STATUS ao final.
+Restrito ao operador que tem acesso ao console Fly do app; não abre nenhuma rota HTTP nova nem cria bypass
+de autenticação — é só um ponto de entrada CLI para a mesma rotina já usada por `POST /api/monday/sync`.
+
+**b) Via API, autenticado como usuário do Jurídico (`usr-diretoria`/`usr-juridico`):**
+```bash
+curl -X POST https://patrono-legal-demo.fly.dev/api/monday/sync \
+  -H "Authorization: Bearer <token da sessão>" -H "Content-Type: application/json" -d '{}'
+```
+Sem `{"modules":[...]}` no corpo, sincroniza todos os 35 boards habilitados.
 - **Nunca defina `NODE_ENV=production`** neste ambiente — ver a nota abaixo.
 
 ### Por que NODE_ENV=development (não "production") neste DEMO
@@ -142,6 +184,14 @@ nativa/compilação) sobre uma aplicação já testada — risco baixo, mas rode
 
 ## 7. Limitações deste ambiente
 
+- **Subitens do Monday não são importados nesta rodada.** As queries de sincronização buscam apenas os
+  itens de nível superior de cada board (`items_page`) — os boards "Subelementos de..." não têm uma
+  fonte própria no Patrono. Ficou fora do escopo desta rodada (prazo de apresentação); quando priorizado,
+  a extensão correta é buscar `subitems{...}` dentro do próprio item pai (nunca como um módulo/entidade
+  separada, para não duplicar parent+subitem como se fossem registros distintos).
+- Um pequeno número de módulos do menu Jurídico permanece sem fonte mapeada no inventário fornecido
+  (Contratos genérico, Riscos e Regulatório, Recuperação de Crédito, Fatos Relevantes, Comitê Jurídico) —
+  aparecem com a mensagem honesta "ainda não integrado", nunca com um "0" fictício.
 - Sem backup/restore configurado (fora de escopo de um demo temporário — H5 já cobre isso para produção
   real).
 - Sem agregador de log externo (mesma limitação já documentada em PG-17/H6 — logs ficam só em

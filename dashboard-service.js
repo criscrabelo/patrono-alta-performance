@@ -1,6 +1,10 @@
 const { getDashboardDefinition } = require('./dashboard-model');
+const { enabledMondaySources } = require('./legal-source-catalog');
 
-const moduleLabels = { processos: 'Processos judiciais', notificacoes: 'Notificações', contratos: 'Contratos', honorarios: 'Honorários', distratos: 'Distratos', compraVenda: 'Compra e venda', transferenciaIntermediaria: 'Transferência intermediada' };
+// Integração completa do workspace Jurídico (docs/DEMO_DEPLOY.md): moduleLabels deixou de ser uma lista
+// curta hardcoded (7 boards) — deriva do mesmo catálogo único usado por server.js/public/app.js, para o
+// widget "legal-attention" nunca ficar desatualizado quando um novo board for adicionado ao catálogo.
+const moduleLabels = Object.fromEntries(enabledMondaySources().map(entry => [entry.key, entry.label]));
 const recordList = (store, key) => (store.records?.[key] || []).filter(row => !row.deletedAt);
 const memory = (source, competence, recordCount, rule, lastUpdated) => ({ source, competence, lastUpdated: lastUpdated || null, recordCount, rule, ruleVersion: 'COEVO-DASH-1.0' });
 const ready = (id, data, meta) => ({ id, state: 'ready', data, memory: meta });

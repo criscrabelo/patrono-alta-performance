@@ -5,6 +5,7 @@ const crypto = require('node:crypto');
 const { generatePresentation } = require('./presentation-export');
 const { WIDGET_TYPES, getDashboardDefinition, visibleDashboards, dashboardRequiresGlobalScope } = require('./dashboard-model');
 const { dashboardPayload } = require('./dashboard-service');
+const { LEGAL_SOURCE_CATALOG, enabledMondaySources } = require('./legal-source-catalog');
 const { PROJECT_ID, ensureProjectStore, projectSummary, projectDetail, projectPermissions, newId } = require('./project-service');
 const storage = require('./storage');
 const { StoreConflictError } = require('./storage/errors');
@@ -173,15 +174,16 @@ function handlePreflight(req, res) {
   res.writeHead(204);
   res.end();
 }
-const MONDAY_BOARDS = {
-  processos: { id: process.env.MONDAY_BOARD_PROCESSOS || '5959705266', name: 'Processos Judiciais' },
-  notificacoes: { id: process.env.MONDAY_BOARD_NOTIFICACOES || '5630368737', name: 'Notificações Clientes' },
-  distratos: { id: process.env.MONDAY_BOARD_DISTRATOS || '18404493605', name: 'Distratos e Retomadas' },
-  honorarios: { id: process.env.MONDAY_BOARD_HONORARIOS || '7231876117', name: 'Honorários Extrajudiciais' },
-  unidades: { id: process.env.MONDAY_BOARD_UNIDADES || '18410779605', name: 'Controle de Entrega' },
-  compraVenda: { id: process.env.MONDAY_BOARD_COMPRA_VENDA || '5821473011', name: 'Contratos para Clientes / Compra e Venda' },
-  ...(process.env.MONDAY_BOARD_TRANSFERENCIA_INTERMEDIARIA ? { transferenciaIntermediaria: { id: process.env.MONDAY_BOARD_TRANSFERENCIA_INTERMEDIARIA, name: 'Transferência intermediária' } } : {})
-};
+// Sprint 2, integração completa do workspace Jurídico do Monday (docs/DEMO_DEPLOY.md — workspace id
+// 1678965): MONDAY_BOARDS deixou de ser uma lista hardcoded — é derivada de legal-source-catalog.js, a
+// ÚNICA fonte de verdade de "quais boards existem" (também consumida pelo menu do frontend e pelos
+// widgets do Dashboard, para nunca ter três listas divergentes). `envVar`, quando presente no catálogo,
+// preserva exatamente a mesma variável de ambiente já documentada em .env.example para os boards
+// originais — nenhum board novo ganhou variável própria (evita a "explosão de configuração" já citada
+// em outras decisões deste projeto; o id de um board novo só muda editando o catálogo).
+const MONDAY_BOARDS = Object.fromEntries(
+  enabledMondaySources().map(entry => [entry.key, { id: (entry.envVar && process.env[entry.envVar]) || entry.mondayBoardId, name: entry.label }])
+);
 const MONDAY_SYNC_TIMES = (process.env.MONDAY_SYNC_TIMES || '08:00,13:00,18:00').split(',').map(x=>x.trim()).filter(Boolean);
 // P0 corrigido (rodada 2): allowlist explícita e fechada dos módulos aceitos por GET /api/legal/:module.
 // Antes, :module ia direto para collection(store, moduleName), o que tanto lia quanto podia CRIAR
@@ -1084,6 +1086,47 @@ async function fetchMondayBoard(boardId) {
 // acesso liberado a qualquer departamento — sem esta classificação explícita, TI teria sido bloqueado
 // destes registros por engano, em vez de Jurídico ser corretamente isolado de TI).
 function normalizeMondayItem(item,module,board){const columns=Object.fromEntries((item.column_values||[]).map(c=>[c.id,c.text]));const columnsByTitle=Object.fromEntries((item.column_values||[]).map(c=>[item.column_titles?.[c.id]||c.id,c.text]));return {id:crypto.randomUUID(),source:'monday',externalId:String(item.id),module,boardId:board.id,boardName:board.name,department:'Jurídico',title:item.name,group:item.group?.title||null,columns,columnsByTitle,createdAt:item.created_at||null,syncedAt:new Date().toISOString(),classification:'Interno',deletedAt:null};}
+// Integração completa do workspace Jurídico (docs/DEMO_DEPLOY.md): rotina única de sincronização,
+// extraída da rota HTTP para ser reutilizada também pelo script administrativo
+// `scripts/sync-monday.js` (npm run sync:monday) — nunca uma segunda implementação paralela. Recebe o
+// `store` já carregado e o MUTA (upsert por módulo, preservando dados anteriores; falha de um board
+// nunca interrompe os demais); quem chama decide como persistir (commitStore() na rota HTTP,
+// storage.writeStore() no script) e como auditar. Somente leitura no Monday: `fetchMondayBoard()` só
+// envia `query` GraphQL, nunca `mutation` — nenhuma escrita de volta ao Monday existe neste caminho.
+async function runMondaySync(store, requestedByName, requestedModules) {
+  const modules = requestedModules?.length ? requestedModules : Object.keys(MONDAY_BOARDS);
+  store.mondayRuns = store.mondayRuns || [];
+  const run = { id: crypto.randomUUID(), startedAt: new Date().toISOString(), requestedBy: requestedByName, modules: [], status: 'running' };
+  store.mondayRuns.push(run);
+  let failed = 0;
+  for (const moduleName of modules) {
+    const board = MONDAY_BOARDS[moduleName];
+    if (!board) continue;
+    try {
+      const items = await fetchMondayBoard(board.id);
+      const list = collection(store, moduleName);
+      let created = 0, updated = 0, unchanged = 0;
+      for (const raw of items) {
+        const normalized = normalizeMondayItem(raw, moduleName, board);
+        const existing = list.find(x => x.source === 'monday' && x.externalId === normalized.externalId);
+        if (existing) {
+          const relevantFieldsChanged = existing.title !== normalized.title || existing.group !== normalized.group || JSON.stringify(existing.columns) !== JSON.stringify(normalized.columns);
+          if (relevantFieldsChanged) { Object.assign(existing, normalized, { id: existing.id, version: (existing.version || 1) + 1 }); updated++; }
+          else { existing.syncedAt = normalized.syncedAt; unchanged++; }
+        } else {
+          list.push({ ...normalized, version: 1 }); created++;
+        }
+      }
+      run.modules.push({ module: moduleName, board: board.name, read: items.length, created, updated, unchanged, status: 'ok' });
+    } catch (error) {
+      failed++;
+      run.modules.push({ module: moduleName, board: board.name, status: 'error', error: error.message });
+    }
+  }
+  run.status = failed ? 'partial' : 'completed';
+  run.finishedAt = new Date().toISOString();
+  return run;
+}
 function processColumn(row,title,id){return String(row.columnsByTitle?.[title]??row.columns?.[id]??'').trim();}
 function processStatusValue(row){const value=processColumn(row,"'MEU TRABALHO'",'status5')||processColumn(row,'STATUS (para comitê)','status84__1')||processColumn(row,'STATUS','color_mky1db73');if(/acordo/i.test(value))return 'Acordo';if(/finaliz|encerr|baix|extint|arquiv/i.test(value))return 'Finalizado';if(/acompanha/i.test(value))return 'Em acompanhamento';if(/andamento|suspenso/i.test(value))return 'Em andamento';return 'A classificar';}
 function processScopeValue(row){const value=processColumn(row,'LOCAL','status3');if(/interno/i.test(value))return 'Interno';if(/externo/i.test(value))return 'Externo';return 'A classificar';}
@@ -1132,11 +1175,11 @@ function judicialHonorariumPayload(rows){
   const total=normalized.reduce((sum,row)=>sum+row.normalized.amount,0),aggregate=period=>{const groups=new Map();for(const row of normalized){const competence=row.normalized.competence;if(!competence)continue;const [year,month]=competence.split('-'),key=period==='month'?competence:period==='quarter'?`${year}-T${Math.ceil(Number(month)/3)}`:`${year}-S${Math.ceil(Number(month)/6)}`,current=groups.get(key)||{key,total:0,count:0};current.total+=row.normalized.amount;current.count++;groups.set(key,current);}return [...groups.values()].sort((a,b)=>String(b.key).localeCompare(String(a.key)));};
   return {records:normalized,count:normalized.length,totalAvailable:normalized.length,lastSyncedAt:normalized.map(row=>row.syncedAt).filter(Boolean).sort().at(-1)||null,summary:{total,recordsWithAmount:normalized.length,average:normalized.length?total/normalized.length:null,months:aggregate('month'),quarters:aggregate('quarter'),semesters:aggregate('semester')}};
 }
-async function runMondaySync(store, requestedBy='Agendador COEVO') {
-  store.mondayRuns=store.mondayRuns||[]; const run={id:crypto.randomUUID(),startedAt:new Date().toISOString(),requestedBy,modules:[],status:'running'}; store.mondayRuns.push(run); let failed=0;
-  for(const [moduleName,board] of Object.entries(MONDAY_BOARDS)){try{const items=await fetchMondayBoard(board.id);const list=collection(store,moduleName);let created=0,updated=0;for(const raw of items){const normalized=normalizeMondayItem(raw,moduleName,board);const existing=list.find(x=>x.source==='monday'&&x.externalId===normalized.externalId);if(existing){Object.assign(existing,normalized,{id:existing.id,version:(existing.version||1)+1});updated++;}else{list.push({...normalized,version:1});created++;}}run.modules.push({module:moduleName,board:board.name,read:items.length,created,updated,status:'ok'});}catch(error){failed++;run.modules.push({module:moduleName,board:board.name,status:'error',error:error.message});}}
-  run.status=failed?'partial':'completed';run.finishedAt=new Date().toISOString();return run;
-}
+// (runMondaySync() está definida uma única vez, mais acima — junto de normalizeMondayItem() — e é
+// reutilizada tanto por POST /api/monday/sync quanto pelo agendador abaixo e por
+// scripts/sync-monday.js. Uma segunda implementação que existia aqui, com a mesma assinatura mas sem os
+// contadores `unchanged`/filtro de módulos, foi removida nesta rodada: as duas nunca deveriam ter
+// coexistido — o agendador estava, sem perceber, chamando esta versão mais antiga.)
 function scheduleDueNow(now=new Date()){const local=now.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'America/Sao_Paulo'});return MONDAY_SYNC_TIMES.includes(local)?local:null;}
 // Sprint 2, Hardening H6 (docs/OBSERVABILITY.md): substitui o `console.error('Monday scheduler:', ...)`
 // por eventos estruturados — nunca token, payload completo ou conteúdo de board, só o nome lógico do
@@ -1744,7 +1787,13 @@ function handler(req, res) {
   // fecha isso de forma transversal com as rotas de Monday da rodada 5, exigindo 403 (não apenas uma
   // listagem vazia por scoped()) para quem não é do departamento Jurídico nem tem alçada global.
   if (req.method === 'GET' && url.pathname.startsWith('/api/legal/')) { const moduleName=url.pathname.split('/')[3]; if(!allowedInDepartment(user,'juridico','read')) return json(res,403,{error:'Sem permissão para o módulo Jurídico'}); if(!LEGAL_MODULES.has(moduleName)) return json(res,404,{error:'Módulo jurídico não encontrado'}); if(moduleName==='honorariosJudiciais'){const processRows=collection(store,'processos').filter(x=>!x.deletedAt&&x.source==='monday'&&scoped(user,x));return json(res,200,{module:moduleName,...judicialHonorariumPayload(processRows)});}const rows=collection(store,moduleName).filter(x=>!x.deletedAt&&x.source==='monday'&&scoped(user,x)); if(moduleName==='processos'&&url.searchParams.get('paginated')==='1')return json(res,200,{module:moduleName,...filterProcesses(rows,url)});if(moduleName==='honorarios'&&url.searchParams.get('paginated')==='1')return json(res,200,{module:moduleName,...filterHonorariums(rows,url)});return json(res,200,{module:moduleName,count:rows.length,records:rows}); }
-  if (req.method === 'POST' && url.pathname === '/api/monday/sync') { if(!allowedInDepartment(user,'juridico','create')) return json(res,403,{error:'Sem permissão para sincronizar'}); return await body(req).then(async input=>{const modules=input.modules?.length?input.modules:Object.keys(MONDAY_BOARDS);store.mondayRuns=store.mondayRuns||[];const run={id:crypto.randomUUID(),startedAt:new Date().toISOString(),requestedBy:user.name,modules:[],status:'running'};store.mondayRuns.push(run);let failed=0;for(const moduleName of modules){const board=MONDAY_BOARDS[moduleName];if(!board)continue;try{const items=await fetchMondayBoard(board.id);const list=collection(store,moduleName);let created=0,updated=0;for(const raw of items){const normalized=normalizeMondayItem(raw,moduleName,board);const existing=list.find(x=>x.source==='monday'&&x.externalId===normalized.externalId);if(existing){const before=structuredClone(existing);Object.assign(existing,normalized,{id:existing.id,version:(existing.version||1)+1});updated++;}else{list.push({...normalized,version:1});created++;}}run.modules.push({module:moduleName,board:board.name,read:items.length,created,updated,status:'ok'});}catch(error){failed++;run.modules.push({module:moduleName,board:board.name,status:'error',error:error.message});}}run.status=failed?'partial':'completed';run.finishedAt=new Date().toISOString();audit(store,user,'SYNC','monday',run.id,null,run,'Sincronização somente leitura com preservação de dados anteriores');if(!(await commitStore(res,store)))return;return json(res,failed?207:200,run);}); }
+  // Integração completa do workspace Jurídico (docs/DEMO_DEPLOY.md): `modules` continua aceitando uma
+  // lista explícita (input.modules) OU, por padrão, TODOS os boards do catálogo (Object.keys(MONDAY_BOARDS),
+  // agora derivado de legal-source-catalog.js — nenhuma mudança de contrato desta rota, só mais boards
+  // disponíveis nela). `unchanged` (item 6.9 do escopo) evita contar como "updated" um item cujo conteúdo
+  // relevante (título/grupo/colunas) não mudou desde a última sincronização — nunca incrementa a version
+  // à toa. Falha de UM board nunca interrompe os demais (mesmo comportamento já existente).
+  if (req.method === 'POST' && url.pathname === '/api/monday/sync') { if(!allowedInDepartment(user,'juridico','create')) return json(res,403,{error:'Sem permissão para sincronizar'}); return await body(req).then(async input=>{const run=await runMondaySync(store,user.name,input.modules);audit(store,user,'SYNC','monday',run.id,null,run,'Sincronização somente leitura com preservação de dados anteriores');if(!(await commitStore(res,store)))return;return json(res,run.status==='partial'?207:200,run);}); }
   if (req.method === 'GET' && url.pathname === '/api/auth/requests') { if(!allowed(user,'*','approve')) return json(res,403,{error:'Somente aprovadores podem consultar solicitações'}); return json(res,200,store.registrationRequests); }
   if (req.method === 'POST' && url.pathname.match(/^\/api\/auth\/requests\/[^/]+\/approve$/)) { if(!allowed(user,'*','approve')) return json(res,403,{error:'Somente aprovadores podem aprovar'}); const id=url.pathname.split('/')[4]; { const limitedApprove = await rateLimit.check('approveOperator','approve:operator',user.id); if (!limitedApprove.allowed) return auditRateLimitAndBlock(res, store, limitedApprove, 'approve-operator', user); } const request=store.registrationRequests.find(r=>r.id===id&&r.status==='pending'); if(!request) return json(res,404,{error:'Solicitação não encontrada'}); request.status='approved';request.approvedAt=new Date().toISOString();request.approvedBy=user.name; // Sprint 2, Hardening H2 (item 27 do escopo; revisão pós-PR #13): cadastro aprovado nasce SEM
 // senha/MFA utilizáveis (nenhuma credencial atribuída automaticamente) — o novo usuário só ganha acesso
@@ -2106,5 +2155,5 @@ async function main() {
 if (require.main === module) {
   main();
 }
-module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, ORIGIN_TYPE_LABELS, STATUS_LABELS, CATEGORY_LABELS, legalDeadlineLabels, legalDeadlineConfirmationLabel, LEGAL_DEADLINE_TEXTUAL_RESPONSIBLE_FIELDS, filterCalendarEventsByWindow, canBeResponsibleForLegalDeadline, storage, migrateLegacyStore, validateAuthRuntimeConfig, resolveLoginIdentity, issuePasswordResetToken, auditRateLimitAndBlock, isAllowedOrigin, normalizeCorsOrigin, CONTENT_SECURITY_POLICY, PERMISSIONS_POLICY, normalizeRouteForLogging };
+module.exports = { seed, ROLES, allowed, scoped, metrics, departmentFinancials, filterProcesses, filterHonorariums, judicialHonorariumPayload, handler, readStore, writeStore, parseCsv, hash, dashboardPayload, ENTITY_MODULE_MAP, entityModule, requireMfa, LEGAL_MODULES, PROTECTED_ENTITY_FIELDS, sanitizeEntityInput, PORT, hasGlobalScope, visibleDepartments, isValidCivilDate, validateLegalDeadline, sanitizeProjectItemInput, PROTECTED_PROJECT_ITEM_FIELDS, MODULE_DEPARTMENT, allowedInDepartment, normalizeDeptSlug, dashboardAuthorized, BUSINESS_CONTENT_MODULES, allowedContent, validateInternalizationProcess, AUDIT_TECHNICAL_FIELDS, sanitizeAuditEventForUser, LEGAL_DEADLINE_ORIGIN_TYPES, LEGAL_DEADLINE_STATUSES, isLegalDeadlineOverdue, todayCivilDate, civilDateAfterDays, legalDeadlineIntegrityFlag, filterLegalDeadlines, scopedLegalDeadlineRows, legalDeadlineAgendaItems, agendaEventItems, sortAgendaItems, legalDeadlineAttentionItems, isOperationallyVisible, civilWeekWindow, responsibleInfo, myWeekLegalDeadlineItems, googleCalendarStatus, googleCalendarEvents, ORIGIN_TYPE_LABELS, STATUS_LABELS, CATEGORY_LABELS, legalDeadlineLabels, legalDeadlineConfirmationLabel, LEGAL_DEADLINE_TEXTUAL_RESPONSIBLE_FIELDS, filterCalendarEventsByWindow, canBeResponsibleForLegalDeadline, storage, migrateLegacyStore, validateAuthRuntimeConfig, resolveLoginIdentity, issuePasswordResetToken, auditRateLimitAndBlock, isAllowedOrigin, normalizeCorsOrigin, CONTENT_SECURITY_POLICY, PERMISSIONS_POLICY, normalizeRouteForLogging, runMondaySync, MONDAY_BOARDS, audit };
 

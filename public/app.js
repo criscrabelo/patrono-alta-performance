@@ -12,9 +12,40 @@ const LEGAL_MODULES=[
   ['transferencia-intermediaria','Transferência intermediária','Aquisição, venda, custos e aprovadores'],
   ['riscos-regulatorio','Riscos e regulatório','Probabilidade, impacto, plano e evidência'],
   ['recuperacao','Recuperação de crédito','Carteira, acordos e resultado'],
-  ['fatos','Fatos relevantes','Impacto, empreendimento e responsáveis']
+  ['fatos','Fatos relevantes','Impacto, empreendimento e responsáveis'],
+  // Integração completa do workspace Jurídico do Monday (docs/DEMO_DEPLOY.md — rodada de integração
+  // completa) — demais boards reais do catálogo (legal-source-catalog.js), organizados pelas mesmas 7
+  // categorias do inventário fornecido. O id de cada módulo aqui é sempre igual à `key` do catálogo
+  // (nenhum alias em LEGAL_KEY é necessário para estes, exceto onde já existia um id com hífen acima).
+  ['boletimOcorrencia','Boletim de Ocorrência','Registro, unidade, data e responsável'],
+  ['audiencias','Audiências','Processo, data, tipo e responsável'],
+  ['processosParceiros','Processos de Parceiros','Acompanhamento de processos de parceiros'],
+  ['notificacoesEmpresariais','Notificações (Empresas)','Notificações relacionadas a empresas'],
+  ['cessaoDireitosBellaVida','Bella Vida — Cessão de Direitos','Cessão de direitos de inadimplência'],
+  ['personalizacao','Personalização','Personalização de unidades'],
+  ['protestos','Protestos','Protestos de clientes'],
+  ['alteracoesConvencoes','Alterações Convenções de Condomínio','Alterações de convenções'],
+  ['contratoScpSpe','Contrato de SCP/SPE','Contratos de SCP/SPE'],
+  ['analiseJuridica','Análise Jurídica','Análises jurídicas de contratos'],
+  ['contratosPrestadoresServico','Contratos Prestadores de Serviço','Controle de contratos de prestadores'],
+  ['acompanhamentoCartorioPrefeitura','Cartório e Prefeitura','Acompanhamento de cartório e prefeitura'],
+  ['rocsil','Rocsil','Contratos Rocsil'],
+  ['fglassTetusLocacao','FGlass e Tetus Locação','Contratos de locação FGlass/Tetus'],
+  ['admContratosPrestadores','ADM Contratos Prestadores','Administração de contratos de prestadores'],
+  ['obraContratoPrestacaoServico','Obra — Contrato de Prestação de Serviço','Contratos de obra'],
+  ['propostaTerreno','Proposta de Terreno','Propostas de terreno'],
+  ['procuracoes','Procurações','Procurações emitidas'],
+  ['unidades','Entrega de Chaves — Carpe Diem','Entrega de chaves do empreendimento Carpe Diem'],
+  ['entregaChavesVitaVillage','Entrega de Chaves — Vita Village','Entrega de chaves do empreendimento Vita Village'],
+  ['entregaChavesAurora','Entrega de Chaves — Aurora Residence','Entrega de chaves do empreendimento Aurora Residence'],
+  ['pesquisas','Pesquisas','Pesquisas de apoio administrativo'],
+  ['acessos','Acessos','Controle de acessos'],
+  ['contasAPagar','Contas a Pagar','Contas a pagar do jurídico'],
+  ['pesquisasVitor','Pesquisas Vitor','Pesquisas — Vitor'],
+  ['melhoriasNotificacoes','Melhorias — Notificações Clientes','Projeto de melhorias em notificações'],
+  ['socioGilmarArantes','Sócio — Gilmar Arantes','Acompanhamento societário — Gilmar Arantes']
 ];
-const LEGAL_KEY={"compra-venda":"compraVenda","transferencia-intermediaria":"transferenciaIntermediaria","honorarios-judiciais":"honorariosJudiciais"};
+const LEGAL_KEY={"compra-venda":"compraVenda","transferencia-intermediaria":"transferenciaIntermediaria","honorarios-judiciais":"honorariosJudiciais","administrativos":"processosAdministrativos"};
 const SCREEN_NAMES={executivo:'Painel Executivo COEVO',alertas:'Alertas & Pendências',juridico:'Painel Executivo Jurídico',ti:'Painel Executivo TI',engenharia:'Painel Executivo Engenharia / Obras',estrategia:'Estratégia & Metas',projetos:'Projetos',orcamento:'Orçamento',indicadores:'Indicadores & Relatórios',comites:'Comitês & Reuniões',ia:'IA & Inteligência',temis:'Têmis',ivo:'Ivo',auditoria:'Auditoria & Compliance',riscos:'Riscos',inconsistencias:'Central de Inconsistências',integracoes:'Integrações',agenda:'Agenda',calculadora:'Calculadora',documentos:'Documentos',lixeira:'Lixeira',usuarios:'Usuários & Permissões',configuracoes:'Configurações',backup:'Backup & Restauração',logs:'Logs / Auditoria'};
 const CORPORATE_MENU=[
   {label:'INÍCIO',items:[['executivo','⌂','Painel Executivo COEVO'],['alertas','◌','Alertas & Pendências']]},
@@ -32,7 +63,14 @@ const DEPARTMENT_MODULES={
   // como "Prazos" (rótulo incorreto — apontava para um módulo Monday inexistente, sempre 404); passa a
   // aparecer com seu nome real ("Fatos relevantes"), mais abaixo, junto aos demais módulos ainda não
   // integrados a uma fonte de dados nesta rodada.
-  'Jurídico':[['juridico','Painel Executivo Jurídico'],['processos','Processos'],['prazos','Prazos'],['atencao','Atenção'],['minha-semana','Minha Semana'],['contratos','Contratos'],['notificacoes','Notificações'],['recuperacao','Recuperação de Crédito'],['honorarios','Honorários Extrajudiciais'],['honorarios-judiciais','Honorários Judiciais'],['distratos','Distratos'],['retomadas','Retomadas'],['compra-venda','Recompras / Compra e venda'],['transferencia-intermediaria','Transferências'],['fatos','Fatos relevantes'],['riscos-regulatorio','Riscos e Regulatório']],
+  'Jurídico':[['juridico','Painel Executivo Jurídico'],['processos','Processos Judiciais'],['administrativos','Processos Administrativos'],['processosParceiros','Processos de Parceiros'],['boletimOcorrencia','Boletim de Ocorrência'],['audiencias','Audiências'],['prazos','Prazos'],['atencao','Atenção'],['minha-semana','Minha Semana'],
+  ['notificacoes','Notificações Clientes'],['contratos','Contratos'],['distratos','Distratos'],['retomadas','Retomadas'],['protestos','Protestos'],['recuperacao','Recuperação de Crédito'],['honorarios','Honorários Extrajudiciais'],['honorarios-judiciais','Honorários Judiciais'],['compra-venda','Recompras / Compra e venda'],['transferencia-intermediaria','Transferências'],['cessaoDireitosBellaVida','Cessão de Direitos (Bella Vida)'],['personalizacao','Personalização'],
+  ['analiseJuridica','Análise Jurídica'],['contratosPrestadoresServico','Contratos Prestadores de Serviço'],['admContratosPrestadores','ADM Contratos Prestadores'],['obraContratoPrestacaoServico','Obra — Contrato de Prestação de Serviço'],['contratoScpSpe','Contrato de SCP/SPE'],['propostaTerreno','Proposta de Terreno'],['procuracoes','Procurações'],['alteracoesConvencoes','Alterações Convenções de Condomínio'],['acompanhamentoCartorioPrefeitura','Cartório e Prefeitura'],['notificacoesEmpresariais','Notificações (Empresas)'],['rocsil','Rocsil'],['fglassTetusLocacao','FGlass e Tetus Locação'],
+  ['unidades','Entrega de Chaves — Carpe Diem'],['entregaChavesVitaVillage','Entrega de Chaves — Vita Village'],['entregaChavesAurora','Entrega de Chaves — Aurora Residence'],
+  ['pesquisas','Pesquisas'],['acessos','Acessos'],['contasAPagar','Contas a Pagar'],['pesquisasVitor','Pesquisas Vitor'],
+  ['socioGilmarArantes','Sócio — Gilmar Arantes'],
+  ['melhoriasNotificacoes','Melhorias — Notificações Clientes'],
+  ['fatos','Fatos relevantes'],['riscos-regulatorio','Riscos e Regulatório']],
   'TI':[['ti','Painel Executivo TI'],['ti-projetos','Projetos'],['ti-chamados','Chamados'],['ti-sistemas','Sistemas'],['ti-inventario','Inventário'],['ti-licencas','Licenças'],['ti-aquisicoes','Aquisições'],['ti-infraestrutura','Infraestrutura'],['ti-seguranca','Segurança'],['ti-governanca','Governança de TI'],['ti-ia','IA & Automações'],['ti-fornecedores','Fornecedores']],
   'Engenharia / Obras':[['engenharia','Painel Executivo Engenharia / Obras']]
 };
@@ -217,7 +255,10 @@ function judicialHonorariumPage(){const data=state.legalData.honorariosJudiciais
 // docs/LEGAL_COMMITTEE_READINESS.md, item 20: módulos sem fonte Monday configurada nesta rodada — nunca
 // mostrado como "0 registros" ambíguo (poderia parecer um filtro zerado); mensagem explícita de que o
 // módulo ainda não está integrado, sem inventar dado nenhum.
-const LEGAL_MODULES_WITHOUT_SOURCE=new Set(['contratos','administrativos','retomadas','riscos-regulatorio','recuperacao','fatos','comite']);
+// 'administrativos' e 'retomadas' passaram a ter board Monday real nesta rodada (legal-source-catalog.js
+// — 'processosAdministrativos' e 'retomadas') e saíram deste conjunto. Os demais seguem sem fonte
+// mapeada no inventário fornecido — nunca inventar um board para eles.
+const LEGAL_MODULES_WITHOUT_SOURCE=new Set(['contratos','riscos-regulatorio','recuperacao','fatos','comite']);
 function legalDetailPage(){if(state.legalModule==='processos')return processJudicialPage();if(state.legalModule==='honorarios')return honorariumPage();if(state.legalModule==='honorarios-judiciais')return judicialHonorariumPage();const item=LEGAL_MODULES.find(m=>m[0]===state.legalModule)||[state.legalModule,state.legalModule,''];if(LEGAL_MODULES_WITHOUT_SOURCE.has(state.legalModule))return shell(`<div class="section-title"><div><div class="eyebrow">Jurídico · ${esc(item[1])}</div><h2>${esc(item[1])}</h2></div><button class="secondary" onclick="state.legalModule=null;render()">Voltar ao Dashboard</button></div><div class="empty">Este módulo ainda não está integrado a uma fonte de dados nesta rodada. Nenhum registro fictício é exibido aqui.</div>`);const rows=legalRows();const values=kind=>[...new Set(rows.map(r=>rowValue(r,kind)))].filter(v=>v&&v!=='Não informado').sort((a,b)=>String(a).localeCompare(String(b),'pt-BR'));return shell(`<div class="notice">Dados jurídicos sincronizados e consolidados na COEVO Alta Performance.</div><div class="section-title"><div><div class="eyebrow">Jurídico · ${esc(item[1])}</div><h2>${esc(item[1])}</h2><div class="muted" id="legal-count">Exibindo ${recordCount(rows.length)} de ${recordCount(rows.length)} registros</div></div><button class="secondary" onclick="state.legalModule=null;render()">Voltar às pastas</button></div><section class="card"><div class="section-title"><h2>Filtros múltiplos</h2><button class="secondary" onclick="clearLegalFilters()">Limpar filtros</button></div><div class="filter-grid">${checks('Tipo','type',values('type'))}${checks('Ano','year',values('year'))}${checks('Mês','month',DASHBOARD_MONTHS)}${checks('Empreendimento/Grupo','enterprise',values('enterprise'))}${checks('Responsável','responsible',values('responsible'))}${checks('Status','status',values('status'))}<div><label class="field-label" for="legal-search">Pesquisar</label><input class="input" id="legal-search" placeholder="Título ou palavra-chave" oninput="applyLegalFilters()"></div></div></section><section class="card section" id="legal-list">${legalTable(rows)}</section>`)}
 
 function dashboardIdForScreen(screen){return ({executivo:'executive',ti:'ti',engenharia:'engineering',estrategia:'strategy',riscos:'risks',juridico:'legal'})[screen]||null}
