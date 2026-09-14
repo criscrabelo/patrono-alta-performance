@@ -13,6 +13,7 @@
 //     por entidade), deliberadamente fora desta rodada — não fechar esse gap silenciosamente.
 const { StoreConflictError, StoreUnavailableError } = require('./errors');
 const { DATA_MIGRATIONS_TABLE } = require('./cutover');
+const logger = require('../observability/logger');
 
 const APP_STORE_ID = 1;
 
@@ -26,6 +27,15 @@ function createPostgresStore({ databaseUrl, ssl = false, seed }) {
   // contra um Postgres fora do ar) fique pendurada indefinidamente — falha rápido e reporta `reachable:
   // false`, em vez de travar a requisição.
   const pool = new Pool({ connectionString: databaseUrl, max: 10, connectionTimeoutMillis: 5000, ssl: ssl ? { rejectUnauthorized: true } : false });
+  // P0 (branch demo — correção de crash observado no sync Monday/Postgres): o `pg.Pool` emite 'error' de
+  // forma ASSÍNCRONA e DESACOPLADA de qualquer `.query()` em andamento sempre que um client ocioso do
+  // pool perde a conexão (ex.: "Connection terminated unexpectedly" — banco reiniciando/dormindo entre
+  // acessos, comum no plano de baixo custo do DEMO). Sem um listener neste evento, o Node trata como
+  // `uncaughtException` e derruba o processo inteiro (era exatamente isso que causava o 502 seguido de
+  // restart no Fly). Logar e seguir: a próxima query naturalmente abre uma nova conexão do pool.
+  pool.on('error', (error) => {
+    logger.error('postgres_pool_idle_error', { component: 'storage', errorCode: 'PG_POOL_IDLE_ERROR', error: logger.serializeError(error) });
+  });
 
   // Versão lida junto ao dado, para o CAS (compare-and-swap) de `write()`. Anexada como propriedade
   // não enumerável no objeto devolvido por `read()`, para que `JSON.stringify`/spread do restante do

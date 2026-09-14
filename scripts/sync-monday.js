@@ -27,33 +27,51 @@ function parseArgs(argv) {
   return args;
 }
 
+// P0 (branch demo — correção de crash observado no sync Monday/Postgres): leitura inicial e persistência
+// por board toleram falha transitória de conexão (banco acordando/reiniciando) com retry limitado, e o
+// pool é sempre fechado corretamente no `finally` — mesmo em falha, o script encerra sozinho em vez de
+// ficar pendurado (o pool de conexões mantém o event loop vivo enquanto aberto).
 async function run(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
   if (!process.env.MONDAY_TOKEN) {
     console.warn('Aviso: MONDAY_TOKEN não está definida — todos os boards falharão individualmente (nenhum dado fictício será gravado).');
   }
 
-  const { readStore, writeStore, runMondaySync, audit } = require('../server');
-  const store = await readStore();
+  const { readStore, writeStore, runMondaySync, audit, storage } = require('../server');
+  const { withTransientRetry } = require('../storage/retry');
 
-  const operatorActor = { id: 'sync-monday-cli', name: 'Script administrativo (sync-monday.js)' };
-  console.log(`Iniciando sincronização Monday → Patrono${args.modules ? ` (módulos: ${args.modules.join(', ')})` : ' (todos os boards habilitados)'}...`);
+  try {
+    const store = await withTransientRetry(() => readStore(), {
+      maxAttempts: 3, baseDelayMs: 1000,
+      onRetry: ({ attempt, delayMs, error }) => console.warn(`Falha transitória ao ler o store (tentativa ${attempt}, novo retry em ${delayMs}ms): ${error.message}`)
+    });
 
-  const run = await runMondaySync(store, operatorActor.name, args.modules);
-  audit(store, operatorActor, 'SYNC', 'monday', run.id, null, run, 'Sincronização somente leitura executada via script administrativo (scripts/sync-monday.js)');
-  await writeStore(store);
+    const operatorActor = { id: 'sync-monday-cli', name: 'Script administrativo (sync-monday.js)' };
+    console.log(`Iniciando sincronização Monday → Patrono${args.modules ? ` (módulos: ${args.modules.join(', ')})` : ' (todos os boards habilitados)'}...`);
 
-  console.log('\nBOARD | ID | LIDOS | CRIADOS | ATUALIZADOS | INALTERADOS | FALHAS | STATUS');
-  for (const entry of run.modules) {
-    if (entry.status === 'error') {
-      console.log(`${entry.module} | ${entry.board || '-'} | - | - | - | - | 1 | ERRO: ${entry.error}`);
-    } else {
-      console.log(`${entry.module} | ${entry.board} | ${entry.read} | ${entry.created} | ${entry.updated} | ${entry.unchanged} | 0 | OK`);
+    const run = await runMondaySync(store, operatorActor.name, args.modules, {
+      persistBoard: () => writeStore(store)
+    });
+    audit(store, operatorActor, 'SYNC', 'monday', run.id, null, run, 'Sincronização somente leitura executada via script administrativo (scripts/sync-monday.js)');
+    await withTransientRetry(() => writeStore(store), {
+      maxAttempts: 3, baseDelayMs: 1000,
+      onRetry: ({ attempt, delayMs, error }) => console.warn(`Falha transitória ao persistir o resultado final (tentativa ${attempt}, novo retry em ${delayMs}ms): ${error.message}`)
+    });
+
+    console.log('\nBOARD | ID | LIDOS | CRIADOS | ATUALIZADOS | INALTERADOS | FALHAS | STATUS');
+    for (const entry of run.modules) {
+      if (entry.status === 'error') {
+        console.log(`${entry.module} | ${entry.board || '-'} | - | - | - | - | 1 | ERRO (${entry.stage || 'fetch'}): ${entry.error}`);
+      } else {
+        console.log(`${entry.module} | ${entry.board} | ${entry.read} | ${entry.created} | ${entry.updated} | ${entry.unchanged} | 0 | OK`);
+      }
     }
+    console.log(`\nStatus geral da execução: ${run.status}`);
+    console.log(`Run id: ${run.id}`);
+    process.exitCode = run.status === 'partial' ? 1 : 0;
+  } finally {
+    await storage.close().catch(() => {});
   }
-  console.log(`\nStatus geral da execução: ${run.status}`);
-  console.log(`Run id: ${run.id}`);
-  process.exitCode = run.status === 'partial' ? 1 : 0;
 }
 
 if (require.main === module) {

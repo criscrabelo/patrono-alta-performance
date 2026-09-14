@@ -9,6 +9,7 @@ const { LEGAL_SOURCE_CATALOG, enabledMondaySources } = require('./legal-source-c
 const { PROJECT_ID, ensureProjectStore, projectSummary, projectDetail, projectPermissions, newId } = require('./project-service');
 const storage = require('./storage');
 const { StoreConflictError } = require('./storage/errors');
+const { withTransientRetry, isTransientDbError } = require('./storage/retry');
 const authCrypto = require('./auth/crypto');
 const rateLimit = require('./auth/rate-limit');
 const { resolveClientIp } = require('./auth/client-ip');
@@ -1093,7 +1094,17 @@ function normalizeMondayItem(item,module,board){const columns=Object.fromEntries
 // nunca interrompe os demais); quem chama decide como persistir (commitStore() na rota HTTP,
 // storage.writeStore() no script) e como auditar. Somente leitura no Monday: `fetchMondayBoard()` só
 // envia `query` GraphQL, nunca `mutation` — nenhuma escrita de volta ao Monday existe neste caminho.
-async function runMondaySync(store, requestedByName, requestedModules) {
+// P0 (branch demo — correção de crash observado no sync Monday/Postgres): `persistBoard`, quando
+// fornecido pelo chamador (rota HTTP, agendador, scripts/sync-monday.js), é chamado logo após CADA board
+// ser processado — persistência por board/lote, nunca uma única escrita gigante ao final dos 35 boards.
+// Assim, se o processo cair/reiniciar no meio da sincronização, os boards já processados não se perdem.
+// Uma falha de persistência (ex.: "the database system is not yet accepting connections", transitória)
+// tenta de novo com backoff limitado (`withTransientRetry`, storage/retry.js); se persistir, o board é
+// marcado como erro (nunca derruba o processo) e a sincronização CONTINUA para os demais boards — a
+// mutação em memória deste board permanece no `store` e é levada "de carona" na próxima persistência
+// bem-sucedida, então nada é perdido, só adiado. `persistBoard` ausente (uso legado/testes) preserva o
+// comportamento anterior de só persistir no final, por conta do chamador.
+async function runMondaySync(store, requestedByName, requestedModules, { persistBoard } = {}) {
   const modules = requestedModules?.length ? requestedModules : Object.keys(MONDAY_BOARDS);
   store.mondayRuns = store.mondayRuns || [];
   const run = { id: crypto.randomUUID(), startedAt: new Date().toISOString(), requestedBy: requestedByName, modules: [], status: 'running' };
@@ -1102,6 +1113,8 @@ async function runMondaySync(store, requestedByName, requestedModules) {
   for (const moduleName of modules) {
     const board = MONDAY_BOARDS[moduleName];
     if (!board) continue;
+    logger.info('monday_sync_board_started', { component: 'monday', board: moduleName, boardId: board.id });
+    let entry;
     try {
       const items = await fetchMondayBoard(board.id);
       const list = collection(store, moduleName);
@@ -1117,10 +1130,28 @@ async function runMondaySync(store, requestedByName, requestedModules) {
           list.push({ ...normalized, version: 1 }); created++;
         }
       }
-      run.modules.push({ module: moduleName, board: board.name, read: items.length, created, updated, unchanged, status: 'ok' });
+      entry = { module: moduleName, board: board.name, read: items.length, created, updated, unchanged, status: 'ok' };
+      logger.info('monday_sync_board_fetched', { component: 'monday', board: moduleName, read: items.length, created, updated, unchanged });
     } catch (error) {
       failed++;
-      run.modules.push({ module: moduleName, board: board.name, status: 'error', error: error.message });
+      entry = { module: moduleName, board: board.name, status: 'error', stage: 'fetch', error: error.message };
+      logger.error('monday_sync_board_failed', { component: 'monday', board: moduleName, stage: 'fetch', errorCode: isTransientDbError(error) ? 'MONDAY_FETCH_TRANSIENT' : 'MONDAY_FETCH_ERROR', error: logger.serializeError(error) });
+    }
+    run.modules.push(entry);
+    if (persistBoard) {
+      try {
+        await withTransientRetry(() => persistBoard({ moduleName, store, run }), {
+          maxAttempts: 3,
+          baseDelayMs: 500,
+          onRetry: ({ attempt, delayMs, error }) => logger.warn('monday_sync_persist_retry', { component: 'monday', board: moduleName, stage: 'persist', attempt, delayMs, error: logger.serializeError(error) })
+        });
+      } catch (error) {
+        if (entry.status === 'ok') failed++;
+        entry.status = 'error';
+        entry.stage = 'persist';
+        entry.error = `Falha ao persistir: ${error.message}`;
+        logger.error('monday_sync_board_failed', { component: 'monday', board: moduleName, stage: 'persist', errorCode: error instanceof StoreConflictError ? 'MONDAY_PERSIST_CONFLICT' : 'MONDAY_PERSIST_ERROR', error: logger.serializeError(error) });
+      }
     }
   }
   run.status = failed ? 'partial' : 'completed';
@@ -1186,16 +1217,27 @@ function scheduleDueNow(now=new Date()){const local=now.toLocaleTimeString('pt-B
 // módulo, contagens e mensagem de erro sanitizada.
 async function scheduledMondayTick(){
   if(!process.env.MONDAY_TOKEN)return;
-  const store=await readStore();
+  // P0 (branch demo — correção de crash observado no sync Monday/Postgres): tanto a leitura inicial
+  // quanto a persistência por board toleram falha transitória de conexão (banco acordando/reiniciando)
+  // com retry limitado — nunca propagam uma exceção não tratada. O `.catch()` no `setInterval()` (main())
+  // continua sendo a rede de segurança final: mesmo se o retry se esgotar, esta função rejeita
+  // normalmente, nunca derruba o processo.
+  const store=await withTransientRetry(() => readStore(), {
+    maxAttempts: 3, baseDelayMs: 1000,
+    onRetry: ({attempt,delayMs,error}) => logger.warn('monday_sync_retry', { component: 'monday', trigger: 'scheduled', stage: 'read', attempt, delayMs, error: logger.serializeError(error) })
+  });
   const due=scheduleDueNow();
   if(!due)return;
   const date=new Date().toLocaleDateString('en-CA',{timeZone:'America/Sao_Paulo'});
   if((store.mondayRuns||[]).some(r=>r.trigger==='scheduled'&&r.scheduleTime===due&&String(r.startedAt).startsWith(date)))return;
   logger.info('monday_sync_started', { component: 'monday', trigger: 'scheduled', scheduleTime: due });
-  const run=await runMondaySync(store,'Agendador COEVO');
+  const run=await runMondaySync(store,'Agendador COEVO',null,{ persistBoard: () => writeStore(store) });
   run.trigger='scheduled';run.scheduleTime=due;
   audit(store,{name:'Agendador COEVO'},'SYNC_SCHEDULED','monday',run.id,null,run,'Sincronização automática programada');
-  await writeStore(store);
+  await withTransientRetry(() => writeStore(store), {
+    maxAttempts: 3, baseDelayMs: 1000,
+    onRetry: ({attempt,delayMs,error}) => logger.warn('monday_sync_retry', { component: 'monday', trigger: 'scheduled', stage: 'persist-final', attempt, delayMs, error: logger.serializeError(error) })
+  });
   const failedModules = (run.modules||[]).filter(m=>m.status==='error');
   if (failedModules.length) {
     logger.warn('monday_sync_failed', { component: 'monday', trigger: 'scheduled', modules: failedModules.map(m=>({module:m.module,error:logger.serializeError(new Error(m.error||'erro desconhecido')).message})) });
@@ -1793,7 +1835,24 @@ function handler(req, res) {
   // disponíveis nela). `unchanged` (item 6.9 do escopo) evita contar como "updated" um item cujo conteúdo
   // relevante (título/grupo/colunas) não mudou desde a última sincronização — nunca incrementa a version
   // à toa. Falha de UM board nunca interrompe os demais (mesmo comportamento já existente).
-  if (req.method === 'POST' && url.pathname === '/api/monday/sync') { if(!allowedInDepartment(user,'juridico','create')) return json(res,403,{error:'Sem permissão para sincronizar'}); return await body(req).then(async input=>{const run=await runMondaySync(store,user.name,input.modules);audit(store,user,'SYNC','monday',run.id,null,run,'Sincronização somente leitura com preservação de dados anteriores');if(!(await commitStore(res,store)))return;return json(res,run.status==='partial'?207:200,run);}); }
+  // P0 (branch demo — correção de crash observado no sync Monday/Postgres): `persistBoard` grava o
+  // store logo após cada board (nunca uma única escrita gigante ao final); uma falha de persistência
+  // transitória (banco acordando/reiniciando) tenta de novo com backoff dentro de runMondaySync() — nunca
+  // derruba o processo. Qualquer falha que sobreviva ao retry vira JSON controlado (409 em conflito real
+  // de concorrência, 503 em qualquer outra indisponibilidade de persistência), nunca um 500 genérico nem
+  // uma exceção não tratada.
+  if (req.method === 'POST' && url.pathname === '/api/monday/sync') { if(!allowedInDepartment(user,'juridico','create')) return json(res,403,{error:'Sem permissão para sincronizar'}); return await body(req).then(async input=>{
+    try {
+      const run = await runMondaySync(store, user.name, input.modules, { persistBoard: () => writeStore(store) });
+      audit(store,user,'SYNC','monday',run.id,null,run,'Sincronização somente leitura com preservação de dados anteriores');
+      if(!(await commitStore(res,store)))return;
+      return json(res,run.status==='partial'?207:200,run);
+    } catch (error) {
+      if (error instanceof StoreConflictError) return json(res,409,{error:error.message,code:error.code});
+      logger.error('monday_sync_failed', { component: 'monday', trigger: 'http', errorCode: 'MONDAY_SYNC_EXCEPTION', error: logger.serializeError(error) });
+      return json(res,503,{error:'Sincronização indisponível no momento. Tente novamente.'});
+    }
+  }); }
   if (req.method === 'GET' && url.pathname === '/api/auth/requests') { if(!allowed(user,'*','approve')) return json(res,403,{error:'Somente aprovadores podem consultar solicitações'}); return json(res,200,store.registrationRequests); }
   if (req.method === 'POST' && url.pathname.match(/^\/api\/auth\/requests\/[^/]+\/approve$/)) { if(!allowed(user,'*','approve')) return json(res,403,{error:'Somente aprovadores podem aprovar'}); const id=url.pathname.split('/')[4]; { const limitedApprove = await rateLimit.check('approveOperator','approve:operator',user.id); if (!limitedApprove.allowed) return auditRateLimitAndBlock(res, store, limitedApprove, 'approve-operator', user); } const request=store.registrationRequests.find(r=>r.id===id&&r.status==='pending'); if(!request) return json(res,404,{error:'Solicitação não encontrada'}); request.status='approved';request.approvedAt=new Date().toISOString();request.approvedBy=user.name; // Sprint 2, Hardening H2 (item 27 do escopo; revisão pós-PR #13): cadastro aprovado nasce SEM
 // senha/MFA utilizáveis (nenhuma credencial atribuída automaticamente) — o novo usuário só ganha acesso

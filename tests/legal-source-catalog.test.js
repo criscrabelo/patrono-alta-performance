@@ -119,3 +119,116 @@ test('[Read-only] nenhuma operação GraphQL "mutation" existe no código-fonte 
   const mondaySection = source.slice(source.indexOf('async function mondayQuery'), source.indexOf('async function runMondaySync') + 1);
   assert.ok(!/mutation\s*[({]/i.test(mondaySection), 'o caminho de integração com o Monday não pode conter nenhuma operação GraphQL "mutation"');
 });
+
+// --- P0 (branch demo): correção do crash de conexão observado no sync Monday/Postgres ---
+
+test('[P0] pool.on("error") é registrado no pool de PostgreSQL (evita uncaughtException/crash do processo)', () => {
+  const { createPostgresStore } = require('../storage/postgres-store');
+  const store = createPostgresStore({ databaseUrl: 'postgres://usuario:senha@host-inexistente:5432/db', seed: {} });
+  const pool = store.getPool();
+  assert.ok(pool.listenerCount('error') >= 1, 'o pool precisa ter pelo menos um listener de "error" registrado');
+  // Emitir um erro de conexão idle sintético (o que o driver `pg` faz quando um client ocioso perde a
+  // conexão) não deve derrubar o processo de teste — se não houvesse listener, isto seria uma
+  // uncaughtException e o processo do test runner cairia neste ponto.
+  assert.doesNotThrow(() => pool.emit('error', new Error('Connection terminated unexpectedly')));
+  return store.close();
+});
+
+test('[P0] database.js: pool() também registra listener de "error" (scripts administrativos)', () => {
+  const originalUrl = process.env.DATABASE_URL;
+  process.env.DATABASE_URL = 'postgres://usuario:senha@host-inexistente:5432/db';
+  try {
+    delete require.cache[require.resolve('../database')];
+    const database = require('../database');
+    const pool = database.pool();
+    assert.ok(pool.listenerCount('error') >= 1);
+    assert.doesNotThrow(() => pool.emit('error', new Error('Connection terminated unexpectedly')));
+    return pool.end();
+  } finally {
+    if (originalUrl === undefined) delete process.env.DATABASE_URL; else process.env.DATABASE_URL = originalUrl;
+  }
+});
+
+test('[P0] withTransientRetry(): erro transitório de conexão tenta de novo até um limite, com backoff', async () => {
+  const { withTransientRetry, isTransientDbError } = require('../storage/retry');
+  assert.ok(isTransientDbError(new Error('the database system is not yet accepting connections')));
+  assert.ok(isTransientDbError(new Error('Connection terminated unexpectedly')));
+  assert.ok(!isTransientDbError(new Error('violação de restrição única')), 'erro de dado/negócio não deve ser tratado como transitório');
+
+  let attempts = 0;
+  const retries = [];
+  const result = await withTransientRetry(async () => {
+    attempts++;
+    if (attempts < 3) throw new Error('the database system is not yet accepting connections');
+    return 'ok';
+  }, { maxAttempts: 5, baseDelayMs: 1, onRetry: (info) => retries.push(info) });
+
+  assert.equal(result, 'ok');
+  assert.equal(attempts, 3, 'deve tentar de novo até dar certo, sem exceder o necessário');
+  assert.equal(retries.length, 2);
+});
+
+test('[P0] withTransientRetry(): erro persistente (nunca transitório de verdade) é reportado após o limite de tentativas, nunca em loop infinito', async () => {
+  const { withTransientRetry } = require('../storage/retry');
+  let attempts = 0;
+  await assert.rejects(
+    withTransientRetry(async () => { attempts++; throw new Error('Connection terminated unexpectedly'); }, { maxAttempts: 3, baseDelayMs: 1 }),
+    /Connection terminated unexpectedly/
+  );
+  assert.equal(attempts, 3, 'nunca deve exceder maxAttempts');
+});
+
+test('[P0] runMondaySync(): falha de PERSISTÊNCIA (não de leitura do Monday) em um board é reportada com stage "persist" e não interrompe os demais boards', async (t) => {
+  const { runMondaySync } = require('../server');
+  process.env.MONDAY_TOKEN = 'token-de-teste';
+  t.after(() => { delete process.env.MONDAY_TOKEN; });
+
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: true, json: async () => mondayItemsPage([{ id: 'x', name: 'Item', created_at: '2026-01-01', group: { title: 'G' }, column_values: [] }], null) });
+  t.after(() => { global.fetch = originalFetch; });
+
+  const store = { records: {} };
+  const persisted = [];
+  const run = await runMondaySync(store, 'Teste', ['pesquisas', 'acessos'], {
+    persistBoard: async ({ moduleName }) => {
+      if (moduleName === 'pesquisas') throw new Error('erro de persistência definitivo, não transitório');
+      persisted.push(moduleName);
+    }
+  });
+
+  assert.equal(run.status, 'partial');
+  const pesquisas = run.modules.find(m => m.module === 'pesquisas');
+  const acessos = run.modules.find(m => m.module === 'acessos');
+  assert.equal(pesquisas.status, 'error');
+  assert.equal(pesquisas.stage, 'persist', 'a falha foi ao persistir, não ao ler do Monday — o estágio precisa refletir isso');
+  assert.match(pesquisas.error, /Falha ao persistir/);
+  assert.equal(acessos.status, 'ok', 'falha ao persistir um board não pode impedir os demais');
+  assert.deepEqual(persisted, ['acessos']);
+  // O item de 'pesquisas' continua em memória (não perdido) mesmo com a persistência falha — será levado
+  // "de carona" na próxima gravação bem-sucedida, nunca descartado silenciosamente.
+  assert.equal(store.records.pesquisas.length, 1);
+});
+
+test('[P0] runMondaySync(): persistBoard com falha TRANSITÓRIA tenta de novo e não duplica registros (dedup preservado após retry)', async (t) => {
+  const { runMondaySync } = require('../server');
+  process.env.MONDAY_TOKEN = 'token-de-teste';
+  t.after(() => { delete process.env.MONDAY_TOKEN; });
+
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: true, json: async () => mondayItemsPage([{ id: 'x', name: 'Item', created_at: '2026-01-01', group: { title: 'G' }, column_values: [] }], null) });
+  t.after(() => { global.fetch = originalFetch; });
+
+  const store = { records: {} };
+  let persistCalls = 0;
+  const run = await runMondaySync(store, 'Teste', ['pesquisas'], {
+    persistBoard: async () => {
+      persistCalls++;
+      if (persistCalls === 1) throw new Error('the database system is not yet accepting connections');
+    }
+  });
+
+  assert.equal(run.status, 'completed');
+  assert.equal(persistCalls, 2, 'deve tentar de novo exatamente uma vez após a falha transitória');
+  assert.equal(run.modules[0].status, 'ok');
+  assert.equal(store.records.pesquisas.length, 1, 'retry de persistência nunca duplica o item já upsertado em memória');
+});
