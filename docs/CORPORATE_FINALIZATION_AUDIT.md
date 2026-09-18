@@ -71,20 +71,31 @@ o gate de produção do próprio projeto (`docs/PRODUCTION_GATE.md`) está, na d
 **NO-GO**, com 4 P0 e 4 P1 abertos por decisão/infraestrutura (não por falta de código).
 
 **O que é placeholder** (linguagem honesta no próprio código, nunca dado fictício apresentado como real):
-Têmis, Ivo, Documentos, Lixeira, Central de Inconsistências, 7 dos 14 submódulos do menu Jurídico
-(Contratos, Administrativos, Retomadas, Riscos/Regulatório, Recuperação, Fatos, Comitê como item de
-menu), praticamente todo o menu de TI além do dashboard-raiz, e as três telas do dashboard corporativo
-(`strategy`, `risks`, e — mais relevante — `projects`, cujo dashboard executivo está 100%
-`integration_pending` mesmo a API de projetos sendo real).
+Têmis, Ivo, Documentos, Lixeira, Central de Inconsistências, e — **corrigido na reconciliação desta
+auditoria** — só **4 dos ~33 módulos do menu Jurídico realmente não têm fonte** (`Contratos`,
+`Riscos/Regulatório`, `Recuperação` como item de menu Monday, `Fatos Relevantes`), mais o item `Comitê`
+como entrada de menu (removido de propósito por ser 404 legado). Os outros ~28 — incluindo Processos
+Administrativos, BOs, Audiências, Processos de Parceiros, Retomadas, Protestos, Cessão de Direitos,
+Análise Jurídica, os três tipos de contrato de prestador/ADM/obra, Cartório/Prefeitura, Procurações,
+Convenções, Proposta de Terreno, Rocsil, FGlass/Tetus, as 3 fontes de Entrega de Chaves, Pesquisas,
+Acessos, Contas a Pagar, Sócio e Melhorias — **têm board Monday real, habilitado, sincronizado e ligado à
+tela genérica** (`legal-source-catalog.js` → `server.js` → `public/app.js`), como a primeira versão desta
+auditoria deveria ter confirmado e não confirmou (ver seção 2, letra B, para a matriz corrigida módulo a
+módulo). Continuam placeholder, à parte do Jurídico: praticamente todo o menu de TI além do
+dashboard-raiz, e as três telas do dashboard corporativo (`strategy`, `risks`, e — mais relevante —
+`projects`, cujo dashboard executivo está 100% `integration_pending` mesmo a API de projetos sendo real).
 
 **O que não existe de forma alguma:** Grupo VELKOR (nenhuma linha de código, nenhuma referência em
 nenhum arquivo `.js`/`.css` do frontend — grep vazio para "VELKOR", "Soluções Imobiliárias", "Seguros",
 "Correspondente Bancário", "VELKOR Finance", "Conselho"), Patrono IA/Têmis/Ivo funcionais (zero endpoint,
 zero integração — por **decisão explícita registrada**, não esquecimento), Comitês como sistema real
 (pauta/ata/decisão) — existe apenas uma seção de dashboard chamada "Visão para Comitê", entidades
-Person/Organization/Contract/Document/Financial Obligation, cadastro de Empresa/SPE, infraestrutura de
-deploy (nem `Dockerfile` nem `fly.toml` existem neste repositório), ambientes segregados
-(dev/staging/produção como infraestrutura real), PWA (sem manifest, sem service worker).
+Person/Organization/Contract/Document/Financial Obligation, cadastro de Empresa/SPE (`companyId`/`speId`
+existem no schema, dormentes — ver CFA-13), infraestrutura de deploy **de produção** (a de demonstração
+já existe nesta branch — `Dockerfile`/`fly.toml`/`docs/DEMO_DEPLOY.md`, app Fly `patrono-legal-demo`
+provisionado —, mas é declarada explicitamente como não-produção), um ambiente de **staging durável e
+reutilizável** para todo o produto (dev/staging/produção como infraestrutura segregada real), PWA (sem
+manifest, sem service worker).
 
 **Principais blockers (produção):** persistência ✅ resolvida; sessões/autenticação ✅ resolvida;
 headers/CSP ✅ resolvido; rate limiting ✅ resolvido — o que resta é majoritariamente
@@ -153,53 +164,83 @@ selo apenas para as telas revisadas naquela rodada — indicado abaixo como "2*"
 
 ### B. Jurídico
 
+> **Correção material desta seção (reconciliação pós-entrega, 2ª rodada):** a primeira versão desta
+> matriz subestimou gravemente o Jurídico. Confirmado por leitura direta de `legal-source-catalog.js`,
+> `public/app.js` (`LEGAL_MODULES`, `DEPARTMENT_MODULES`, `LEGAL_MODULES_WITHOUT_SOURCE`) e `server.js`
+> (`MONDAY_BOARDS = Object.fromEntries(enabledMondaySources()...)`, `LEGAL_MODULES = new
+> Set([...Object.keys(MONDAY_BOARDS), 'honorariosJudiciais'])`): **as 35 fontes do catálogo (34
+> habilitadas + 1 duplicata desabilitada) estão TODAS ligadas**, de ponta a ponta, ao menu visível
+> (`DEPARTMENT_MODULES.Jurídico`), ao allowlist do backend (`/api/legal/:module`) e à tela genérica real
+> de listagem/filtro (`legalDetailPage()`/`legalTable()`), que busca dado real via
+> `GET /api/legal/<key>`. **Apenas 5 itens do menu genuinamente não têm fonte** — confirmado por não
+> existirem no catálogo: `contratos`, `riscos-regulatorio`, `recuperacao` (o item de menu; o projeto
+> estratégico de Recuperação de Crédito em si é outra coisa, com API própria), `fatos`, e o item `comite`
+> (removido do menu visível de propósito, por ser 404 legado — `LEGAL_MODULES_WITHOUT_SOURCE` no código).
+> Isso muda a classificação de ~28 linhas abaixo, de "não implementado"/"placeholder" para "real, com dado
+> sincronizado, pendente apenas de QA visual por módulo" (status `2`). **O que não mudou:** nenhum desses
+> 28 módulos tem tela especializada própria (usam a mesma tela genérica de filtro/tabela); nenhum teve QA
+> visual manual dedicada (a rodada de `docs/LEGAL_COMMITTEE_READINESS.md` cobriu só um subconjunto,
+> marcado `2*` abaixo); a sincronização real reportada (`docs/DEMO_CURRENT_STATE.md`) confirma "35 boards
+> processados, 0 falhas", mas só documenta o **volume de registros de 11 dos 35 boards** como amostra —
+> para os demais, "sem falha" não é o mesmo que "confirmei o volume exato", e isso está anotado onde
+> relevante.
+
 | Módulo | Status | Dados | QA | Prioridade | Dependência | Esforço |
 |---|---|---|---|---|---|---|
 | Visão Jurídica (dashboard `legal`) | 2* | Real | Manual (comitê) | P2 | — | S |
-| Processos Judiciais | 2* | Real (Monday, 273 registros no snapshot de 09/08) | Manual (comitê) | P2 | — | S |
-| Processos Administrativos | 4 | Nenhum | N/A | P2 | Board Monday dedicado | M |
-| Processos Parceiros | 6 | — | — | P3 | Modelagem + fonte | L |
-| Boletins de Ocorrência (BOs) | 6 | — | — | P3 | Modelagem + fonte | L |
-| Audiências | 6 | — | — | P3 | Modelagem + fonte | M |
+| Processos Judiciais | 2* | Real (Monday, 273→280 registros entre snapshots) | Manual (comitê) | P2 | — | S |
+| Processos Administrativos | **2 (corrigido de placeholder)** | Real — board `5877003779` habilitado, sincronizado, tela genérica | Não | P2 | — | S |
+| Processos de Parceiros | **2 (corrigido de não implementado)** | Real — board `6342187473` | Não | P2 | — | S |
+| Boletim de Ocorrência | **2 (corrigido de não implementado)** | Real — board `18378845322` | Não | P2 | — | S |
+| Audiências | **2 (corrigido de não implementado)** | Real — board `18422526820` | Não | P2 | — | S |
 | Prazos (Legal Deadline) | 2* | Real, canônico, com histórico/auditoria | Sim (unit+HTTP) | P2 (QA visual) | — | S |
 | Atenção | 2* | Real | Sim (unit+HTTP) | P2 (QA visual) | — | S |
 | Minha Semana | 2* | Real (Legal Deadline; Calendar bloqueado) | Sim (adapter) | P2 (QA visual) | H10 (OAuth Google) para Calendar | S |
-| Notificações | 2* | Real (Monday, 1.074 no snapshot) | Manual (comitê) | P2 | — | S |
-| Contratos (menu) | 4 | Nenhum ("não integrado nesta rodada") | N/A | P1 | Board Monday / entidade Contract | M |
-| Demandas Jurídicas (conceito MASTER_HANDOFF) | 6 | — | — | P3 | Modelagem | L |
-| Cobrança & Recuperação → Protestos | 6 | — | — | P3 | Modelagem + fonte | M |
-| Cobrança & Recuperação → Cessões | 6 | — | — | P3 | Modelagem + fonte | M |
-| Cobrança & Recuperação → Transferência Intermediada | 2* | Real (Monday, 25 registros) | Manual | P2 | — | S |
-| Cobrança & Recuperação → Recuperação de Crédito (projeto estratégico) | **5** | Estrutura real (governança/API), indicadores financeiros bloqueados | Não | P1 | Sienge (financeiro) | L |
-| Distratos & Retomadas → Distratos | 2* | Real (Monday, 38 no quadro conjunto) | Manual | P2 | — | S |
-| Distratos & Retomadas → Retomadas | 4 | Não separado de Distratos | N/A | P2 | Separação de board/campo | M |
-| Entrega de Chaves | 6 | — | — | P3 | Modelagem + fonte | M |
-| Regularização Imobiliária (Cartório/Prefeitura, Procurações, Convenções, Terrenos) | 6 | — | — | P3 | Modelagem + fonte (4 sub-telas) | XL |
-| Honorários Extrajudiciais | 2* | Real (Monday, 894 registros) | Manual | P2 | — | S |
+| Notificações Clientes | 2* | Real (Monday, 1.074→1.129 registros entre snapshots) | Manual (comitê) | P2 | — | S |
+| Notificações (Empresas) | **2 (corrigido de não implementado)** | Real — board `6814664713` | Não | P2 | — | S |
+| Contratos (menu genérico) | 4 (confirmado sem fonte) | Nenhum — não existe no catálogo | N/A | P1 | Board Monday dedicado / entidade `Contract` | M |
+| Demandas Jurídicas (conceito MASTER_HANDOFF, sem módulo de menu correspondente) | 6 | — | — | P3 | Modelagem | L |
+| Protestos | **2 (corrigido de não implementado)** | Real — board `7787216106` | Não | P2 | — | S |
+| Cessão de Direitos — Bella Vida | **2 (corrigido — item ausente da 1ª versão desta matriz)** | Real — board `6157336222` | Não | P2 | — | S |
+| Transferência Intermediada | 2* | Real (Monday, 25 registros) | Manual | P2 | — | S |
+| Recuperação de Crédito (item de menu Monday) | 4 (confirmado sem fonte) | Nenhum — não existe no catálogo | N/A | P2 | — | S |
+| Recuperação de Crédito (projeto estratégico, `/api/projects`) | **5** | Estrutura real (governança/API), indicadores financeiros bloqueados | Não | P1 | Sienge (financeiro) | L |
+| Distratos e Desistências | 2* | Real (Monday, board `18404493605`, 38→48 registros entre snapshots) | Manual | P2 | — | S |
+| Retomadas | **2 (corrigido — tem board PRÓPRIO, não é "não separado de Distratos")** | Real — board `18413057491`, distinto do de Distratos | Não | P2 | — | S |
+| Entrega de Chaves — Carpe Diem | 2* | Real (Monday, board `18410779605`, 112→135 registros entre snapshots) | Manual | P2 | — | S |
+| Entrega de Chaves — Vita Village | **2 (corrigido — item ausente da 1ª versão desta matriz)** | Real — board `6012535974`, 116 registros no snapshot da demo | Não | P2 | — | S |
+| Entrega de Chaves — Aurora Residence | **2 (corrigido — item ausente da 1ª versão desta matriz)** | Real — board `6689135722`, 290 registros no snapshot da demo | Não | P2 | — | S |
+| Duplicata Entrega de Chaves Carpe Diem | **8 (desabilitada por decisão, não é gap)** | `enabled:false` no catálogo — sem conteúdo exclusivo identificado | N/A | — | — | — |
+| Regularização Imobiliária → Cartório e Prefeitura | **2 (corrigido de não implementado)** | Real — board `5831481667` | Não | P2 | — | S |
+| Regularização Imobiliária → Procurações | **2 (corrigido de não implementado)** | Real — board `6022129654` | Não | P2 | — | S |
+| Regularização Imobiliária → Alterações Convenções de Condomínio | **2 (corrigido de não implementado)** | Real — board `9099172459` | Não | P2 | — | S |
+| Regularização Imobiliária → Proposta de Terreno | **2 (corrigido de não implementado)** | Real — board `5800554561` | Não | P2 | — | S |
+| Honorários Extrajudiciais | 2* | Real (Monday, 894→917 registros entre snapshots) | Manual | P2 | — | S |
 | Honorários Judiciais | 2* | Real (derivado de `HONORÁRIOS EFETIVADOS`) | Manual | P2 (sem filtros equivalentes ao extrajudicial) | — | S |
-| Compra e Venda / Contratos (dado) | 2* | Real (Monday, 1.404 registros) | Manual | P2 | — | S |
-| Personalização (preferência de dashboard) | 1 | — | Sim (HTTP) | — | — | — |
-| Análise Jurídica | 6 | — | — | P3 | Modelagem | L |
-| Contratos de Prestadores / ADM / Obra | 6 | — | — | P3 | Modelagem + fonte | L |
-| SCP/SPE | 4 (dormente) | `companyId`/`speId`/`scopeType` existem no schema, nunca populados | N/A | P1 | Decisão de negócio (D3, cadastro de SPE) | L |
-| Propostas de Terreno | 6 | — | — | P3 | Modelagem + fonte | M |
-| Procurações | 6 | — | — | P3 | Modelagem + fonte | M |
-| Convenções | 6 | — | — | P3 | Modelagem + fonte | M |
-| Cartório/Prefeitura | 6 | — | — | P3 | Modelagem + fonte | M |
-| Notificações Empresariais | 6 | — | — | P3 | Modelagem + fonte | M |
-| Rocsil / FGlass / Tetus (fornecedores citados no handoff original) | 6 | — | — | P3 | Confirmar se ainda relevante ao negócio | S |
-| Entrega de Chaves (unidades) | 2* | Real (Monday, 112 registros) — nomeado "Unidades/entrega" | Manual | P2 | — | S |
-| Pesquisas | 6 | — | — | P3 | — | M |
-| Acessos (usuários do Jurídico) | 3 | Real (fila de aprovação) | Sim (HTTP) | P2 | UI de gestão completa | M |
-| Contas a Pagar | 6 | — | — | P3 | Sienge | L |
-| Sócios | 6 | — | — | P3 | Modelagem | M |
-| Melhorias (item de menu genérico) | 6 | — | — | P3 | — | S |
-| Fatos Relevantes | 4 | Nenhum ("não integrado nesta rodada") | N/A | P2 | Board Monday | M |
-| Riscos/Regulatório | 4 | Nenhum ("não integrado nesta rodada") | N/A | P2 | Modelagem de risco | M |
-| Comitê (item de menu dedicado) | **8** | — | — | P2 | Já removido do menu por 404; ver achado CFA-04 | S |
+| Compra e Venda / Contratos para Clientes (dado) | 2* | Real (Monday, board `5821473011`, 1.404→1.430 registros entre snapshots) | Manual | P2 | — | S |
+| Personalização (unidades — módulo Jurídico) | **2 (corrigido — havia sido confundido com preferência de dashboard, item distinto)** | Real — board `6035477812` | Não | P2 | — | S |
+| Personalização de dashboard (preferência de widget, distinto do módulo acima) | 1 | — | Sim (HTTP) | — | — | — |
+| Análise Jurídica | **2 (corrigido de não implementado)** | Real — board `5877009296` | Não | P2 | — | S |
+| Contratos Prestadores de Serviço | **2 (corrigido de não implementado)** | Real — board `7602547683` | Não | P2 | — | S |
+| ADM Contratos Prestadores | **2 (corrigido de não implementado)** | Real — board `8734722297`, 457 registros no snapshot da demo | Não | P2 | — | S |
+| Obra — Contrato de Prestação de Serviço | **2 (corrigido de não implementado)** | Real — board `5800267760`, 459 registros no snapshot da demo | Não | P2 | — | S |
+| Contrato de SCP/SPE (item de menu Monday) | **2 (corrigido de não implementado)** | Real — board `5800443639` | Não | P2 | — | S |
+| SCP/SPE (segregação de escopo por empresa/SPE no schema — achado distinto do item acima) | 4 (dormente) | `companyId`/`speId`/`scopeType` existem nas tabelas relacionais, nunca populados por nenhuma rotina real — ver CFA-13 | N/A | P1 | Decisão de negócio (D3, cadastro de Empresa/SPE) | L |
+| Rocsil | **2 (corrigido de não implementado)** | Real — board `9775979756` | Não | P2 | — | S |
+| FGlass e Tetus Locação | **2 (corrigido de não implementado)** | Real — board `4957387842` | Não | P2 | — | S |
+| Pesquisas | **2 (corrigido de não implementado)** | Real — board `9535379620` | Não | P2 | — | S |
+| Pesquisas Vitor | **2 (corrigido — item ausente da 1ª versão desta matriz)** | Real — board `8352118420` | Não | P2 | — | S |
+| Acessos (módulo Jurídico — controle de acessos, Monday) | **2 (corrigido — havia sido confundido com fila de aprovação de usuários, módulo distinto)** | Real — board `7377724937` | Não | P2 | — | S |
+| Acessos/Aprovação de usuários (Administração — achado distinto do item acima) | 3 | Real (fila de aprovação) | Sim (HTTP) | P2 | UI de gestão completa | M |
+| Contas a Pagar | **2 (corrigido de não implementado)** | Real — board `5876625743` | Não | P2 | — | S |
+| Sócio — Gilmar Arantes | **2 (corrigido — item ausente da 1ª versão desta matriz, rotulado genericamente "Sócios")** | Real — board `8725280592` | Não | P2 | — | S |
+| Melhorias — Notificações Clientes | **2 (corrigido de não implementado)** | Real — board `18427640622` | Não | P2 | — | S |
+| Fatos Relevantes | 4 (confirmado sem fonte) | Nenhum — não existe no catálogo, mensagem honesta na UI | N/A | P2 | Board Monday | M |
+| Riscos/Regulatório | 4 (confirmado sem fonte) | Nenhum — não existe no catálogo, mensagem honesta na UI | N/A | P2 | Modelagem de risco | M |
+| Comitê (item de menu dedicado, removido da navegação visível) | **8** | — | — | P2 | Já removido do menu por 404; ver achado CFA-04 | S |
 | Comitê (seção embutida no dashboard) | 2* | Real (Legal Deadline + processos) | Manual (comitê real, 12/09) | P2 | — | S |
 | Têmis (assistente IA) | 4 | Nenhum, por decisão | N/A | — (fora de escopo) | AI_GOVERNANCE.md | — |
-| Integração Monday (Jurídico) | 1 | Real, ativo | Sim | — | — | — |
+| Integração Monday (Jurídico) | 1 | Real, ativo, **35 boards habilitados** (corrigido de 7) | Sim | — | — | — |
 
 ### C. Tecnologia / TI
 
@@ -217,7 +258,6 @@ selo apenas para as telas revisadas naquela rodada — indicado abaixo como "2*"
 | Indicadores (`ti-progress`, `ti-quality`) | 4 | `integration_pending` | N/A | P2 | Roadmap/CMDB reais | M |
 | Próximos compromissos (`ti-deadlines`) | **7 (bug confirmado)** | Real (agenda), sem filtro passado/futuro | Não | **P1** | Ver achado CFA-02 | S |
 | Orçamento TI | 3 | Provisório (cadastro de homologação, não planilha oficial) | Não | P1 | Fonte oficial de orçamento TI | M |
-| Status real dos módulos vs. placeholders | — | — | — | — | Coberto pelas linhas acima | — |
 | CTAs quebrados em TI | 6 (nenhum encontrado) | — | — | — | Ver seção 10 | — |
 | Ivo (assistente IA de TI) | 4 | Nenhum, por decisão | N/A | — | AI_GOVERNANCE.md | — |
 | Performance (TI) | 6 | — | — | P3 | — | M |
@@ -315,7 +355,6 @@ selo apenas para as telas revisadas naquela rodada — indicado abaixo como "2*"
 | Contexto real / permissões / segregação departamental | 6 | — | — | — | Nenhuma IA implementada para avaliar | — |
 | Recomendações / ações críticas / confirmação humana | 6 | — | — | — | idem | — |
 | Dados sensíveis / auditabilidade / risco de alucinação | 6 | — | — | — | idem | — |
-| Funcional ou placeholder? | **Placeholder, por decisão explícita registrada — nunca chamado de funcional em nenhuma tela** | — | — | — | — | — |
 
 ### K. Governança
 
@@ -421,7 +460,6 @@ selo apenas para as telas revisadas naquela rodada — indicado abaixo como "2*"
 | fly.toml / config de deploy | **3 (corrigido)** | **Existe** (`fly.toml`), mas explicitamente declarado como não-produção pelo próprio `docs/DEMO_DEPLOY.md` |
 | App hospedado | **3 (corrigido)** | App de demonstração `patrono-legal-demo` provisionado (reportado pelo operador, não verificado por rede a partir deste ambiente de auditoria) |
 | Banco em produção | 6 | Não provisionado — o banco existente (`patrono-legal-demo-db`) é de demonstração, não de produção |
-| Memória/CPU | — | Não aplicável sem infraestrutura |
 | Healthchecks | 1 | `/api/health`, `/api/health/live`, `/api/health/ready` — implementados e testados |
 | Liveness/readiness | 1 | Distintos corretamente (liveness nunca toca storage) |
 | Autostop | 6 | Não aplicável (sem infraestrutura) |
@@ -431,7 +469,6 @@ selo apenas para as telas revisadas naquela rodada — indicado abaixo como "2*"
 | Secrets | 1 | Via `process.env`, nunca no código/log |
 | Escalabilidade | 4 | Scheduler do Monday em processo único, não pronto para múltiplas instâncias (achado histórico, ainda válido) |
 | Single point of failure | 7 (conhecido) | Scheduler único; estado de cooldown de alerta em memória por instância |
-| Custo | — | Não avaliável sem infraestrutura provisionada |
 | Staging x Produção | 6 | Nenhuma separação de infraestrutura existe |
 
 ### Q. Observabilidade
@@ -462,7 +499,6 @@ selo apenas para as telas revisadas naquela rodada — indicado abaixo como "2*"
 | RTO | 3 (definido, não provado em escala) | 4h — demonstrado em dataset sintético, não em escala de produção |
 | Evidência | 1 | `docs/BACKUP_RESTORE_RUNBOOK.md`, restauração real documentada |
 | Restore real | 1 (mecanismo) / 5 (offsite) | Mecanismo local: real e testado. Offsite: nunca testado |
-| Pendências do H5 | Ver PG-21 | Aberto deliberadamente até storage real ser exercitado |
 
 ### S. Integrações
 
@@ -527,6 +563,48 @@ pendente, conforme instruído.
 | `docs/handoff-codex/` (18 documentos) | Presente — **coleção paralela e desatualizada** (fotografia de 09/08/2026), pré-data toda a fundação de Sprint 1/2/hardening. Ver achado CFA-11. |
 | Handoff de TI | **Não localizado como documento dedicado** — recomenda-se confirmação |
 | Inconsistências históricas | Documentadas nesta seção acima; nenhuma contradição não explicada permanece |
+
+### Contagem determinística da Matriz de Módulos (obrigatória, não aproximada)
+
+Extraída programaticamente das tabelas desta seção 2 (letras A–V), lendo a segunda coluna (Status) de
+cada linha de dado — não estimada, não arredondada. Método: cada linha cuja coluna "Status" começa por um
+dígito `1`–`8` (ignorando `**`/`*` de formatação) entra na contagem abaixo; as demais são tratadas à
+parte, nunca somadas ao total, pelos dois motivos possíveis:
+
+**A. 288 linhas de dado no total da seção 2**, divididas em três grupos que não se misturam:
+
+1. **253 linhas classificáveis no esquema `1`–`8`** (letras A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P,
+   Q, R) — soma exatamente igual ao total deste grupo:
+
+   | Status | 1 — Funcional e validado | 2 — Funcional, QA visual pendente | 3 — Parcialmente funcional | 4 — Placeholder/estrutura preparada | 5 — Bloqueado por integração externa | 6 — Não implementado | 7 — Com bug | 8 — Descontinuado |
+   |---|---|---|---|---|---|---|---|---|
+   | Linhas | 69 | 61 | 32 | 41 | 8 | 34 | 5 | 3 |
+
+   **69+61+32+41+8+34+5+3 = 253.** (Para comparação: antes da correção do Jurídico nesta 2ª rodada, a
+   contagem de `2` era ~33 e a de `4`/`6` somava ~87 só nessa letra — a diferença de ~28 linhas que
+   migraram de `4`/`6` para `2` é exatamente a correção descrita na letra B.)
+
+2. **8 linhas na letra S (Integrações)** — por instrução original desta auditoria, classificadas na
+   taxonomia própria pedida (ativa/parcial/preparada/bloqueada/não implementada), não no esquema `1`–`8`
+   de módulo/tela. Não somadas ao grupo acima por serem uma categoria estrutural diferente (integração,
+   não módulo/tela).
+
+3. **23 linhas na letra V (Documentação)** — descrevem o estado de um arquivo de documentação (presente/
+   ausente/desatualizado), não o status funcional de um módulo/tela. Também não somadas ao grupo 1.
+
+**B. 4 linhas explicitamente não classificáveis nesta rodada** (evidência insuficiente, marcadas como tal
+em vez de presumidas em qualquer direção — nunca contadas em nenhum status acima):
+
+| Letra | Item | Motivo de não classificar |
+|---|---|---|
+| D | Telas específicas de obra (fora do dashboard de Engenharia) | Não mapeado nesta rodada — só o dashboard foi confirmado por código |
+| L | Meu Perfil | Nenhum agente desta auditoria confirmou uma tela dedicada; endpoints de troca de senha/MFA existem no backend |
+| N | Bypass de desenvolvimento (`usr-*`) | Testes confirmam que retorna 401; a guarda exata (`NODE_ENV`?) não foi lida linha a linha |
+| U | iPad/iPhone | Nenhum teste em dispositivo real ou emulado foi executado nesta auditoria |
+
+**288 = 253 + 8 + 23 + 4.** Esta é a contagem oficial desta auditoria — qualquer número diferente citado
+em texto solto neste documento (por exemplo, no resumo executivo) deve ser lido como aproximação de
+prosa, e esta tabela prevalece em caso de conflito.
 
 ---
 
@@ -878,7 +956,7 @@ sob controle).
 
 | Classe | Módulos |
 |---|---|
-| **Real (sincronizado)** | Processos Judiciais, Notificações, Distratos, Honorários Extrajudiciais, Honorários Judiciais (derivado), Compra e Venda, Unidades/Entrega, Transferência Intermediada — todos via Monday |
+| **Real (sincronizado)** | **Corrigido nesta reconciliação — 34 fontes Monday habilitadas (35 do catálogo, 1 duplicata desabilitada), não 8.** Processos Judiciais, Notificações Clientes, Distratos, Retomadas, Protestos, Cessão de Direitos (Bella Vida), Honorários Extrajudiciais, Honorários Judiciais (derivado), Compra e Venda, Transferência Intermediada, Personalização (unidades), Processos Administrativos, Boletim de Ocorrência, Audiências, Processos de Parceiros, Análise Jurídica, Contratos Prestadores de Serviço, ADM Contratos Prestadores, Obra — Contrato de Prestação de Serviço, Contrato de SCP/SPE, Proposta de Terreno, Procurações, Alterações Convenções de Condomínio, Cartório e Prefeitura, Notificações (Empresas), Rocsil, FGlass e Tetus Locação, Entrega de Chaves (Carpe Diem, Vita Village, Aurora Residence), Pesquisas, Pesquisas Vitor, Acessos, Contas a Pagar, Melhorias — Notificações Clientes, Sócio — Gilmar Arantes — todos via Monday, todos ligados à tela genérica (`legalDetailPage()`), nenhum com QA visual individual confirmado (ver seção 2, letra B) |
 | **Real (persistido nativamente)** | Legal Deadline, usuários, sessões, auditoria, backups (metadados) |
 | **Real, planilha (não automática)** | Orçamento Jurídico (`Orcamento_JURIDICO_2026.xlsx`, snapshot manual) |
 | **Provisório/cadastro de homologação** | Orçamento de TI |
@@ -953,17 +1031,32 @@ projeto (`docs/QA.md`), não uma regressão.
 dedicados a permissão/escopo através das 7 rodadas de segurança); Legal Deadline — muito ampla (ciclo de
 vida completo, D1 e Fase 4B); Backup/Restore — ampla, com evidência de restauração real; Observabilidade
 — ampla (33 testes dedicados); Incident Response — testes de infraestrutura do processo (criação de
-registro), não de um incidente real.
+registro), não de um incidente real; **catálogo/sincronização Monday e estabilidade de conexão** — ampla
+(`tests/legal-source-catalog.test.js`, 16 testes: integridade do catálogo, `MONDAY_BOARDS` derivado sem
+lista paralela, paginação/upsert/idempotência do `runMondaySync()`, `pool.on('error')`, retry com
+backoff, reconciliação de conflito de CAS); **correções de CTA/data do Painel Executivo** — coberta
+(`tests/legal-ui-p0.test.js`, 9 testes: target/`disabled` de `decision-list` e do roteamento de Comitê,
+`upcomingAgendaItems()` — exclusão de evento passado, imunidade a fuso, não-mutação do array —, e
+`moduleCount` dinâmico das Integrações).
+
+**Correção sobre a versão anterior deste documento:** eu havia afirmado que os achados de CTA/data
+(CFA-01/CFA-02) não tinham teste dedicado — **isso estava errado**. `tests/legal-ui-p0.test.js` cobre
+exatamente os dois casos que **já foram corrigidos** nesta branch (`decision-list`/`upcoming-deadlines`),
+com teste de regressão real. O que continua **sem teste dedicado** é apenas o que continua **aberto**:
+`ti-deadlines` (CFA-02, residual) e `barList()` (CFA-09) — nenhum teste falha hoje para eles porque
+ninguém escreveu um ainda, não porque o comportamento esteja correto.
 
 **Pontos sem cobertura:**
-- Nenhum teste E2E/browser (ver CFA-15).
+- Nenhum teste E2E/browser automatizado e repetível em CI (ver CFA-15) — houve uma sessão real de
+  validação por navegador (Playwright, ad-hoc) para o núcleo do módulo Jurídico, não repetida para os
+  ~28 módulos jurídicos recém-reclassificados nesta reconciliação (seção 2, letra B) nem para os demais
+  ambientes.
 - Nenhum teste de acessibilidade automatizado (axe-core ou equivalente).
 - Nenhum teste de carga/concorrência em escala de produção (a concorrência testada é de 2 requisições
   simultâneas, suficiente para provar o mecanismo, não para provar comportamento sob carga real).
-- Nenhum teste dos módulos "não implementados" (não pode haver, por definição).
-- `dashboard-service.js`/`dashboard-widgets.js` (achados CFA-01/CFA-02) não têm teste que cubra
-  especificamente "o widget produz um botão sem destino" ou "o widget lista item passado como próximo"
-  — os bugs foram encontrados por leitura de código, não por teste que falhou.
+- Nenhum teste dos módulos genuinamente "não implementados" (`contratos`, `riscos-regulatorio`,
+  `recuperacao`, `fatos` — não pode haver, por definição, já que não têm fonte).
+- `ti-deadlines` (CFA-02, residual) e `barList()` (CFA-09) permanecem sem teste de regressão dedicado.
 
 **QA visual:** nenhuma automatizada; uma rodada manual documentada ocorreu para os módulos Jurídicos
 apresentados ao Comitê (12/09/2026).
@@ -992,12 +1085,13 @@ deploy do ambiente de demonstração foi manual, via `flyctl`, por um operador h
 
 Ver seção 2, letra V, para o detalhamento completo por documento. Resumo: a documentação deste projeto é
 **excepcionalmente rigorosa e rastreável** para o escopo já entregue (Jurídico + fundação) — muito acima
-do padrão usual para um projeto neste estágio. O gap de documentação real é: (1) `DEMO_CURRENT_STATE.md`
-não existe (achado da própria instrução original desta auditoria); (2)
+do padrão usual para um projeto neste estágio. Os gaps de documentação reais são: (1)
 `docs/handoff-codex/` é uma coleção paralela e desatualizada (09/08/2026) que, se lida sem notar a data,
 pode ser confundida com o estado atual — recomenda-se marcá-la explicitamente como histórica ou
-arquivá-la; (3) `MATRIZ-RASTREABILIDADE.md` está desatualizada em relação ao rigor de `SECURITY.md`/
-`PRODUCTION_GATE.md`/`QA.md`.
+arquivá-la; (2) `MATRIZ-RASTREABILIDADE.md` está desatualizada em relação ao rigor de `SECURITY.md`/
+`PRODUCTION_GATE.md`/`QA.md`. (`docs/DEMO_CURRENT_STATE.md` **existe** nesta branch — a leitura inicial
+desta auditoria contra `master` havia corretamente confirmado sua ausência ali, mas essa observação não
+se aplica a `claude/demo-staging-deploy`; corrigido em toda a seção 2, letra V.)
 
 ---
 
@@ -1118,8 +1212,8 @@ Definição objetiva, para este documento:
 - Backup/restore validado incluindo armazenamento externo real.
 - QA: suíte automatizada verde + ao menos um smoke E2E por fluxo crítico + revisão visual documentada.
 - Mobile: navegação móvel testada em dispositivo real (não apenas CSS responsivo revisado em código).
-- Documentação: `docs/DEMO_CURRENT_STATE.md` criado e mantido vivo; `docs/handoff-codex/` arquivado ou
-  atualizado para não confundir leitor futuro.
+- Documentação: `docs/DEMO_CURRENT_STATE.md` (já existe nesta branch) mantido vivo a cada rodada de
+  estabilização; `docs/handoff-codex/` arquivado ou atualizado para não confundir leitor futuro.
 - Handoff: papéis operacionais (infraestrutura, incidente, backup, dado) nomeados e documentados com
   nome real, não campo vazio.
 - Produção aprovada formalmente pela Gestora, com autorização explícita registrada (mesmo padrão já
