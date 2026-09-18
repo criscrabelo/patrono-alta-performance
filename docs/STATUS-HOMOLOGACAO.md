@@ -1,5 +1,14 @@
 # Status de homologação - fase atual
 
+> **⚠️ DOCUMENTO HISTÓRICO — fotografia de uma fase de homologação anterior (Sprint 1, antes do
+> hardening H1–H7 e da rodada de demonstração/staging).** Vários itens abaixo já foram superados pelo
+> código atual (ex.: MFA hoje usa `/api/auth/mfa/verify`, não `/api/auth/mfa`; login hoje verifica senha
+> individual por usuário via `authCrypto.verifyPassword()`, não "somente por variável de ambiente";
+> PostgreSQL já está em uso real no ambiente de demonstração, não mais "aguardando senha oficial"; o
+> catálogo Monday hoje tem 35 boards habilitados, não sete). Preservado **sem alteração** como registro
+> histórico — nunca reescrito para parecer atual. Para o estado operacional REAL e atual do ambiente de
+> demonstração, ver `docs/DEMO_CURRENT_STATE.md`.
+
 ## Evidências executadas
 
 | Controle | Resultado | Evidência |

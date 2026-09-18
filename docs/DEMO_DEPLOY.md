@@ -9,6 +9,11 @@ Nenhum passo aqui é executado automaticamente por mim — o deploy é feito por
 de hospedagem. Eu preparei apenas os arquivos de configuração (`Dockerfile`, `fly.toml`) e o roteiro
 exato de comandos.
 
+> **Este documento é o roteiro de deploy (como configurar/subir o ambiente).** Para a fotografia do
+> estado operacional ATUAL (infraestrutura já provisionada, última sincronização validada, pendências
+> em aberto), ver `docs/DEMO_CURRENT_STATE.md` — atualizado a cada rodada de estabilização, sem duplicar
+> o conteúdo deste roteiro.
+
 ## 0. Por que Fly.io
 
 `docs/PRODUCTION_GATE.md` (PG-22) já assumia Fly.io como plataforma-alvo (a ausência de `fly.toml`/
@@ -28,10 +33,18 @@ plataforma nova — mas qualquer serviço que rode um container Docker + Postgre
 ```bash
 # Dentro da raiz do repositório, nesta branch:
 fly apps create <um-nome-unico-para-seu-app>   # ajuste "app" em fly.toml para esse mesmo nome
-fly postgres create --name <nome-do-postgres>   # escolha a menor VM (staging não precisa de mais)
+fly postgres create --name <nome-do-postgres>   # ver nota de RAM abaixo — NÃO escolha a menor VM
 fly postgres attach <nome-do-postgres> -a <um-nome-unico-para-seu-app>
   # ^ isto já define DATABASE_URL como secret automaticamente — nunca precisa ser digitado à mão
 ```
+
+**Nota de RAM do Postgres (P0 real, observado nesta rodada):** a configuração inicial com 256 MB
+mostrou instabilidade real sob carga (sincronização dos 35 boards) — `recovery mode`, "the database
+system is not yet accepting connections", timeouts de conexão e health checks críticos. Após aumentar
+para **1024 MB (1 GB)**, a sincronização completa concluiu sem essas falhas (ver
+`docs/DEMO_CURRENT_STATE.md`, seção 5). **Não reduza a RAM do Postgres de volta para 256 MB sem repetir
+um teste de carga real** (sincronização completa dos 35 boards) — a instabilidade é reproduzível, não
+foi um evento isolado.
 
 ## 3. Definir os segredos (nunca no Git, nunca me informe os valores)
 

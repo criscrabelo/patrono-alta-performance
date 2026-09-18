@@ -1244,3 +1244,52 @@ ABERTO. Não expande H6 — apenas garante a integridade do requisito de evidên
 - **PG-20 continua ABERTO** — inalterado por esta correção (não relacionado à parametrização real de
   canal/responsável, que continua sendo a pendência específica do gate). Nenhum escopo de H8-H11 foi
   expandido.
+
+## QA — Rodada DEMO/STAGING (branch `claude/demo-staging-deploy`) — sincronização completa dos 35 boards e estabilização
+
+Ver `docs/DEMO_DEPLOY.md` e `docs/DEMO_CURRENT_STATE.md` para o contexto operacional completo. Esta
+seção registra apenas o que qualifica como evidência de QA — dados reportados pelo operador do ambiente
+(não observados diretamente por mim nesta rodada, já que não tenho acesso à infraestrutura Fly nem à
+rede do ambiente de demonstração a partir daqui).
+
+**Diferença importante — PASS técnico ≠ PASS visual:**
+- **PASS técnico** = suíte automatizada (`npm test`) passando, comportamento de backend/API verificado
+  por teste real (ex.: `runMondaySync()`, CAS, retry de erro transitório — cobertos em
+  `tests/legal-source-catalog.test.js`).
+- **PASS visual** = a tela correspondente foi de fato aberta em um navegador real (ou relatada por quem
+  abriu) e o que aparece na interface corresponde ao esperado.
+- Um item só deve ser marcado como **homologado** quando tiver as duas coisas. Ter só o PASS técnico
+  (o mais comum nesta rodada, já que não tenho acesso de rede ao ambiente demo publicado) não é
+  homologação visual — ver pendências abaixo.
+
+**Evidência de sincronização real (reportada pelo operador, não reexecutada por mim):**
+- Run id: `95f2d2cf-3c53-415c-aa70-5d308421a14b` — status `completed`, `0` falhas, 35 boards habilitados
+  processados com status `OK`.
+- Volumes reportados (amostra dos principais): Processos Judiciais 280 · Notificações Clientes 1129 ·
+  Honorários Extrajudiciais 917 · Contratos para Clientes/Compra e Venda 1430 · Distratos e
+  Desistências 48 · Análise Jurídica 411 · ADM Contratos Prestadores 457 · Obra Contrato Prestação de
+  Serviço 459 · Entrega de Chaves — Carpe Diem 135, Vita Village 116, Aurora Residence 290.
+- **PASS técnico** (integração/sincronização/CAS/retry): sim — cobertos por `npm test` real e pela
+  execução real reportada acima.
+- **PASS visual** dessas telas com os dados sincronizados: **não verificado por mim** — depende de quem
+  efetivamente abriu o navegador contra o ambiente publicado.
+
+**Pendências de QA visual conhecidas nesta rodada — NÃO marcar como homologado até validação visual real:**
+1. Card/evento "Comitê Executivo mensal" — correção de código aplicada (CTA "Abrir" condicionado a
+   destino real, roteamento `comite:<departamento>`) e cobertura por teste automatizado
+   (`tests/legal-ui-p0.test.js`); **PASS visual real no ambiente publicado ainda não confirmado**.
+2. Evento histórico de 12/08/2026 não deve mais aparecer como "próximo/upcoming" em setembro — correção
+   de código aplicada (`upcomingAgendaItems()`) e testada automaticamente; **PASS visual real no
+   ambiente publicado ainda não confirmado**.
+3. Tela Integrações — texto "sete quadros configurados" substituído por contagem dinâmica
+   (`state.mondayStatus.moduleCount`); **PASS visual real no ambiente publicado ainda não confirmado**.
+4. Subitems do Monday continuam fora do escopo integrado (limitação conhecida, não um bug).
+5. Sienge/CV/Clicksign continuam pendentes — sem mudança nesta rodada (ver `docs/INTEGRATIONS.md`).
+6. Google Calendar com OAuth real continua pendente — sem mudança nesta rodada (ver
+   `docs/INTEGRATIONS.md`).
+7. **Produção continua NO-GO** — nada nesta rodada altera o gate de produção (`docs/PRODUCTION_GATE.md`).
+
+Achados adicionais de CTA reportados, ainda sem correção nesta rodada (ver `docs/DEMO_CURRENT_STATE.md`,
+seção 7, para o detalhe): widget "Próximos compromissos" do Painel de TI tem a mesma classe de bug do
+item 2 acima (P1); `barList()` sem `disabled` quando sem módulo associado (P2); widget "Decisões"
+(`decision-list`) sem `target`/`value` quando populado (P2).

@@ -131,6 +131,23 @@ indisponibilidade do Calendar nunca afeta os itens de Legal Deadline na mesma re
 
 - **Monday.com:** ativo no piloto como fonte operacional/transitória de `processos`. Somente leitura,
   sem escrita externa, sem mudança de papel — permanece exatamente como descrito acima.
+
+### Atualização — rodada de demonstração/staging (branch `claude/demo-staging-deploy`)
+
+O catálogo de boards do Monday foi ampliado de 7 para **35 boards habilitados** (workspace Jurídico,
+id `1678965`), cobrindo Apoio Administrativo, Entrega de Chaves, Clientes, Contratos e Empresas,
+Processos, Projetos/Melhorias e Sócios — fonte única em `legal-source-catalog.js`, detalhado em
+`docs/DEMO_DEPLOY.md` (seção 3.1) e no estado operacional atual em `docs/DEMO_CURRENT_STATE.md`. Isso
+**não altera** nenhuma regra já homologada acima:
+- continua somente leitura, sem mutation, sem mudança de papel do Monday;
+- a regra D1 (**"apenas `processos` participa do fluxo de Legal Deadline, e mesmo assim só como
+  referência/contexto, nunca como origem automática"**) permanece integralmente em vigor — os 34 boards
+  adicionais são módulos de consulta jurídica (notificações, honorários, contratos, entrega de chaves
+  etc.), nenhum deles alimenta `legalDeadlines` automaticamente;
+- subitems dos boards Monday ("Subelementos de...") ainda **não** estão integrados — limitação
+  registrada em `docs/DEMO_DEPLOY.md`, seção 7;
+- uma duplicata de board (Entrega de Chaves Carpe Diem) permanece explicitamente desabilitada no
+  catálogo.
 - **Google Calendar:** adapter somente leitura implementado (`GET /api/calendar/status`,
   `GET /api/calendar/events`), integrado a `GET /api/my-week` com filtro pela mesma janela civil de
   Minha Semana. **Integração real bloqueada** por ausência de credenciais de OAuth do Google e de

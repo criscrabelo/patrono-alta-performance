@@ -1,5 +1,12 @@
 # 17 — Checklist de continuidade
 
+> **⚠️ Checklist de uma fase anterior do handoff (`docs/handoff-codex/`, fotografia histórica anterior
+> ao hardening H1–H7 e à rodada de demonstração/staging).** Vários itens abaixo já foram concluídos
+> desde então (PostgreSQL definitivo já decidido e implementado — ver `docs/DECISIONS.md`, ADR-001/
+> PROD-H1-01/PROD-H1B-01; RBAC, versionamento, login/MFA individuais já homologados nos hardenings H2/
+> H3). Preservado como registro histórico, sem reescrever os itens já concluídos. Para o checklist
+> operacional ATUAL antes de uma apresentação, ver `docs/DEMO_CURRENT_STATE.md`, seção 8.
+
 ## Preparar ambiente
 
 - [ ] Instalar Node.js 20 ou superior.
@@ -21,7 +28,10 @@
 ## Validar dados
 
 - [ ] Fazer cópia segura de `data/store.json` antes de qualquer migration.
-- [ ] Conferir volumes dos sete quadros contra o Monday.
+- [ ] Conferir volumes dos 35 boards habilitados contra o Monday (catálogo atual —
+      `legal-source-catalog.js`; exceção: 1 board duplicado permanece desabilitado, e subitems ainda não
+      são importados — ver `docs/DEMO_CURRENT_STATE.md`). *(item original desta lista dizia "sete
+      quadros" — número de uma fase anterior do catálogo, corrigido aqui para o valor atual.)*
 - [ ] Validar uma amostra de títulos e colunas por quadro.
 - [ ] Validar status, escopo, polo, responsáveis e datas dos processos.
 - [ ] Validar valores e competências de honorários.

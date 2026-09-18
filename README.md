@@ -8,7 +8,8 @@ Núcleo executável da plataforma corporativa multidepartamental, com Jurídico 
 > Demais documentos de referência: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) ·
 > [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md) · [`docs/PERMISSIONS.md`](docs/PERMISSIONS.md) ·
 > [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md) · [`docs/AI_GOVERNANCE.md`](docs/AI_GOVERNANCE.md) ·
-> [`docs/SECURITY.md`](docs/SECURITY.md) · [`docs/QA.md`](docs/QA.md).
+> [`docs/SECURITY.md`](docs/SECURITY.md) · [`docs/QA.md`](docs/QA.md). Estado operacional **atual** do
+> ambiente de demonstração (infra, sincronização, pendências): [`docs/DEMO_CURRENT_STATE.md`](docs/DEMO_CURRENT_STATE.md).
 
 ## Executar
 
@@ -18,7 +19,14 @@ Requer Node.js 20 ou superior:
 npm start
 ```
 
-Abra `http://localhost:3007`. O ambiente de homologação mantém a persistência local em `data/store.json`, com dados jurídicos sincronizados do Monday e orçamento importado. A migration PostgreSQL em `migrations/001_foundation.sql` está pronta para a migração definitiva assim que a credencial oficial do banco for configurada.
+Abra `http://localhost:3007`. **Isto descreve apenas a execução local sem `DATABASE_URL`** — o processo
+cai automaticamente no fallback local (`data/store.json`), útil para desenvolvimento e testes. Quando
+`DATABASE_URL` está configurada, o PostgreSQL passa a ser a persistência canônica (schema completo em
+`migrations/`, aplicado por `scripts/migrate.js`) — essa migração para PostgreSQL **já foi implementada**
+(Hardening H1A/H1B, ver `docs/PRODUCTION_GATE.md`) e está em uso real no ambiente de demonstração
+(`docs/DEMO_DEPLOY.md`; estado operacional atual consolidado em `docs/DEMO_CURRENT_STATE.md`). Isso não
+altera o status de produção: **produção continua NO-GO** (`docs/PRODUCTION_GATE.md`) até o hardening
+completo (H1–H11) ser fechado.
 
 ## Validar
 

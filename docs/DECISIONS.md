@@ -1709,6 +1709,60 @@ inalterado. PG-20 continua ABERTO, sem alteração da pendência específica já
 
 ---
 
+## 1.13. Demo/Staging — Decisão PROD-DEMO-01
+
+### PROD-DEMO-01 — Dimensionamento mínimo do PostgreSQL e desativação de autostop no ambiente de demonstração
+
+**Status: decisão OPERACIONAL de um ambiente temporário de demonstração (`claude/demo-staging-deploy`,
+`docs/DEMO_DEPLOY.md`), não uma decisão de arquitetura nem de gate de produção.** Não altera nem
+substitui PROD-H1-01/PROD-H1B-01 (persistência PostgreSQL canônica) nem PROD-GATE-01 (produção
+NO-GO, `docs/PRODUCTION_GATE.md`) — H11 (deploy/infraestrutura como código) continua em aberto.
+
+**Contexto.** Durante a estabilização do ambiente de demonstração para a apresentação ao Comitê
+Jurídico, dois problemas operacionais reais (não hipotéticos) foram observados e precisaram de decisão:
+
+1. **RAM insuficiente no Postgres do Fly.** Com a VM inicial de 256 MB, a sincronização completa dos 35
+   boards do catálogo Monday produziu instabilidade real e reproduzível: o banco entrou em `recovery
+   mode`, a aplicação recebeu "the database system is not yet accepting connections", houve timeouts de
+   conexão, e os health checks ficaram críticos. Isso, por sua vez, expôs (e foi a motivação real para
+   corrigir) dois problemas de código já tratados em rodadas anteriores desta mesma branch: ausência de
+   `pool.on('error', ...)` no pool do driver `pg` (client ocioso/checked-out emitindo `'error'` sem
+   listener virava `uncaughtException` e derrubava o processo) e conflito de CAS após um erro ambíguo de
+   conexão (uma escrita pode ter sido efetivada no Postgres sem o client receber a confirmação).
+2. **Autostop do Fly interrompendo uma sincronização em andamento.** Com `min_machines_running = 0`
+   (padrão de custo mínimo), o Fly autostopou a máquina no meio de uma sincronização real via SSH
+   ("App has excess capacity, autostopping machine" → `SIGINT`) — autostop mede tráfego HTTP, não
+   sessões SSH/scripts em execução.
+
+**Decisão.**
+1. Aumentar a RAM do Postgres do ambiente de demonstração de 256 MB para **1024 MB (1 GB)**. Após o
+   aumento, a mesma sincronização completa (35 boards) concluiu sem os sintomas acima.
+2. Definir `auto_stop_machines = false` e `min_machines_running = 1` em `fly.toml` (era
+   `auto_stop_machines = "stop"` / `min_machines_running = 0`) — a máquina do app fica sempre ativa
+   durante o período de sincronização/apresentação.
+
+**Justificativa.** Ambas são decisões de dimensionamento/operação de um ambiente temporário, reversíveis
+e sem impacto arquitetural — nenhuma delas altera código de negócio, schema, autenticação ou o gate de
+produção. Corrigir os bugs de código (`pool.on('error')`, reconciliação de CAS) sem também corrigir o
+dimensionamento de RAM deixaria o ambiente vulnerável ao mesmo incidente sob a próxima carga real; por
+isso as duas correções (código + infraestrutura) são registradas juntas aqui.
+
+**Consequência.** Custo do ambiente de demonstração aumenta enquanto essas configurações estiverem
+ativas (RAM maior do Postgres + máquina do app sempre ligada). Aceito deliberadamente apenas para o
+período de sincronização/apresentação — **não é uma recomendação de produção**, e produção continua
+exigindo dimensionamento próprio (fora do escopo desta decisão, depende de H11).
+
+**Reversível.** Sim, mas com uma condição explícita: reduzir a RAM do Postgres de volta para 256 MB
+**sem repetir um teste de carga real** (sincronização completa dos 35 boards) pode recriar o incidente
+observado — não reverter silenciosamente. Reverter `auto_stop_machines`/`min_machines_running` para os
+valores de custo mínimo é seguro a qualquer momento em que não houver sincronização/apresentação em
+andamento (ver `docs/DEMO_DEPLOY.md`, seção 8, e `docs/DEMO_CURRENT_STATE.md`).
+
+Esta decisão não altera D1/D4/D2-CLOSE/PROD-GATE-01/PROD-H1-01/PROD-H1B-01/PROD-H2-01/PROD-H3-01/
+PROD-H4-01/PROD-H5-01/PROD-H6-01/PROD-H7-01 já homologadas. `docs/MASTER_HANDOFF.md` intocado.
+
+---
+
 ## 2. ADRs de Engenharia — Fase 0 (Sprint 1)
 
 Decisões técnicas locais e reversíveis, permitidas pela v1.3 (§27, linhas D8/D9: "Não bloqueia decisão
